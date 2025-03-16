@@ -1,0 +1,40 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+.env/
+.venv/
+
+# IDE specific files
+.idea/
+.vscode/
+*.sublime-*
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local development settings
+.env
+.env.local
+
+# Logs
+*.log
+
+# Temporary files
+*.bak
+*.swp
+*~
+
+# OS specific
+.DS_Store

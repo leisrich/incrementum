@@ -1,0 +1,46 @@
+# requirements.txt
+
+# Core dependencies
+PyQt6==6.5.0        # UI framework with good Linux support
+SQLAlchemy==2.0.15  # ORM for database operations
+alembic==1.10.4     # Database migrations
+
+# Document processing
+pdfminer.six==20221105  # PDF text extraction
+PyPDF2==3.0.1           # PDF manipulation
+beautifulsoup4==4.12.2  # HTML parsing
+lxml==4.9.2             # XML/HTML processing
+ebooklib==0.18          # ePub handling
+markdown==3.4.3         # Markdown processing
+python-docx==0.8.11     # DOCX processing
+
+# Content extraction
+nltk==3.8.1          # Natural language processing
+scikit-learn==1.2.2  # Machine learning for content suggestions
+spacy==3.5.3         # Advanced NLP capabilities
+
+# Spaced repetition
+# Custom implementation of SM-18 algorithm (no direct package)
+
+# Data storage and sync
+appdirs==1.4.4      # Application directories
+python-dateutil==2.8.2  # Date manipulation
+requests==2.30.0    # HTTP for optional cloud sync
+
+# PDF processing and viewing
+pymupdf==1.22.3     # Fast PDF rendering and text extraction
+pytesseract==0.3.10 # OCR for scanned documents
+
+# Visualization
+matplotlib==3.7.1   # Data visualization
+networkx==3.1       # Graph visualization for knowledge networks
+pygraphviz==1.10    # Graph layout for concept maps
+
+# Testing
+pytest==7.3.1       # Testing framework
+pytest-qt==4.2.0    # Qt testing utilities
+
+# Development tools
+black==23.3.0       # Code formatting
+isort==5.12.0       # Import sorting
+pylint==2.17.4      # Linting
