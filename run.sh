@@ -49,4 +49,4 @@ fi
 
 # Run the application
 echo "Starting Incrementum..."
-python3 main.py
+python3.11 main.py

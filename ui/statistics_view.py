@@ -15,7 +15,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QDateTime
 from PyQt6.QtGui import QColor, QPen, QBrush, QPainter, QPainterPath
 from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QBarSeries, QBarSet
 
-from sqlalchemy import func, and_, extract
+from sqlalchemy import func, and_, extract, case
 from core.knowledge_base.models import (
     Document, Extract, LearningItem, ReviewLog, Category
 )

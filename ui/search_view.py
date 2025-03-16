@@ -10,9 +10,9 @@ from PyQt6.QtWidgets import (
     QGroupBox, QCheckBox, QRadioButton, QButtonGroup,
     QFormLayout, QSpinBox, QDateEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QCompleter, QMenu,
-    QSplitter, QApplication, QScrollArea
+    QSplitter, QApplication, QScrollArea, QDoubleSpinBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QDate, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QDate, QSize, QModelIndex, QPoint
 from PyQt6.QtGui import QIcon, QAction
 
 from core.knowledge_base.models import Document, Category, Extract, LearningItem, Tag

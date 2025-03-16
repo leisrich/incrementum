@@ -369,12 +369,31 @@ class TagManager:
             
             elif document.content_type in ['html', 'htm']:
                 from bs4 import BeautifulSoup
-                with open(document.file_path, 'r', encoding='utf-8') as f:
+                # Try different encodings for HTML files
+                for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                    try:
+                        with open(document.file_path, 'r', encoding=encoding) as f:
+                            soup = BeautifulSoup(f.read(), 'lxml')
+                            return soup.get_text(separator='\n')
+                    except UnicodeDecodeError:
+                        continue
+                
+                # Fallback to latin-1 if all else fails
+                with open(document.file_path, 'r', encoding='latin-1', errors='replace') as f:
                     soup = BeautifulSoup(f.read(), 'lxml')
                     return soup.get_text(separator='\n')
             
-            else:  # Plain text
-                with open(document.file_path, 'r', encoding='utf-8') as f:
+            else:  # Plain text or other formats (including EPUB)
+                # Try different encodings
+                for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                    try:
+                        with open(document.file_path, 'r', encoding=encoding) as f:
+                            return f.read()
+                    except UnicodeDecodeError:
+                        continue
+                
+                # Fallback to latin-1 with replacement if all else fails
+                with open(document.file_path, 'r', encoding='latin-1', errors='replace') as f:
                     return f.read()
                     
         except Exception as e:

@@ -1,4 +1,5 @@
-# ui/document_view.py
+# If the patching approach doesn't work, here's a complete replacement for document_view.py
+# Save this as ui/document_view.py.new and rename it if needed
 
 import os
 import logging
@@ -9,7 +10,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint
 from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat
 
 from core.knowledge_base.models import Document, Extract
@@ -93,6 +94,31 @@ class DocumentView(QWidget):
         self.splitter.setStretchFactor(1, 1)
         
         main_layout.addWidget(self.splitter)
+
+    def _load_epub(self):
+        """Load EPUB document content with proper encoding handling."""
+        try:
+            # Use the improved EPUB handler
+            from core.document_processor.handlers.epub_handler import EPUBHandler
+
+            handler = EPUBHandler()
+            content = handler.extract_content(self.document.file_path)
+
+            # Use markdown or HTML for display
+            display_content = content['markdown'] if content['markdown'] else content['text']
+
+            # Set document content
+            self.content_text = display_content
+
+            # Use setMarkdown if available (newer PyQt versions), otherwise use setText
+            if hasattr(self.content_edit, 'setMarkdown'):
+                self.content_edit.setMarkdown(display_content)
+            else:
+                self.content_edit.setText(display_content)
+
+        except Exception as e:
+            logger.exception(f"Error loading EPUB: {e}")
+            self.content_edit.setText(f"Error loading EPUB: {str(e)}")
     
     def _load_document(self):
         """Load document content."""
@@ -131,7 +157,7 @@ class DocumentView(QWidget):
             # For now, just extract text and display it
             from bs4 import BeautifulSoup
             
-            with open(self.document.file_path, 'r', encoding='utf-8') as file:
+            with open(self.document.file_path, 'r', encoding='utf-8', errors='replace') as file:
                 html_content = file.read()
             
             soup = BeautifulSoup(html_content, 'lxml')
@@ -147,8 +173,30 @@ class DocumentView(QWidget):
     def _load_text(self):
         """Load text document content."""
         try:
-            with open(self.document.file_path, 'r', encoding='utf-8') as file:
-                text = file.read()
+            # Try UTF-8 first
+            try:
+                with open(self.document.file_path, 'r', encoding='utf-8') as file:
+                    text = file.read()
+            except UnicodeDecodeError:
+                # If UTF-8 fails, try other common encodings
+                encodings = ['latin-1', 'windows-1252', 'iso-8859-1', 'cp1252']
+                
+                for encoding in encodings:
+                    try:
+                        with open(self.document.file_path, 'r', encoding=encoding) as file:
+                            text = file.read()
+                        logger.info(f"Successfully read file using {encoding} encoding")
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    # If all encodings fail, read as binary and decode as best as possible
+                    with open(self.document.file_path, 'rb') as file:
+                        binary_data = file.read()
+                    
+                    # Try to decode with errors='replace' to replace invalid characters
+                    text = binary_data.decode('utf-8', errors='replace')
+                    logger.warning("Using fallback decoding with replacement characters")
             
             self.content_text = text
             self.content_edit.setText(text)
@@ -250,7 +298,7 @@ class DocumentView(QWidget):
             f"Created {len(segments)} extracts from this document"
         )
     
-    @pyqtSlot(QTextCursor)
+    @pyqtSlot(QPoint)
     def _on_content_menu(self, pos):
         """Show context menu for content."""
         # Create menu

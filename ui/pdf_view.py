@@ -27,6 +27,7 @@ class PDFGraphicsView(QWidget):
     """Custom widget for displaying PDF pages with highlighting and annotation."""
     
     selectionChanged = pyqtSignal(str)
+    pageChangeRequest = pyqtSignal(int)  # New signal for page change
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,10 +36,12 @@ class PDFGraphicsView(QWidget):
         self.zoom_factor = 1.0
         self.page = None
         self.doc = None
-        self.highlights = []  # List of highlight rectangles (QRectF)
+        self.highlights = {}  # Dictionary mapping page numbers to highlight rectangles
         self.current_highlights = []  # Temporary highlights for current selection
         self.selected_text = ""
         self.text_page = None  # TextPage for the current page
+        self.current_page_num = 0
+        self.total_pages = 0
         
         # Set focus policy to receive keyboard events
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -55,7 +58,10 @@ class PDFGraphicsView(QWidget):
     def set_page(self, doc, page_number):
         """Set the current page to display."""
         self.doc = doc
-        if 0 <= page_number < len(doc):
+        self.total_pages = len(doc) if doc else 0
+        self.current_page_num = page_number
+        
+        if 0 <= page_number < self.total_pages:
             self.page = doc[page_number]
             self.render_page()
             self.update()
@@ -96,12 +102,14 @@ class PDFGraphicsView(QWidget):
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self.pixmap)
         
-        # Draw saved highlights
+        # Draw saved highlights for current page
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(QColor(255, 255, 0, 80)))  # Yellow with transparency
         
-        for highlight in self.highlights:
-            painter.drawRect(highlight)
+        # Get highlights for current page
+        if self.current_page_num in self.highlights:
+            for highlight in self.highlights[self.current_page_num]:
+                painter.drawRect(highlight)
         
         # Draw current selection
         painter.setBrush(QBrush(QColor(0, 120, 215, 80)))  # Blue with transparency
@@ -190,9 +198,13 @@ class PDFGraphicsView(QWidget):
 
     def add_highlight(self, text=None):
         """Add current selection to permanent highlights."""
+        # Initialize page highlights if not exists
+        if self.current_page_num not in self.highlights:
+            self.highlights[self.current_page_num] = []
+            
         if text is None:
             # Use current selection
-            self.highlights.extend(self.current_highlights)
+            self.highlights[self.current_page_num].extend(self.current_highlights)
         else:
             # Highlight specific text
             instances = self.page.search_for(text)
@@ -204,17 +216,18 @@ class PDFGraphicsView(QWidget):
                     (inst.x1 - inst.x0) * self.zoom_factor,
                     (inst.y1 - inst.y0) * self.zoom_factor
                 )
-                self.highlights.append(screen_rect)
+                self.highlights[self.current_page_num].append(screen_rect)
         
         self.update()
     
     def clear_highlights(self):
-        """Clear all highlights."""
-        self.highlights = []
+        """Clear all highlights on current page."""
+        if self.current_page_num in self.highlights:
+            self.highlights[self.current_page_num] = []
         self.update()
     
     def wheelEvent(self, event):
-        """Handle mouse wheel events for zooming."""
+        """Handle mouse wheel events for zooming and page navigation."""
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             # Zoom with Ctrl+Wheel
             delta = event.angleDelta().y()
@@ -224,8 +237,33 @@ class PDFGraphicsView(QWidget):
                 self.set_zoom(max(0.5, self.zoom_factor - 0.1))
             event.accept()
         else:
-            # Otherwise, let the parent handle scrolling
-            super().wheelEvent(event)
+            # Page navigation with wheel
+            delta = event.angleDelta().y()
+            if delta < 0 and self.current_page_num < self.total_pages - 1:
+                # Scroll down = next page
+                self.pageChangeRequest.emit(self.current_page_num + 1)
+                event.accept()
+            elif delta > 0 and self.current_page_num > 0:
+                # Scroll up = previous page
+                self.pageChangeRequest.emit(self.current_page_num - 1)
+                event.accept()
+            else:
+                super().wheelEvent(event)
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard navigation."""
+        if event.key() == Qt.Key.Key_Down or event.key() == Qt.Key.Key_Right or event.key() == Qt.Key.Key_Space:
+            if self.current_page_num < self.total_pages - 1:
+                self.pageChangeRequest.emit(self.current_page_num + 1)
+                event.accept()
+                return
+        elif event.key() == Qt.Key.Key_Up or event.key() == Qt.Key.Key_Left or event.key() == Qt.Key.Key_Backspace:
+            if self.current_page_num > 0:
+                self.pageChangeRequest.emit(self.current_page_num - 1)
+                event.accept()
+                return
+        
+        super().keyPressEvent(event)
 
 
 class PDFViewWidget(QWidget):
@@ -264,7 +302,7 @@ class PDFViewWidget(QWidget):
         
         # Page navigation
         self.prev_page_action = QAction("Previous Page", self)
-        self.prev_page_action.setShortcut(QKeySequence.MoveToPreviousPage)
+        self.prev_page_action.setShortcut(QKeySequence("PgUp"))
         self.prev_page_action.triggered.connect(self._on_prev_page)
         toolbar.addAction(self.prev_page_action)
         
@@ -279,7 +317,7 @@ class PDFViewWidget(QWidget):
         toolbar.addWidget(self.page_count_label)
         
         self.next_page_action = QAction("Next Page", self)
-        self.next_page_action.setShortcut(QKeySequence.MoveToNextPage)
+        self.next_page_action.setShortcut(QKeySequence("PgDown"))
         self.next_page_action.triggered.connect(self._on_next_page)
         toolbar.addAction(self.next_page_action)
         
@@ -324,6 +362,7 @@ class PDFViewWidget(QWidget):
         # Create PDF view widget
         self.pdf_view = PDFGraphicsView()
         self.pdf_view.selectionChanged.connect(self._on_selection_changed)
+        self.pdf_view.pageChangeRequest.connect(self._on_page_requested)
         
         # Set initial page
         if self.doc:
@@ -361,6 +400,10 @@ class PDFViewWidget(QWidget):
         splitter.addWidget(pdf_container)
         splitter.setStretchFactor(0, 1)  # Sidebar
         splitter.setStretchFactor(1, 3)  # PDF view
+        
+        # Make splitter handle more visible and user-friendly
+        splitter.setHandleWidth(8)
+        splitter.setChildrenCollapsible(False)
         
         main_layout.addWidget(splitter)
     
@@ -510,3 +553,11 @@ class PDFViewWidget(QWidget):
         
         # Update display
         self._update_bookmarks_list()
+
+    @pyqtSlot(int)
+    def _on_page_requested(self, page_number):
+        """Handle page change request from PDF view."""
+        if self.doc and 0 <= page_number < len(self.doc):
+            self.current_page = page_number
+            self.page_spin.setValue(self.current_page + 1)
+            self.pdf_view.set_page(self.doc, self.current_page)

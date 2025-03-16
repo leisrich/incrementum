@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QMessageBox, QMenu, QListWidget,
     QListWidgetItem, QDialog, QCheckBox, QTabWidget,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QSize, QModelIndex
 from PyQt6.QtGui import QAction, QIcon, QTextCursor, QColor
 from PyQt6.QtCore import QPoint
 
@@ -543,12 +543,11 @@ class ExtractView(QWidget):
                     f"Failed to delete extract: {str(e)}"
                 )
     
-    @pyqtSlot(QTableWidgetItem)
-    def _on_item_double_clicked(self, item):
+    @pyqtSlot(QModelIndex)
+    def _on_item_double_clicked(self, index):
         """Handle double-click on learning item."""
         # Get item ID
-        row = item.row()
-        item_id = self.items_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+        item_id = self.items_table.item(index.row(), 1).data(Qt.ItemDataRole.UserRole)
         
         # Open learning item
         self._open_learning_item(item_id)

@@ -4,7 +4,7 @@ import sys
 import logging
 from PyQt6.QtWidgets import QApplication
 from ui.main_window import MainWindow
-from core.knowledge_base.database import init_database
+from core.knowledge_base.database import initialize_database, create_session
 
 def setup_logging():
     """Configure application logging."""
@@ -25,7 +25,12 @@ def main():
     logger.info("Starting Incrementum application")
 
     # Initialize database
-    init_database()
+    try:
+        initialize_database()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        sys.exit(1)
     
     # Start Qt application
     app = QApplication(sys.argv)
