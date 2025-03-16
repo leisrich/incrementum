@@ -12,9 +12,9 @@ from PyQt6.QtWidgets import (
     QSplitter, QTabWidget, QToolBar, QStatusBar,
     QFileDialog, QMessageBox, QMenu, QTreeView, QListView,
     QLabel, QPushButton, QComboBox, QLineEdit,
-    QDockWidget, QInputDialog, QSizePolicy
+    QDockWidget, QInputDialog, QSizePolicy, QDialog
 )
-from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint
+from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread
 from PyQt6.QtGui import QIcon, QAction, QKeySequence, QPixmap
 
 from core.knowledge_base.models import init_database, Document, Category, Extract, LearningItem, Tag
@@ -26,6 +26,7 @@ from core.knowledge_base.tag_manager import TagManager
 from core.knowledge_base.export_manager import ExportManager
 from core.knowledge_network.network_builder import KnowledgeNetworkBuilder
 from core.utils.settings_manager import SettingsManager
+from core.spaced_repetition.queue_manager import QueueManager
 
 from .document_view import DocumentView
 from .pdf_view import PDFViewWidget
@@ -45,6 +46,9 @@ from .models.category_model import CategoryModel
 from core.utils.shortcuts import ShortcutManager
 from .arxiv_dialog import ArxivDialog
 from core.document_processor.summarizer import SummarizeDialog
+from .queue_view import QueueView
+from ui.dialogs.url_import_dialog import URLImportDialog
+from ui.dialogs.content_processor_dialog import ContentProcessorDialog
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +99,7 @@ class MainWindow(QMainWindow):
         self.export_manager = ExportManager(self.db_session)
         self.network_builder = KnowledgeNetworkBuilder(self.db_session)
         self.settings_manager = SettingsManager()
+        self.queue_manager = QueueManager(self.db_session)
         
         # Set window properties
         self.setWindowTitle("Incrementum - Incremental Learning System")
@@ -186,6 +191,11 @@ class MainWindow(QMainWindow):
         self.action_toggle_stats_panel.setShortcut(ShortcutManager.TOGGLE_STATS_PANEL)
         self.action_toggle_stats_panel.triggered.connect(self._on_toggle_stats_panel)
         
+        self.action_toggle_queue_panel = QAction("Show Queue Panel", self)
+        self.action_toggle_queue_panel.setCheckable(True)
+        self.action_toggle_queue_panel.setChecked(False)
+        self.action_toggle_queue_panel.triggered.connect(self._on_toggle_queue_panel)
+        
         # Learning menu actions
         self.action_start_review = QAction("Start Review Session", self)
         self.action_start_review.setShortcut(ShortcutManager.START_REVIEW)
@@ -228,6 +238,25 @@ class MainWindow(QMainWindow):
         self.action_summarize_document = QAction("Summarize Document...", self)
         self.action_summarize_document.triggered.connect(self._on_summarize_document)
         self.action_summarize_document.setEnabled(False)
+
+        # Tools menu actions
+        self.action_view_queue = QAction("Reading Queue", self)
+        self.action_view_queue.setShortcut(QKeySequence("Ctrl+Q"))
+        self.action_view_queue.triggered.connect(self._on_view_queue)
+        
+        self.action_read_next = QAction("Read Next Document", self)
+        self.action_read_next.setShortcut(QKeySequence("Ctrl+Shift+N"))
+        self.action_read_next.triggered.connect(self._on_read_next)
+
+        # Dock management actions
+        self.action_tile_docks = QAction("Tile PDF Viewers", self)
+        self.action_tile_docks.triggered.connect(self._on_tile_docks)
+        
+        self.action_cascade_docks = QAction("Cascade PDF Viewers", self)
+        self.action_cascade_docks.triggered.connect(self._on_cascade_docks)
+        
+        self.action_tab_docks = QAction("Tab PDF Viewers", self)
+        self.action_tab_docks.triggered.connect(self._on_tab_docks)
 
     @pyqtSlot()
     def _on_save(self):
@@ -302,50 +331,118 @@ class MainWindow(QMainWindow):
             
    
     def _create_menu_bar(self):
-        """Create the main menu bar."""
-        menu_bar = self.menuBar()
+        """Create the menu bar with main menus."""
+        self.menu_bar = self.menuBar()
         
         # File menu
-        file_menu = menu_bar.addMenu("&File")
-        file_menu.addAction(self.action_import_file)
-        file_menu.addAction(self.action_import_url)
-        file_menu.addSeparator()
+        self.file_menu = self.menu_bar.addMenu("&File")
+        
+        # Add new extract action
+        self.action_new_extract = QAction("New &Extract...", self)
+        self.action_new_extract.setShortcut(QKeySequence("Ctrl+E"))
+        self.action_new_extract.triggered.connect(self._on_new_extract)
+        self.file_menu.addAction(self.action_new_extract)
+        
+        # Add new learning item action
+        self.action_new_item = QAction("New Learning &Item...", self)
+        self.action_new_item.setShortcut(QKeySequence("Ctrl+I"))
+        self.action_new_item.triggered.connect(self._on_new_learning_item)
+        self.file_menu.addAction(self.action_new_item)
+        
+        self.file_menu.addSeparator()
+        
+        # Add save action
+        self.action_save = QAction("&Save", self)
+        self.action_save.setShortcut(QKeySequence.StandardKey.Save)
+        self.action_save.triggered.connect(self._on_save)
+        self.file_menu.addAction(self.action_save)
+        
+        self.file_menu.addSeparator()
+        
+        # Import menu - add as a separate top-level menu
+        self.import_menu = self.menu_bar.addMenu("&Import")
+        
+        # Add import from file action
+        self.action_import_file = QAction("Import from &File...", self)
+        self.action_import_file.setStatusTip("Import a document from a file")
+        self.action_import_file.triggered.connect(self._on_import_file)
+        self.import_menu.addAction(self.action_import_file)
+        
+        # Add import from URL action
+        self.action_import_url = QAction("Import from &URL...", self)
+        self.action_import_url.setStatusTip("Import a document from a URL")
+        self.action_import_url.triggered.connect(self._on_import_url)
+        self.import_menu.addAction(self.action_import_url)
+        
+        # Add import from ArXiv action
+        self.action_import_arxiv = QAction("Import from &ArXiv...", self)
+        self.action_import_arxiv.setStatusTip("Import a paper from ArXiv")
+        self.action_import_arxiv.triggered.connect(self._on_import_arxiv)
+        self.import_menu.addAction(self.action_import_arxiv)
+        
+        # Add import knowledge action
+        self.action_import_knowledge = QAction("Import &Knowledge Base...", self)
+        self.action_import_knowledge.setStatusTip("Import knowledge from a backup file")
+        self.action_import_knowledge.triggered.connect(self._on_import_knowledge)
+        self.import_menu.addAction(self.action_import_knowledge)
+        
+        # Export menu - remains in File menu
+        self.file_menu.addSeparator()
+        
+        # Add export knowledge action
+        self.action_export_knowledge = QAction("&Export Knowledge Base...", self)
+        self.action_export_knowledge.triggered.connect(self._on_export_knowledge)
+        self.file_menu.addAction(self.action_export_knowledge)
+        
+        self.file_menu.addSeparator()
         
         # Recent documents submenu
         self.recent_menu = QMenu("Recent Documents", self)
-        file_menu.addMenu(self.recent_menu)
-        file_menu.addSeparator()
+        self.file_menu.addMenu(self.recent_menu)
         
-        # Import/Export submenu
-        import_export_menu = file_menu.addMenu("Import/Export")
-        import_export_menu.addAction(self.action_import_knowledge)
-        import_export_menu.addAction(self.action_export_knowledge)
+        self.file_menu.addSeparator()
         
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_exit)
+        # Add exit action
+        self.action_exit = QAction("E&xit", self)
+        self.action_exit.setShortcut(QKeySequence.StandardKey.Quit)
+        self.file_menu.addAction(self.action_exit)
         
         # Edit menu
-        edit_menu = menu_bar.addMenu("&Edit")
+        edit_menu = self.menu_bar.addMenu("&Edit")
         edit_menu.addAction(self.action_new_extract)
         edit_menu.addAction(self.action_new_learning_item)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_manage_tags)
         
         # View menu
-        self.view_menu = menu_bar.addMenu("&View")
-        self.view_menu.addAction(self.action_toggle_category_panel)
-        self.view_menu.addAction(self.action_toggle_search_panel)
-        self.view_menu.addAction(self.action_toggle_stats_panel)
+        self.view_menu = self.menu_bar.addMenu("&View")
+        
+        # Panel toggles
+        panels_menu = self.view_menu.addMenu("Panels")
+        panels_menu.addAction(self.action_toggle_category_panel)
+        panels_menu.addAction(self.action_toggle_search_panel)
+        panels_menu.addAction(self.action_toggle_stats_panel)
+        panels_menu.addAction(self.action_toggle_queue_panel)  # Add queue panel toggle
+        
+        # Add dock arrangement actions
+        self.view_menu.addSeparator()
+        self.view_menu.addAction(self.action_tile_docks)
+        self.view_menu.addAction(self.action_cascade_docks)
+        self.view_menu.addAction(self.action_tab_docks)
         
         # Learning menu
-        learning_menu = menu_bar.addMenu("&Learning")
+        learning_menu = self.menu_bar.addMenu("&Learning")
         learning_menu.addAction(self.action_start_review)
         learning_menu.addSeparator()
         learning_menu.addAction(self.action_browse_extracts)
         learning_menu.addAction(self.action_browse_learning_items)
         
         # Tools menu
-        tools_menu = menu_bar.addMenu("&Tools")
+        tools_menu = self.menu_bar.addMenu("&Tools")
+        tools_menu.addAction(self.action_start_review)
+        tools_menu.addAction(self.action_view_queue)
+        tools_menu.addAction(self.action_read_next)
+        tools_menu.addSeparator()
         tools_menu.addAction(self.action_search)
         tools_menu.addAction(self.action_view_network)
         tools_menu.addSeparator()
@@ -355,24 +452,31 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.action_summarize_document)
         
         # Help menu
-        help_menu = menu_bar.addMenu("&Help")
+        help_menu = self.menu_bar.addMenu("&Help")
         help_action = help_menu.addAction("Documentation")
         about_action = help_menu.addAction("About")
         about_action.triggered.connect(self._on_about)
     
     def _create_tool_bar(self):
-        """Create the main toolbar."""
-        self.tool_bar = QToolBar("Main Toolbar", self)
-        self.tool_bar.setMovable(False)
+        """Create the toolbar with main actions."""
+        self.tool_bar = QToolBar()
         self.tool_bar.setIconSize(QSize(24, 24))
+        self.tool_bar.setMovable(False)
         
+        # Add common actions
         self.tool_bar.addAction(self.action_import_file)
-        self.tool_bar.addAction(self.action_import_url)
+        self.tool_bar.addAction(self.action_save)
+        self.tool_bar.addSeparator()
+        self.tool_bar.addAction(self.action_add_bookmark)
+        self.tool_bar.addAction(self.action_highlight)
+        self.tool_bar.addSeparator()
+        self.tool_bar.addAction(self.action_generate_items)
         self.tool_bar.addSeparator()
         self.tool_bar.addAction(self.action_start_review)
+        self.tool_bar.addAction(self.action_view_queue)
+        self.tool_bar.addAction(self.action_read_next)
         self.tool_bar.addSeparator()
         self.tool_bar.addAction(self.action_search)
-        self.tool_bar.addAction(self.action_statistics)
         
         self.addToolBar(self.tool_bar)
     
@@ -466,7 +570,22 @@ class MainWindow(QMainWindow):
         self.stats_dock.setWidget(self.stats_view)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.stats_dock)
         self.stats_dock.hide()  # Initially hidden
-    
+        
+        # Queue dock
+        self.queue_dock = QDockWidget("Reading Queue", self)
+        self.queue_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
+        
+        # Create queue widget
+        self.queue_view = QueueView(self.db_session)
+        self.queue_view.documentSelected.connect(self._open_document)
+        
+        # Set as dock widget content
+        self.queue_dock.setWidget(self.queue_view)
+        
+        # Initially hidden
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.queue_dock)
+        self.queue_dock.setVisible(False)
+
     def _load_recent_documents(self):
         """Load and populate recent documents menu."""
         # This is a simplified version - in a real app, we'd load from settings
@@ -546,46 +665,198 @@ class MainWindow(QMainWindow):
     
     @pyqtSlot()
     def _on_import_url(self):
-        """Handler for importing from URL."""
-        # Show options dialog
-        dialog_items = ["Web URL", "ArXiv Paper"]
-        import_type, ok = QInputDialog.getItem(
-            self, "Import from URL", "Select import type:", dialog_items, 0, False
-        )
+        """Import a document from a URL."""
+        dialog = URLImportDialog(parent=self)
         
-        if not ok:
-            return
-            
-        if import_type == "ArXiv Paper":
-            # Show ArXiv dialog
-            arxiv_dialog = ArxivDialog(self.document_processor, self.db_session, self)
-            arxiv_dialog.paperImported.connect(self._on_arxiv_paper_imported)
-            arxiv_dialog.exec()
-        else:
-            # Import from generic URL
-            url, ok = QInputDialog.getText(
-                self, "Import from URL", "Enter URL:"
-            )
-            
-            if ok and url:
-                self.status_label.setText(f"Importing from URL: {url}...")
+        if dialog.exec():
+            url = dialog.url_line.text().strip()
+            if not url:
+                return
                 
-                # This would be done in a background thread in a real app
-                document = self.document_processor.import_from_url(url)
+            # Check if we should use Jina.ai
+            use_jina = dialog.use_jina_checkbox.isChecked()
+            
+            # Check if we should process with LLM
+            process_with_llm = dialog.process_with_llm_checkbox.isChecked()
+            
+            # Set up progress bar
+            self.statusBar().showMessage(f"Downloading document from {url}...")
+            
+            # Create a background thread for downloading
+            class DownloadThread(QThread):
+                downloadFinished = pyqtSignal(int)  # document_id
+                downloadFailed = pyqtSignal(str)    # error message
+                contentReady = pyqtSignal(str, dict)  # content, metadata
                 
-                if document:
-                    self.status_label.setText(f"Imported: {document.title}")
-                    self._load_recent_documents()
-                    self._update_status()
+                def __init__(self, url, use_jina, process_with_llm, session, settings_manager):
+                    super().__init__()
+                    self.url = url
+                    self.use_jina = use_jina
+                    self.process_with_llm = process_with_llm
+                    self.session = session
+                    self.settings_manager = settings_manager
+                
+                def run(self):
+                    from core.document_processor.document_importer import DocumentImporter
+                    importer = DocumentImporter(self.session)
                     
-                    # Open the document
-                    self._open_document(document.id)
+                    try:
+                        # If using Jina.ai, import through JinaWebHandler
+                        if self.use_jina:
+                            from core.document_processor.handlers.jina_web_handler import JinaWebHandler
+                            handler = JinaWebHandler(self.settings_manager)
+                            
+                            # Check if we should process with LLM
+                            if self.process_with_llm:
+                                # First download the content
+                                temp_file, metadata = handler.download_from_url(self.url)
+                                
+                                if not temp_file:
+                                    self.downloadFailed.emit("Failed to download content.")
+                                    return
+                                
+                                # Extract the content
+                                content_data = handler.extract_content(temp_file)
+                                
+                                # Get the text content
+                                content = content_data.get('text', '')
+                                
+                                # Send the content to the main thread for processing with LLM
+                                self.contentReady.emit(content, metadata)
+                                return
+                            else:
+                                # Regular Jina import
+                                document_id = importer.import_from_url(self.url, handler=handler)
+                                if document_id:
+                                    self.downloadFinished.emit(document_id)
+                                else:
+                                    self.downloadFailed.emit("Failed to import document.")
+                        else:
+                            # Use regular URL import
+                            document_id = importer.import_from_url(self.url)
+                            if document_id:
+                                self.downloadFinished.emit(document_id)
+                            else:
+                                self.downloadFailed.emit("Failed to import document.")
+                    except Exception as e:
+                        self.downloadFailed.emit(str(e))
+            
+            # Create and start the thread
+            self.download_thread = DownloadThread(
+                url, 
+                use_jina, 
+                process_with_llm,
+                self.db_session, 
+                self.settings_manager
+            )
+            self.download_thread.downloadFinished.connect(self._on_url_download_finished)
+            self.download_thread.downloadFailed.connect(self._on_url_download_failed)
+            self.download_thread.contentReady.connect(self._on_content_ready)
+            self.download_thread.start()
+    
+    @pyqtSlot(int)
+    def _on_url_download_finished(self, document_id):
+        """Handle successful URL download."""
+        self.statusBar().showMessage("Document imported successfully.")
+        
+        # Open the document
+        self._open_document(document_id)
+        
+        # Suggest tags if enabled
+        if self.settings_manager.get_setting("document", "auto_suggest_tags", True):
+            self._auto_suggest_document_tags(document_id)
+    
+    @pyqtSlot(str)
+    def _on_url_download_failed(self, error_message):
+        """Handle failed URL download."""
+        self.statusBar().showMessage("Import failed.")
+        
+        QMessageBox.warning(
+            self, "Import Error", 
+            f"Failed to import document from URL: {error_message}"
+        )
+    
+    @pyqtSlot(str, dict)
+    def _on_content_ready(self, content, metadata):
+        """Handle content ready from background thread."""
+        self.statusBar().showMessage("Content downloaded, processing with LLM...")
+        
+        # Show the content processor dialog in the main thread
+        dialog = ContentProcessorDialog(content, self.settings_manager, self)
+        
+        # Show the dialog and get result
+        if dialog.exec():
+            processed_content = dialog.get_processed_content()
+            
+            if processed_content:
+                # Save the processed content to a new file
+                import tempfile
+                import os
+                
+                fd, processed_file = tempfile.mkstemp(suffix='.txt')
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(processed_content)
+                
+                # Create a new document with the processed content
+                document = Document(
+                    title=metadata.get('title', 'Untitled') + " (Processed)",
+                    author=metadata.get('author', ''),
+                    file_path=processed_file,
+                    content_type="processed_text",
+                    source_url=metadata.get('source_url', '')
+                )
+                
+                # Add to session
+                self.db_session.add(document)
+                self.db_session.commit()
+                
+                # Open the document
+                self._open_document(document.id)
+                
+                # Auto suggest tags if enabled
+                auto_suggest = self.settings_manager.get_setting("document", "auto_suggest_tags", True)
+                if auto_suggest:
+                    self._auto_suggest_document_tags(document.id)
+            else:
+                # User canceled or error occurred, try regular import
+                self.statusBar().showMessage("LLM processing canceled, falling back to regular import...")
+                
+                # Import the document normally
+                from core.document_processor.document_importer import DocumentImporter
+                importer = DocumentImporter(self.db_session)
+                
+                try:
+                    # Create a JinaWebHandler and import
+                    from core.document_processor.handlers.jina_web_handler import JinaWebHandler
+                    handler = JinaWebHandler(self.settings_manager)
+                    
+                    document_id = importer.import_from_url(metadata.get('source_url', ''), handler=handler)
+                    if document_id:
+                        self._on_url_download_finished(document_id)
+                    else:
+                        self._on_url_download_failed("Failed to import document.")
+                except Exception as e:
+                    self._on_url_download_failed(str(e))
+        else:
+            # User canceled dialog, fall back to regular import
+            self.statusBar().showMessage("LLM processing canceled, falling back to regular import...")
+            
+            # Import the document normally
+            from core.document_processor.document_importer import DocumentImporter
+            importer = DocumentImporter(self.db_session)
+            
+            try:
+                # Create a JinaWebHandler and import
+                from core.document_processor.handlers.jina_web_handler import JinaWebHandler
+                handler = JinaWebHandler(self.settings_manager)
+                
+                document_id = importer.import_from_url(metadata.get('source_url', ''), handler=handler)
+                if document_id:
+                    self._on_url_download_finished(document_id)
                 else:
-                    QMessageBox.warning(
-                        self, "Import Failed", 
-                        f"Failed to import from URL: {url}"
-                    )
-                    self.status_label.setText("Import failed")
+                    self._on_url_download_failed("Failed to import document.")
+            except Exception as e:
+                self._on_url_download_failed(str(e))
     
     @pyqtSlot()
     def _on_import_knowledge(self):
@@ -977,6 +1248,14 @@ class MainWindow(QMainWindow):
         else:
             self.stats_dock.hide()
     
+    @pyqtSlot(bool)
+    def _on_toggle_queue_panel(self, checked):
+        """Handler for toggling queue panel visibility."""
+        if checked:
+            self.queue_dock.show()
+        else:
+            self.queue_dock.hide()
+    
     @pyqtSlot(QModelIndex)
     def _on_category_selected(self, index):
         """Handler for category selection."""
@@ -1243,11 +1522,94 @@ class MainWindow(QMainWindow):
     
     @pyqtSlot(int)
     def _on_tab_close_requested(self, index):
-        """Handler for tab close request."""
-        if index > 0:  # Don't close the home tab
-            widget = self.tab_widget.widget(index)
-            self.tab_widget.removeTab(index)
-            widget.deleteLater()
+        """Handle tab close request."""
+        widget = self.tab_widget.widget(index)
+        
+        # Check if widget is a document view
+        if isinstance(widget, DocumentView):
+            # Get document ID
+            document_id = widget.document.id
+            
+            # Prompt for rating if this is a document
+            self._prompt_document_rating(document_id)
+        
+        # Remove tab
+        self.tab_widget.removeTab(index)
+        widget.deleteLater()
+
+    def _prompt_document_rating(self, document_id):
+        """Prompt the user to rate a document for scheduling."""
+        # Get document
+        document = self.db_session.query(Document).get(document_id)
+        if not document:
+            return
+        
+        # Create rating dialog
+        rating_dialog = QDialog(self)
+        rating_dialog.setWindowTitle(f"Rate Document: {document.title}")
+        rating_dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(rating_dialog)
+        
+        # Instruction label
+        label = QLabel(
+            f"How difficult was this document to understand?\n"
+            f"This will schedule it for future review."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        
+        # Rating buttons
+        rating_layout = QHBoxLayout()
+        
+        ratings = [
+            ("Hard/Forgot (1)", 1),
+            ("Difficult (2)", 2),
+            ("Good (3)", 3),
+            ("Easy (4)", 4),
+            ("Very Easy (5)", 5)
+        ]
+        
+        for text, value in ratings:
+            button = QPushButton(text)
+            button.clicked.connect(lambda checked, r=value: self._on_document_rated(document_id, r, rating_dialog))
+            rating_layout.addWidget(button)
+        
+        layout.addLayout(rating_layout)
+        
+        # Skip button
+        skip_layout = QHBoxLayout()
+        skip_layout.addStretch()
+        
+        skip_button = QPushButton("Skip Rating")
+        skip_button.clicked.connect(rating_dialog.reject)
+        skip_layout.addWidget(skip_button)
+        
+        layout.addLayout(skip_layout)
+        
+        # Show dialog
+        rating_dialog.exec()
+    
+    def _on_document_rated(self, document_id, rating, dialog):
+        """Handle document rating."""
+        # Schedule document
+        result = self.queue_manager.schedule_document(document_id, rating)
+        
+        if result:
+            # Show scheduling info
+            QMessageBox.information(
+                self, "Document Scheduled", 
+                f"Document rated as {rating}/5.\n"
+                f"Next review scheduled for {result['next_reading_date'].strftime('%Y-%m-%d')}."
+            )
+        else:
+            QMessageBox.warning(
+                self, "Error", 
+                f"Failed to schedule document."
+            )
+        
+        # Close dialog
+        dialog.accept()
     
     @pyqtSlot()
     def _on_start_review(self):
@@ -1520,3 +1882,40 @@ class MainWindow(QMainWindow):
                 self.action_summarize_document.setEnabled(False)
         else:
             self.action_summarize_document.setEnabled(False)
+
+    @pyqtSlot()
+    def _on_view_queue(self):
+        """Handler for viewing the reading queue."""
+        # Show the queue dock
+        self.queue_dock.show()
+        self.action_toggle_queue_panel.setChecked(True)
+        
+        # Focus the queue widget
+        self.queue_view.setFocus()
+    
+    @pyqtSlot()
+    def _on_read_next(self):
+        """Handler for reading the next document in the queue."""
+        # Get next document(s)
+        next_docs = self.queue_manager.get_next_document(count=1)
+        
+        if next_docs:
+            # Open the document
+            self._open_document(next_docs[0].id)
+        else:
+            QMessageBox.information(
+                self, "No Documents", 
+                "There are no documents in the queue."
+            )
+
+    @pyqtSlot()
+    def _on_import_arxiv(self):
+        """Handler for importing from ArXiv."""
+        # Create dialog
+        arxiv_dialog = ArxivDialog(self.document_processor, self.db_session, self)
+        
+        # Show dialog
+        if arxiv_dialog.exec():
+            # Dialog will handle the import directly
+            self._load_recent_documents()
+            self._update_status()

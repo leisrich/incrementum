@@ -62,6 +62,14 @@ class Document(Base):
     processing_progress = Column(Float, default=0.0)  # 0-100%
     category_id = Column(Integer, ForeignKey('categories.id'))
     
+    # Queue management fields
+    priority = Column(Integer, default=50)  # 1-100 scale
+    next_reading_date = Column(DateTime, nullable=True)  # When to read next
+    last_reading_date = Column(DateTime, nullable=True)  # When last read
+    reading_count = Column(Integer, default=0)  # Number of times read
+    stability = Column(Float, nullable=True)  # Stability for FSRS algorithm
+    difficulty = Column(Float, nullable=True)  # Difficulty for FSRS algorithm
+    
     # Relationships
     category = relationship("Category", back_populates="documents")
     extracts = relationship("Extract", back_populates="document", cascade="all, delete-orphan")

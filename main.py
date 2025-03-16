@@ -5,6 +5,7 @@ import logging
 from PyQt6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 from core.knowledge_base.database import initialize_database, create_session
+from core.knowledge_base.database_migration import migrate_database
 
 def setup_logging():
     """Configure application logging."""
@@ -26,6 +27,7 @@ def main():
 
     # Initialize database
     try:
+        # Initialize database and run migrations
         initialize_database()
         logger.info("Database initialized successfully")
     except Exception as e:

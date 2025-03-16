@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QTextEdit, QComboBox, QSpinBox,
     QGroupBox, QFormLayout, QTabWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialog, QMessageBox,
-    QRadioButton, QButtonGroup, QCheckBox
+    QRadioButton, QButtonGroup, QCheckBox, QDoubleSpinBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor
@@ -155,6 +155,25 @@ class LearningItemEditor(QWidget):
             self.auto_mode_combo.addItem("Template-based generation", "template")
             options_layout.addWidget(self.auto_mode_combo)
             
+            # AI Provider selection (only show when AI mode is selected)
+            self.provider_label = QLabel("Provider:")
+            options_layout.addWidget(self.provider_label)
+            
+            self.provider_combo = QComboBox()
+            # We'll populate this from the AI_PROVIDERS in summarizer.py
+            try:
+                from core.document_processor.summarizer import AI_PROVIDERS
+                for provider_id, provider_info in AI_PROVIDERS.items():
+                    self.provider_combo.addItem(provider_info["name"], provider_id)
+            except ImportError:
+                # Fallback if we can't import AI_PROVIDERS
+                self.provider_combo.addItem("OpenAI", "openai")
+                self.provider_combo.addItem("Claude", "anthropic")
+                self.provider_combo.addItem("OpenRouter", "openrouter")
+                self.provider_combo.addItem("Google Gemini", "google")
+            
+            options_layout.addWidget(self.provider_combo)
+            
             # Question count
             options_layout.addWidget(QLabel("Questions:"))
             self.question_count = QSpinBox()
@@ -169,6 +188,9 @@ class LearningItemEditor(QWidget):
             
             generator_layout.addLayout(options_layout)
             
+            # Connect mode change to update UI
+            self.auto_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+            
             # Results list
             self.generation_results = QTableWidget()
             self.generation_results.setColumnCount(3)
@@ -180,6 +202,9 @@ class LearningItemEditor(QWidget):
             generator_layout.addWidget(self.generation_results)
             
             basic_layout.addWidget(generator_group)
+            
+            # Initial UI state based on mode
+            self._on_mode_changed()
         
         content_tabs.addTab(basic_tab, "Basic")
         
@@ -336,6 +361,15 @@ class LearningItemEditor(QWidget):
             self.answer_edit.setPlaceholderText("Enter the text that goes in place of [...]")
     
     @pyqtSlot()
+    def _on_mode_changed(self):
+        """Handle content generation mode change."""
+        if hasattr(self, 'auto_mode_combo') and hasattr(self, 'provider_label') and hasattr(self, 'provider_combo'):
+            # Show/hide provider selection based on mode
+            use_ai = self.auto_mode_combo.currentData() == "ai"
+            self.provider_label.setVisible(use_ai)
+            self.provider_combo.setVisible(use_ai)
+    
+    @pyqtSlot()
     def _on_generate(self):
         """Generate content suggestions."""
         if not self.extract:
@@ -350,19 +384,30 @@ class LearningItemEditor(QWidget):
         
         # Generate content based on mode
         if mode == "ai":
-            # AI-assisted generation
-            if self.qa_radio.isChecked():
-                items = self.nlp_extractor.generate_qa_pairs(self.extract_id, max_pairs=count)
+            # Get API configuration
+            api_config = self._get_api_config()
+            
+            if not api_config or not api_config.get('api_key'):
+                # Prompt to set API key
+                self._prompt_for_api_key()
+                api_config = self._get_api_config()
+                
+                # If still no API key, fall back to template-based
+                if not api_config or not api_config.get('api_key'):
+                    QMessageBox.warning(
+                        self, "No API Key", 
+                        "No API key set for the selected provider. Falling back to template-based generation."
+                    )
+                    items = self._generate_with_templates(count)
+                else:
+                    # AI-assisted generation with the configured provider
+                    items = self._generate_with_ai(count, api_config)
             else:
-                items = self.nlp_extractor.generate_cloze_deletions(self.extract_id, max_items=count)
+                # AI-assisted generation with the configured provider
+                items = self._generate_with_ai(count, api_config)
         else:
             # Template-based generation
-            if self.qa_radio.isChecked():
-                # Simple template-based QA generation
-                items = self._generate_template_qa(count)
-            else:
-                # Simple template-based cloze generation
-                items = self._generate_template_cloze(count)
+            items = self._generate_with_templates(count)
         
         # Show results
         for i, item in enumerate(items):
@@ -382,126 +427,98 @@ class LearningItemEditor(QWidget):
             answer_item = QTableWidgetItem(item.answer)
             self.generation_results.setItem(i, 2, answer_item)
     
-    def _generate_template_qa(self, count: int) -> List[LearningItem]:
-        """Generate template-based question-answer pairs."""
-        if not self.extract:
-            return []
-        
-        # Split extract content into sentences
-        import nltk
-        try:
-            sentences = nltk.sent_tokenize(self.extract.content)
-        except:
-            # Fallback if NLTK not available
-            sentences = self.extract.content.split('. ')
-        
-        # Simple templates
-        templates = [
-            "What is {}?",
-            "Explain {}.",
-            "Define {}.",
-            "Describe {}.",
-            "What are the characteristics of {}?",
-            "How would you explain {}?"
-        ]
-        
-        # Generate items
-        items = []
-        
-        # Extract key terms
-        key_concepts = self.nlp_extractor.identify_key_concepts(
-            self.extract.content, num_concepts=min(count*2, 10)
-        )
-        
-        import random
-        
-        for i in range(min(count, len(key_concepts))):
-            concept = key_concepts[i]
-            term = concept['text']
-            
-            # Find a sentence containing this term
-            context = ""
-            for sentence in sentences:
-                if term.lower() in sentence.lower():
-                    context = sentence
-                    break
-            
-            if not context:
-                context = self.extract.content[:200] + "..."
-            
-            # Create question using template
-            template = random.choice(templates)
-            question = template.format(term)
-            
-            # Create item
-            item = LearningItem(
-                extract_id=self.extract_id,
-                item_type='qa',
-                question=question,
-                answer=context,
-                priority=self.extract.priority
-            )
-            
-            items.append(item)
-        
-        return items
+    def _generate_with_ai(self, count, api_config):
+        """Generate items using AI with the specified configuration."""
+        if self.qa_radio.isChecked():
+            return self.nlp_extractor.generate_qa_pairs(self.extract_id, max_pairs=count, ai_config=api_config)
+        else:
+            return self.nlp_extractor.generate_cloze_deletions(self.extract_id, max_items=count, ai_config=api_config)
     
-    def _generate_template_cloze(self, count: int) -> List[LearningItem]:
-        """Generate template-based cloze deletions."""
-        if not self.extract:
-            return []
-        
-        # Split extract content into sentences
-        import nltk
+    def _generate_with_templates(self, count):
+        """Generate items using templates."""
+        if self.qa_radio.isChecked():
+            return self._generate_template_qa(count)
+        else:
+            return self._generate_template_cloze(count)
+    
+    def _get_api_config(self):
+        """Get API configuration from settings for the selected provider."""
         try:
-            sentences = nltk.sent_tokenize(self.extract.content)
-        except:
-            # Fallback if NLTK not available
-            sentences = self.extract.content.split('. ')
-        
-        # Generate items
-        items = []
-        
-        # Extract key terms
-        key_concepts = self.nlp_extractor.identify_key_concepts(
-            self.extract.content, num_concepts=min(count*3, 15)
-        )
-        
-        import random
-        
-        # Shuffle sentences for variety
-        random.shuffle(sentences)
-        
-        for i in range(min(count, len(key_concepts), len(sentences))):
-            concept = key_concepts[i]
-            term = concept['text']
+            from core.utils.settings_manager import SettingsManager
+            from core.document_processor.summarizer import AI_PROVIDERS
             
-            # Find a sentence containing this term
-            context = ""
-            for sentence in sentences:
-                if term.lower() in sentence.lower():
-                    context = sentence
-                    sentences.remove(sentence)  # Don't reuse this sentence
-                    break
+            settings = SettingsManager()
             
-            if not context:
-                continue
+            # Get selected provider
+            provider_id = self.provider_combo.currentData()
             
-            # Create cloze by replacing the term
-            cloze_text = context.replace(term, "[...]")
+            # Get API key for selected provider
+            setting_key = AI_PROVIDERS[provider_id]["setting_key"]
+            api_key = settings.get_setting("ai", setting_key, "")
             
-            # Create item
-            item = LearningItem(
-                extract_id=self.extract_id,
-                item_type='cloze',
-                question=cloze_text,
-                answer=term,
-                priority=self.extract.priority
+            # Get saved model for this provider or use default
+            model_setting_key = f"{provider_id}_model"
+            model = settings.get_setting("ai", model_setting_key, AI_PROVIDERS[provider_id]["default_model"])
+            
+            # If no API key, return empty config
+            if not api_key:
+                return {}
+            
+            return {
+                "provider": provider_id,
+                "api_key": api_key,
+                "model": model
+            }
+            
+        except Exception as e:
+            logger.exception(f"Error getting API configuration: {e}")
+            return {}
+    
+    def _prompt_for_api_key(self):
+        """Prompt user to enter API key for the selected provider."""
+        try:
+            from core.utils.settings_manager import SettingsManager
+            from core.document_processor.summarizer import AI_PROVIDERS
+            
+            settings = SettingsManager()
+            
+            provider_id = self.provider_combo.currentData()
+            provider_name = self.provider_combo.currentText()
+            
+            setting_key = AI_PROVIDERS[provider_id]["setting_key"]
+            current_key = settings.get_setting("ai", setting_key, "")
+            
+            # Mask key for display
+            masked_key = "****" + current_key[-4:] if current_key and len(current_key) > 4 else ""
+            hint_text = f"Current: {masked_key}" if masked_key else "No API key set"
+            
+            from PyQt6.QtWidgets import QInputDialog, QLineEdit
+            
+            api_key, ok = QInputDialog.getText(
+                self, f"Set {provider_name} API Key", 
+                f"Enter your {provider_name} API key for AI-powered generation:\n{hint_text}",
+                QLineEdit.EchoMode.Password
             )
             
-            items.append(item)
+            if ok and api_key:
+                # Save to settings
+                settings.set_setting("ai", "provider", provider_id)
+                settings.set_setting("ai", setting_key, api_key)
+                
+                # Save default model
+                from core.document_processor.summarizer import AI_PROVIDERS
+                model = AI_PROVIDERS[provider_id]["default_model"]
+                model_setting_key = f"{provider_id}_model"
+                settings.set_setting("ai", model_setting_key, model)
+                
+                settings.save_settings()
+                
+                return True
+            
+        except Exception as e:
+            logger.exception(f"Error setting API key: {e}")
         
-        return items
+        return False
     
     @pyqtSlot(QTableWidgetItem)
     def _on_result_selected(self, item):
@@ -696,3 +713,124 @@ class LearningItemEditor(QWidget):
                     self, "Error", 
                     f"Failed to delete learning item: {str(e)}"
                 )
+
+    def _generate_template_qa(self, count: int) -> List[LearningItem]:
+        """Generate template-based question-answer pairs."""
+        if not self.extract:
+            return []
+        
+        # Split extract content into sentences
+        import nltk
+        try:
+            sentences = nltk.sent_tokenize(self.extract.content)
+        except:
+            # Fallback if NLTK not available
+            sentences = self.extract.content.split('. ')
+        
+        # Simple templates
+        templates = [
+            "What is {}?",
+            "Explain {}.",
+            "Define {}.",
+            "Describe {}.",
+            "What are the characteristics of {}?",
+            "How would you explain {}?"
+        ]
+        
+        # Generate items
+        items = []
+        
+        # Extract key terms
+        key_concepts = self.nlp_extractor.identify_key_concepts(
+            self.extract.content, num_concepts=min(count*2, 10)
+        )
+        
+        import random
+        
+        for i in range(min(count, len(key_concepts))):
+            concept = key_concepts[i]
+            term = concept['text']
+            
+            # Find a sentence containing this term
+            context = ""
+            for sentence in sentences:
+                if term.lower() in sentence.lower():
+                    context = sentence
+                    break
+            
+            if not context:
+                context = self.extract.content[:200] + "..."
+            
+            # Create question using template
+            template = random.choice(templates)
+            question = template.format(term)
+            
+            # Create item
+            item = LearningItem(
+                extract_id=self.extract_id,
+                item_type='qa',
+                question=question,
+                answer=context,
+                priority=self.extract.priority
+            )
+            
+            items.append(item)
+        
+        return items
+
+    def _generate_template_cloze(self, count: int) -> List[LearningItem]:
+        """Generate template-based cloze deletions."""
+        if not self.extract:
+            return []
+        
+        # Split extract content into sentences
+        import nltk
+        try:
+            sentences = nltk.sent_tokenize(self.extract.content)
+        except:
+            # Fallback if NLTK not available
+            sentences = self.extract.content.split('. ')
+        
+        # Generate items
+        items = []
+        
+        # Extract key terms
+        key_concepts = self.nlp_extractor.identify_key_concepts(
+            self.extract.content, num_concepts=min(count*3, 15)
+        )
+        
+        import random
+        
+        # Shuffle sentences for variety
+        random.shuffle(sentences)
+        
+        for i in range(min(count, len(key_concepts), len(sentences))):
+            concept = key_concepts[i]
+            term = concept['text']
+            
+            # Find a sentence containing this term
+            context = ""
+            for sentence in sentences:
+                if term.lower() in sentence.lower():
+                    context = sentence
+                    sentences.remove(sentence)  # Don't reuse this sentence
+                    break
+            
+            if not context:
+                continue
+            
+            # Create cloze by replacing the term
+            cloze_text = context.replace(term, "[...]")
+            
+            # Create item
+            item = LearningItem(
+                extract_id=self.extract_id,
+                item_type='cloze',
+                question=cloze_text,
+                answer=term,
+                priority=self.extract.priority
+            )
+            
+            items.append(item)
+        
+        return items

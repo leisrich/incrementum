@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QTextEdit, QGroupBox,
     QRadioButton, QButtonGroup, QCheckBox, QSpinBox,
     QTabWidget, QMessageBox, QProgressBar, QApplication,
-    QWidget, QInputDialog, QLineEdit
+    QWidget, QInputDialog, QLineEdit, QFormLayout
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QThread, QObject
 from PyQt6.QtGui import QFont
@@ -28,22 +28,67 @@ from core.content_extractor.nlp_extractor import NLPExtractor
 
 logger = logging.getLogger(__name__)
 
+# Dictionary of AI provider information
+AI_PROVIDERS = {
+    "openai": {
+        "name": "OpenAI",
+        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "default_model": "gpt-3.5-turbo",
+        "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"],
+        "max_tokens": 4096,
+        "setting_key": "openai_api_key"
+    },
+    "anthropic": {
+        "name": "Anthropic Claude",
+        "endpoint": "https://api.anthropic.com/v1/messages",
+        "default_model": "claude-3-haiku-20240307",
+        "models": ["claude-3-haiku-20240307", "claude-3-sonnet-20240229", "claude-3-opus-20240229"],
+        "max_tokens": 4096,
+        "setting_key": "anthropic_api_key"
+    },
+    "openrouter": {
+        "name": "OpenRouter",
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "default_model": "openai/gpt-3.5-turbo",
+        "models": ["openai/gpt-3.5-turbo", "anthropic/claude-3-haiku", "anthropic/claude-3-sonnet", "google/gemini-pro"],
+        "max_tokens": 4096,
+        "setting_key": "openrouter_api_key"
+    },
+    "google": {
+        "name": "Google Gemini",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
+        "default_model": "gemini-pro",
+        "models": ["gemini-pro"],
+        "max_tokens": 4096,
+        "setting_key": "google_api_key"
+    },
+    "ollama": {
+        "name": "Ollama",
+        "endpoint": "http://localhost:11434/api/chat",
+        "default_model": "llama3",
+        "models": ["llama3", "llama2", "mistral", "codellama", "phi", "gemma:2b", "gemma:7b", "mixtral", "orca-mini"],
+        "max_tokens": 4096,
+        "setting_key": "ollama_host"
+    }
+}
+
 class DocumentSummarizer:
     """
     Document summarization module that extracts key information
     and generates summaries at different levels of detail.
     """
     
-    def __init__(self, db_session, api_key=None):
+    def __init__(self, db_session, api_config=None):
         """
         Initialize the summarizer.
         
         Args:
             db_session: Database session
-            api_key: Optional API key for external AI services
+            api_config: Optional API configuration for external AI services
+                        Dictionary with keys: provider, api_key, model
         """
         self.db_session = db_session
-        self.api_key = api_key
+        self.api_config = api_config or {}
         
         # Initialize handlers
         self.handlers = {
@@ -52,6 +97,7 @@ class DocumentSummarizer:
             'htm': HTMLHandler(),
             'txt': TextHandler(),
             'text': TextHandler(),
+            'jina_web': HTMLHandler(),  # Use HTML handler for Jina web content
         }
         
         # Initialize NLP extractor
@@ -91,7 +137,7 @@ class DocumentSummarizer:
             max_workers = 1 if level == 'detailed' else min(len(chunks), 3)
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                if use_ai and self.api_key:
+                if use_ai and self.api_config and self.api_config.get('api_key'):
                     # Use AI-based summarization
                     future_summaries = [executor.submit(self._ai_summarize_chunk, 
                                                       chunk, level) for chunk in chunks]
@@ -306,7 +352,7 @@ class DocumentSummarizer:
     
     def _ai_summarize_chunk(self, content: str, level: str) -> str:
         """Summarize a chunk of text using AI."""
-        if not self.api_key:
+        if not self.api_config or not self.api_config.get('api_key'):
             return self._rule_based_summarize_chunk(content, level)
         
         try:
@@ -321,49 +367,261 @@ class DocumentSummarizer:
                 instruction = "Provide a comprehensive summary with all important information and key details."
                 max_tokens = 500
             
-            # Make API request to an AI service (generic example)
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}"
-            }
+            provider = self.api_config.get('provider', 'openai')
+            api_key = self.api_config.get('api_key')
+            model = self.api_config.get('model', AI_PROVIDERS[provider]['default_model'])
             
-            data = {
-                "model": "gpt-3.5-turbo",  # Example model
-                "messages": [
-                    {"role": "system", "content": f"You are a document summarization assistant. {instruction}"},
-                    {"role": "user", "content": content}
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0.3  # Lower temperature for more focused summaries
-            }
-            
-            # This is a placeholder - in a real implementation, you would use
-            # the appropriate API endpoint and handling logic
-            try:
-                response = requests.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers=headers,
-                    json=data,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    summary = result["choices"][0]["message"]["content"]
-                    return summary
-                else:
-                    logger.error(f"API request failed: {response.status_code}")
-                    # Fall back to rule-based summarization
-                    return self._rule_based_summarize_chunk(content, level)
-                    
-            except Exception as e:
-                logger.exception(f"Error in API request: {e}")
-                # Fall back to rule-based summarization
+            # Handle different providers
+            if provider == 'openai':
+                return self._openai_summarize(content, instruction, api_key, model, max_tokens)
+            elif provider == 'anthropic':
+                return self._anthropic_summarize(content, instruction, api_key, model, max_tokens)
+            elif provider == 'openrouter':
+                return self._openrouter_summarize(content, instruction, api_key, model, max_tokens)
+            elif provider == 'google':
+                return self._google_summarize(content, instruction, api_key, model, max_tokens)
+            elif provider == 'ollama':
+                return self._ollama_summarize(content, instruction, api_key, model, max_tokens)
+            else:
+                logger.error(f"Unknown AI provider: {provider}")
                 return self._rule_based_summarize_chunk(content, level)
                 
         except Exception as e:
             logger.exception(f"Error in AI summarization: {e}")
-            return ""
+            return self._rule_based_summarize_chunk(content, level)
+    
+    def _openai_summarize(self, content, instruction, api_key, model, max_tokens):
+        """Summarize text using OpenAI's API."""
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": f"You are a document summarization assistant. {instruction}"},
+                {"role": "user", "content": content}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.3
+        }
+        
+        try:
+            response = requests.post(
+                AI_PROVIDERS['openai']['endpoint'],
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                summary = result["choices"][0]["message"]["content"]
+                return summary
+            else:
+                logger.error(f"OpenAI API request failed: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.exception(f"Error in OpenAI API request: {e}")
+            return None
+    
+    def _anthropic_summarize(self, content, instruction, api_key, model, max_tokens):
+        """Summarize text using Anthropic's Claude API."""
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01"
+        }
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": f"{instruction}\n\n{content}"}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.3
+        }
+        
+        try:
+            response = requests.post(
+                AI_PROVIDERS['anthropic']['endpoint'],
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                summary = result["content"][0]["text"]
+                return summary
+            else:
+                logger.error(f"Anthropic API request failed: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.exception(f"Error in Anthropic API request: {e}")
+            return None
+    
+    def _openrouter_summarize(self, content, instruction, api_key, model, max_tokens):
+        """Summarize text using OpenRouter API."""
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://incrementum.app"  # Replace with your app domain
+        }
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": f"You are a document summarization assistant. {instruction}"},
+                {"role": "user", "content": content}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.3
+        }
+        
+        try:
+            response = requests.post(
+                AI_PROVIDERS['openrouter']['endpoint'],
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                summary = result["choices"][0]["message"]["content"]
+                return summary
+            else:
+                logger.error(f"OpenRouter API request failed: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.exception(f"Error in OpenRouter API request: {e}")
+            return None
+    
+    def _google_summarize(self, content, instruction, api_key, model, max_tokens):
+        """Summarize text using Google Gemini API."""
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": f"You are a document summarization assistant. {instruction}\n\n{content}"}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": 0.3
+            }
+        }
+        
+        try:
+            endpoint = f"{AI_PROVIDERS['google']['endpoint']}?key={api_key}"
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                summary = result["candidates"][0]["content"]["parts"][0]["text"]
+                return summary
+            else:
+                logger.error(f"Google API request failed: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.exception(f"Error in Google API request: {e}")
+            return None
+    
+    def _ollama_summarize(self, content, instruction, api_key, model, max_tokens):
+        """Summarize text using Ollama API."""
+        # For Ollama, api_key is actually the host URL (e.g., http://localhost:11434)
+        host = api_key
+        if not host.startswith('http'):
+            host = f"http://{host}"
+        if not host.endswith('/api/chat'):
+            # Ensure the URL has the correct format
+            if host.endswith('/'):
+                host = host[:-1]
+            if not host.endswith('/api/chat'):
+                host = f"{host}/api/chat"
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": f"You are a document summarization assistant. {instruction}"},
+                {"role": "user", "content": content}
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.3,
+                "num_predict": max_tokens
+            }
+        }
+        
+        try:
+            response = requests.post(
+                host,
+                headers=headers,
+                json=data,
+                timeout=60  # Longer timeout for local models
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "message" in result and "content" in result["message"]:
+                    summary = result["message"]["content"]
+                    return summary
+                else:
+                    logger.error(f"Unexpected Ollama API response format: {result}")
+                    return None
+            elif response.status_code == 404:
+                # Model not found, provide a more helpful error message
+                error_data = response.json()
+                error_msg = error_data.get("error", "Unknown error")
+                if "not found" in error_msg:
+                    # Check if we can suggest a model
+                    base_model = model.split(":")[0] if ":" in model else model
+                    try:
+                        # Try to get a list of available models
+                        model_url = f"{host.replace('/api/chat', '/api/tags')}"
+                        models_response = requests.get(model_url, timeout=5)
+                        if models_response.status_code == 200:
+                            models_data = models_response.json()
+                            available_models = []
+                            if "models" in models_data:
+                                available_models = [m["name"] for m in models_data["models"]]
+                            else:
+                                available_models = [m["name"] for m in models_data]
+                            
+                            similar_models = [m for m in available_models if base_model in m]
+                            if similar_models:
+                                logger.error(f"Model '{model}' not found. Similar models available: {', '.join(similar_models)}")
+                            else:
+                                logger.error(f"Model '{model}' not found. Try pulling it first with 'ollama pull {model}'")
+                        else:
+                            logger.error(f"Model '{model}' not found. Try pulling it with 'ollama pull {model}'")
+                    except Exception as e:
+                        logger.error(f"Model '{model}' not found. Try pulling it with 'ollama pull {model}'")
+                else:
+                    logger.error(f"Ollama API request failed: {response.status_code} - {response.text}")
+                return None
+            else:
+                logger.error(f"Ollama API request failed: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.exception(f"Error in Ollama API request: {e}")
+            return None
     
     def _rule_based_summarize_chunk(self, content: str, level: str) -> str:
         """Summarize a chunk of text using rule-based approaches."""
@@ -628,25 +886,6 @@ class DocumentSummarizer:
         return None
 
 
-# ui/summarize_dialog.py
-
-import logging
-from typing import List, Dict, Any, Optional
-
-from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QComboBox, QTextEdit, QGroupBox,
-    QRadioButton, QButtonGroup, QCheckBox, QSpinBox,
-    QTabWidget, QMessageBox, QProgressBar, QApplication
-)
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QThread, QObject
-from PyQt6.QtGui import QFont
-
-from core.document_processor.summarizer import DocumentSummarizer
-from core.knowledge_base.models import Document
-
-logger = logging.getLogger(__name__)
-
 class SummarizeWorker(QObject):
     """Worker thread for document summarization."""
     
@@ -687,6 +926,7 @@ class SummarizeWorker(QObject):
             logger.exception(f"Error in summarization worker: {e}")
             self.error.emit(str(e))
 
+
 class KeySectionsWorker(QObject):
     """Worker thread for extracting key sections."""
     
@@ -726,6 +966,7 @@ class KeySectionsWorker(QObject):
             logger.exception(f"Error in key sections worker: {e}")
             self.error.emit(str(e))
 
+
 class SummarizeDialog(QDialog):
     """Dialog for summarizing documents."""
     
@@ -742,11 +983,11 @@ class SummarizeDialog(QDialog):
         if not self.document:
             raise ValueError(f"Document not found: {document_id}")
         
-        # Get API key from settings
-        self.api_key = self._get_api_key()
+        # Get API configuration from settings
+        self.api_config = self._get_api_config()
         
         # Initialize summarizer
-        self.summarizer = DocumentSummarizer(db_session, self.api_key)
+        self.summarizer = DocumentSummarizer(db_session, self.api_config)
         
         # Initialize UI
         self._create_ui()
@@ -755,36 +996,93 @@ class SummarizeDialog(QDialog):
         self.setWindowTitle(f"Summarize Document: {self.document.title}")
         self.resize(800, 600)
     
-    def _get_api_key(self):
-        """Get API key from settings or prompt user."""
+    def _get_api_config(self):
+        """Get API configuration from settings."""
         try:
             # Try to import settings manager
             from core.utils.settings_manager import SettingsManager
             settings = SettingsManager()
-            api_key = settings.get_setting("ai", "openai_api_key", "")
             
-            # If no API key is found, prompt the user
-            if not api_key:
-                api_key, ok = QInputDialog.getText(
-                    self, "API Key Required", 
-                    "Enter your OpenAI API key for AI-powered summarization:",
-                    QLineEdit.EchoMode.Password
-                )
+            # Get provider setting
+            provider = settings.get_setting("ai", "provider", "openai")
+            
+            # Validate provider
+            if provider not in AI_PROVIDERS:
+                provider = "openai"  # Default to OpenAI if invalid
+            
+            # Get API key for selected provider
+            setting_key = AI_PROVIDERS[provider]["setting_key"]
+            
+            # Special handling for Ollama which uses host instead of API key
+            if provider == "ollama":
+                api_key = settings.get_setting("api", setting_key, "http://localhost:11434")
+                # If no host is set, check if Ollama is available at default address
+                if not api_key or api_key == "":
+                    api_key = "http://localhost:11434"
+                    
+                # For Ollama, we also need to get the model from settings
+                model = settings.get_setting("api", "ollama_model", "llama3")
                 
-                if ok and api_key:
-                    # Save to settings
-                    settings.set_setting("ai", "openai_api_key", api_key)
-                    settings.save_settings()
-                    return api_key
-                else:
-                    return None  # User cancelled or didn't provide a key
+                # Try to verify the model exists - if not, fall back to a default that's likely to exist
+                try:
+                    host = api_key
+                    if not host.startswith('http'):
+                        host = f"http://{host}"
+                    if host.endswith('/'):
+                        host = host[:-1]
+                    
+                    model_url = f"{host}/api/tags"
+                    models_response = requests.get(model_url, timeout=5)
+                    
+                    if models_response.status_code == 200:
+                        models_data = models_response.json()
+                        available_models = []
+                        if "models" in models_data:
+                            available_models = [m["name"] for m in models_data["models"]]
+                        else:
+                            available_models = [m["name"] for m in models_data]
+                        
+                        # Check if selected model exists
+                        if model not in available_models:
+                            # Try to find a similar model
+                            base_model = model.split(":")[0] if ":" in model else model
+                            similar_models = [m for m in available_models if base_model in m]
+                            
+                            if similar_models:
+                                # Use the first similar model
+                                logger.warning(f"Model '{model}' not found. Using similar model: {similar_models[0]}")
+                                model = similar_models[0]
+                            elif available_models:
+                                # Fall back to first available model
+                                logger.warning(f"Model '{model}' not found. Using available model: {available_models[0]}")
+                                model = available_models[0]
+                            else:
+                                # If no models available, keep the original (will fail later)
+                                logger.warning(f"Model '{model}' not found and no alternatives available")
+                except Exception as e:
+                    logger.warning(f"Could not verify Ollama model availability: {e}")
+            else:
+                # For other providers, get the API key normally
+                api_key = settings.get_setting("api", setting_key, "")
+                
+                # Get saved model for this provider or use default
+                model_setting_key = f"{provider}_model"
+                model = settings.get_setting("ai", model_setting_key, AI_PROVIDERS[provider]["default_model"])
             
-            return api_key
+            # If no API key is found (except for Ollama which has a default), return empty config - will use rule-based summarization
+            if not api_key and provider != "ollama":
+                return {}
+            
+            return {
+                "provider": provider,
+                "api_key": api_key,
+                "model": model
+            }
             
         except Exception as e:
-            logger.exception(f"Error getting API key: {e}")
-            return None
-    
+            logger.exception(f"Error getting API configuration: {e}")
+            return {}
+
     def _create_ui(self):
         """Create the UI layout."""
         main_layout = QVBoxLayout(self)
@@ -823,28 +1121,58 @@ class SummarizeDialog(QDialog):
         
         # Options group
         options_group = QGroupBox("Summary Options")
-        options_layout = QHBoxLayout(options_group)
+        options_layout = QVBoxLayout(options_group)
+        
+        # Summary options layout
+        summary_options = QHBoxLayout()
         
         # Summary level
         level_label = QLabel("Detail Level:")
-        options_layout.addWidget(level_label)
+        summary_options.addWidget(level_label)
         
         self.level_combo = QComboBox()
         self.level_combo.addItem("Brief", "brief")
         self.level_combo.addItem("Medium", "medium")
         self.level_combo.addItem("Detailed", "detailed")
         self.level_combo.setCurrentIndex(1)  # Medium by default
-        options_layout.addWidget(self.level_combo)
+        summary_options.addWidget(self.level_combo)
         
         # AI option
         self.use_ai_check = QCheckBox("Use AI (if available)")
         self.use_ai_check.setChecked(True)
-        options_layout.addWidget(self.use_ai_check)
+        summary_options.addWidget(self.use_ai_check)
+        
+        options_layout.addLayout(summary_options)
+        
+        # AI Provider options
+        ai_provider_group = QGroupBox("AI Provider")
+        ai_provider_layout = QFormLayout(ai_provider_group)
+        
+        self.provider_combo = QComboBox()
+        for provider_id, provider_info in AI_PROVIDERS.items():
+            self.provider_combo.addItem(provider_info["name"], provider_id)
+        
+        # Set current provider from settings
+        if self.api_config and self.api_config.get("provider"):
+            for i in range(self.provider_combo.count()):
+                if self.provider_combo.itemData(i) == self.api_config["provider"]:
+                    self.provider_combo.setCurrentIndex(i)
+                    break
+        
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        ai_provider_layout.addRow("Provider:", self.provider_combo)
+        
+        # Model selection
+        self.model_combo = QComboBox()
+        self._update_model_combo()
+        ai_provider_layout.addRow("Model:", self.model_combo)
         
         # API Key management
         self.api_key_button = QPushButton("Set API Key")
         self.api_key_button.clicked.connect(self._on_set_api_key)
-        options_layout.addWidget(self.api_key_button)
+        ai_provider_layout.addRow("API Key:", self.api_key_button)
+        
+        options_layout.addWidget(ai_provider_group)
         
         # Generate button
         self.generate_button = QPushButton("Generate Summary")
@@ -933,6 +1261,33 @@ class SummarizeDialog(QDialog):
         # Get options
         level = self.level_combo.currentData()
         use_ai = self.use_ai_check.isChecked()
+        
+        # If using AI, make sure we have the current settings
+        if use_ai:
+            provider_id = self.provider_combo.currentData()
+            model = self.model_combo.currentData()
+            
+            # Check if we have an API key
+            if not self.api_config or not self.api_config.get("api_key"):
+                # Prompt for API key
+                self._on_set_api_key()
+                
+                # If still no API key, disable AI
+                if not self.api_config or not self.api_config.get("api_key"):
+                    use_ai = False
+            elif self.api_config["provider"] != provider_id or self.api_config["model"] != model:
+                # Update config with new provider/model
+                self.api_config["provider"] = provider_id
+                self.api_config["model"] = model
+                self.summarizer.api_config = self.api_config
+                
+                # Save to settings
+                from core.utils.settings_manager import SettingsManager
+                settings = SettingsManager()
+                settings.set_setting("ai", "provider", provider_id)
+                model_setting_key = f"{provider_id}_model"
+                settings.set_setting("ai", model_setting_key, model)
+                settings.save_settings()
         
         # Update UI
         self.generate_button.setEnabled(False)
@@ -1137,34 +1492,160 @@ class SummarizeDialog(QDialog):
                 self, "Error", 
                 f"Error creating section extracts: {str(e)}"
             )
+
+    @pyqtSlot(int)
+    def _on_provider_changed(self, index):
+        """Handle provider selection change."""
+        self._update_model_combo()
     
     @pyqtSlot()
     def _on_set_api_key(self):
         """Handle API key setting button click."""
+        provider_id = self.provider_combo.currentData()
+        provider_name = self.provider_combo.currentText()
+        
         from core.utils.settings_manager import SettingsManager
         settings = SettingsManager()
-        current_key = settings.get_setting("ai", "openai_api_key", "")
         
+        setting_key = AI_PROVIDERS[provider_id]["setting_key"]
+        current_key = settings.get_setting("ai", setting_key, "")
+        
+        # Special handling for Ollama
+        if provider_id == "ollama":
+            # For Ollama, we need the host URL rather than an API key
+            current_key = settings.get_setting("api", setting_key, "http://localhost:11434")
+            
+            api_key, ok = QInputDialog.getText(
+                self, f"Set {provider_name} Host", 
+                f"Enter your {provider_name} host URL (default: http://localhost:11434):",
+                QLineEdit.EchoMode.Normal,
+                text=current_key
+            )
+            
+            if ok:
+                # If empty, use default
+                if not api_key:
+                    api_key = "http://localhost:11434"
+                
+                # Save to settings
+                settings.set_setting("api", setting_key, api_key)
+                
+                # Get and save model as well
+                model = self.model_combo.currentData()
+                settings.set_setting("api", "ollama_model", model)
+                
+                settings.save_settings()
+                
+                # Update API configuration
+                self.api_config = {
+                    "provider": provider_id,
+                    "api_key": api_key,
+                    "model": model
+                }
+                
+                # Update summarizer
+                self.summarizer.api_config = self.api_config
+            
+            return
+        
+        # Regular API key handling for other providers
         # Mask key for display
         masked_key = "****" + current_key[-4:] if current_key and len(current_key) > 4 else ""
         hint_text = f"Current: {masked_key}" if masked_key else "No API key set"
         
         api_key, ok = QInputDialog.getText(
-            self, "Set API Key", 
-            f"Enter your OpenAI API key for AI-powered summarization:\n{hint_text}",
+            self, f"Set {provider_name} API Key", 
+            f"Enter your {provider_name} API key for AI-powered summarization:\n{hint_text}",
             QLineEdit.EchoMode.Password
         )
         
         if ok and api_key:
             # Save to settings
-            settings.set_setting("ai", "openai_api_key", api_key)
+            settings.set_setting("ai", "provider", provider_id)
+            settings.set_setting("ai", setting_key, api_key)
+            
+            # Save selected model
+            model = self.model_combo.currentData()
+            model_setting_key = f"{provider_id}_model"
+            settings.set_setting("ai", model_setting_key, model)
+            
             settings.save_settings()
             
-            # Update summarizer
-            self.api_key = api_key
-            self.summarizer.api_key = api_key
+            # Update API configuration
+            self.api_config = {
+                "provider": provider_id,
+                "api_key": api_key,
+                "model": model
+            }
             
-            QMessageBox.information(
-                self, "API Key Updated", 
-                "Your API key has been saved and will be used for AI summarization."
-            )
+            # Update summarizer
+            self.summarizer.api_config = self.api_config
+
+    def _update_model_combo(self):
+        """Update the model combo box based on selected provider."""
+        provider_id = self.provider_combo.currentData()
+        self.model_combo.clear()
+        
+        if provider_id in AI_PROVIDERS:
+            # Special handling for Ollama to check for available models
+            if provider_id == "ollama":
+                from core.utils.settings_manager import SettingsManager
+                settings = SettingsManager()
+                
+                # Try to get available models from Ollama if possible
+                host = settings.get_setting("api", "ollama_host", "http://localhost:11434")
+                if not host.startswith("http"):
+                    host = f"http://{host}"
+                if host.endswith('/'):
+                    host = host[:-1]
+                
+                try:
+                    # Try to get models list from Ollama
+                    import requests
+                    response = requests.get(f"{host}/api/tags", timeout=2)
+                    if response.status_code == 200:
+                        # Add models from Ollama
+                        models_data = response.json()
+                        if "models" in models_data:
+                            # New API format
+                            available_models = [m["name"] for m in models_data["models"]]
+                        else:
+                            # Old API format
+                            available_models = [m["name"] for m in models_data]
+                            
+                        for model in available_models:
+                            self.model_combo.addItem(model, model)
+                    else:
+                        # Fallback to default list
+                        for model in AI_PROVIDERS[provider_id]["models"]:
+                            self.model_combo.addItem(model, model)
+                except Exception as e:
+                    logger.warning(f"Failed to get Ollama models: {e}")
+                    # Fallback to default list on error
+                    for model in AI_PROVIDERS[provider_id]["models"]:
+                        self.model_combo.addItem(model, model)
+            else:
+                # Regular providers - use the predefined list
+                for model in AI_PROVIDERS[provider_id]["models"]:
+                    self.model_combo.addItem(model, model)
+            
+            # Set current model from settings if available
+            if self.api_config and self.api_config.get("provider") == provider_id and self.api_config.get("model"):
+                model_to_set = self.api_config["model"]
+                
+                # For Ollama, we might need to load from api settings
+                if provider_id == "ollama" and not model_to_set:
+                    from core.utils.settings_manager import SettingsManager
+                    settings = SettingsManager()
+                    model_to_set = settings.get_setting("api", "ollama_model", "llama3")
+                
+                # Find and set the model in the combo box
+                for i in range(self.model_combo.count()):
+                    if self.model_combo.itemData(i) == model_to_set:
+                        self.model_combo.setCurrentIndex(i)
+                        break
+                
+                # If model not found, add it and select it
+                if self.model_combo.currentData() != model_to_set and model_to_set:
+                    self.model_combo.addItem(model_to_set, model_to_set)
+                    self.model_combo.setCurrentIndex(self.model_combo.count() - 1)

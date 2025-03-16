@@ -19,6 +19,9 @@ from core.knowledge_base.models import (
     document_tag_association, extract_tag_association
 )
 
+# Import database migration
+from core.knowledge_base.database_migration import migrate_database
+
 logger = logging.getLogger(__name__)
 
 # Global variables
@@ -86,6 +89,9 @@ def initialize_database(config: Optional[Dict[str, Any]] = None) -> None:
         
         # Create all tables if they don't exist
         Base.metadata.create_all(_ENGINE)
+        
+        # Run migrations to ensure schema is up to date
+        migrate_database()
         
         # Create session factory
         _SESSION_FACTORY = scoped_session(sessionmaker(bind=_ENGINE))

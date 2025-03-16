@@ -123,36 +123,46 @@ class ArxivImporter:
                 logger.error(f"No PDF URL for paper: {paper_data.get('title')}")
                 return None
             
+            # Create arxiv directory if it doesn't exist
+            arxiv_dir = os.path.join(os.getcwd(), 'arxiv')
+            os.makedirs(arxiv_dir, exist_ok=True)
+            logger.info(f"Using arxiv directory: {arxiv_dir}")
+            
             # Download PDF
+            logger.info(f"Downloading PDF from {pdf_url}")
             pdf_data = self._download_pdf(pdf_url)
             if not pdf_data:
                 logger.error(f"Failed to download PDF: {pdf_url}")
                 return None
             
-            # Save to temporary file
-            temp_dir = tempfile.mkdtemp()
+            # Get arxiv ID and create safe filename
             arxiv_id = paper_data.get('arxiv_id', 'unknown')
             title_safe = self._safe_filename(paper_data.get('title', 'unknown'))
             
-            # Create a unique filename
-            pdf_path = os.path.join(temp_dir, f"{arxiv_id}_{title_safe}.pdf")
+            # Create a unique filename with both ID and title
+            pdf_filename = f"{arxiv_id}_{title_safe}.pdf"
+            pdf_path = os.path.join(arxiv_dir, pdf_filename)
             
+            logger.info(f"Saving PDF to {pdf_path}")
             with open(pdf_path, 'wb') as f:
                 f.write(pdf_data)
             
+            # Verify file exists and has content
+            if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
+                logger.error(f"PDF file not found or empty: {pdf_path}")
+                return None
+                
+            logger.info(f"Importing document from {pdf_path}")
             # Import document
             document = self.document_processor.import_document(pdf_path, category_id)
             
-            # Clean up temporary file
-            try:
-                os.remove(pdf_path)
-                os.rmdir(temp_dir)
-            except:
-                pass
+            # Note: We no longer delete the PDF files since they are stored permanently
             
             if document:
+                logger.info(f"Successfully imported document with ID: {document.id}")
                 return document.id
             else:
+                logger.error("Document import failed")
                 return None
             
         except Exception as e:
@@ -170,13 +180,19 @@ class ArxivImporter:
             PDF content as bytes if successful, None otherwise
         """
         try:
-            response = requests.get(pdf_url, stream=True)
+            # Use a longer timeout for large PDFs
+            response = requests.get(pdf_url, stream=True, timeout=30)
             response.raise_for_status()
             
             # Read content
             content = response.content
             
-            return content
+            # Verify we have actual PDF content (check magic bytes)
+            if content and len(content) > 4 and content[:4] == b'%PDF':
+                return content
+            else:
+                logger.error(f"Downloaded content is not a valid PDF")
+                return None
             
         except Exception as e:
             logger.exception(f"Error downloading PDF: {e}")
@@ -196,8 +212,8 @@ class ArxivImporter:
         safe = filename.replace(' ', '_')
         safe = ''.join(c for c in safe if c.isalnum() or c in '_-.')
         
-        # Truncate if too long
-        if len(safe) > 50:
-            safe = safe[:50]
+        # Truncate if too long (increased to 100 chars to avoid excessive truncation)
+        if len(safe) > 100:
+            safe = safe[:100]
         
         return safe

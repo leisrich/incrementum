@@ -51,6 +51,7 @@ class SettingsDialog(QDialog):
         self._create_document_tab()
         self._create_learning_tab()
         self._create_algorithm_tab()
+        self._create_api_tab()
         self._create_backup_tab()
         self._create_advanced_tab()
         
@@ -307,6 +308,177 @@ class SettingsDialog(QDialog):
         # Add tab
         self.tab_widget.addTab(tab, "Algorithm")
     
+    def _create_api_tab(self):
+        """Create the API settings tab."""
+        tab = QWidget()
+        tab_layout = QVBoxLayout(tab)
+        
+        # Create tabs for different API services
+        api_tabs = QTabWidget()
+        
+        # Jina.ai tab
+        jina_tab = QWidget()
+        jina_layout = QFormLayout(jina_tab)
+        
+        # Jina.ai API key
+        jina_key_layout = QHBoxLayout()
+        self.jina_api_key = QLineEdit()
+        self.jina_api_key.setEchoMode(QLineEdit.EchoMode.Password)  # Hide API key
+        jina_key_layout.addWidget(self.jina_api_key)
+        
+        # Button to show/hide password
+        self.show_jina_key_button = QPushButton("Show")
+        self.show_jina_key_button.setCheckable(True)
+        self.show_jina_key_button.toggled.connect(lambda checked: self._toggle_password_visibility(self.jina_api_key, self.show_jina_key_button, checked))
+        jina_key_layout.addWidget(self.show_jina_key_button)
+        
+        jina_layout.addRow("API Key:", jina_key_layout)
+        
+        # Add a descriptive label
+        jina_info_label = QLabel(
+            "Jina.ai is used to fetch website content for importing into the application.\n"
+            "A default API key is provided, but you can enter your own key for higher rate limits."
+        )
+        jina_info_label.setWordWrap(True)
+        jina_layout.addRow("", jina_info_label)
+        
+        api_tabs.addTab(jina_tab, "Jina.ai")
+        
+        # OpenAI tab
+        openai_tab = QWidget()
+        openai_layout = QFormLayout(openai_tab)
+        
+        # OpenAI API key
+        openai_key_layout = QHBoxLayout()
+        self.openai_api_key = QLineEdit()
+        self.openai_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        openai_key_layout.addWidget(self.openai_api_key)
+        
+        self.show_openai_key_button = QPushButton("Show")
+        self.show_openai_key_button.setCheckable(True)
+        self.show_openai_key_button.toggled.connect(lambda checked: self._toggle_password_visibility(self.openai_api_key, self.show_openai_key_button, checked))
+        openai_key_layout.addWidget(self.show_openai_key_button)
+        
+        openai_layout.addRow("API Key:", openai_key_layout)
+        
+        # OpenAI model selection
+        self.openai_model = QComboBox()
+        self.openai_model.addItems(["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"])
+        openai_layout.addRow("Model:", self.openai_model)
+        
+        api_tabs.addTab(openai_tab, "OpenAI")
+        
+        # Gemini tab
+        gemini_tab = QWidget()
+        gemini_layout = QFormLayout(gemini_tab)
+        
+        # Gemini API key
+        gemini_key_layout = QHBoxLayout()
+        self.gemini_api_key = QLineEdit()
+        self.gemini_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        gemini_key_layout.addWidget(self.gemini_api_key)
+        
+        self.show_gemini_key_button = QPushButton("Show")
+        self.show_gemini_key_button.setCheckable(True)
+        self.show_gemini_key_button.toggled.connect(lambda checked: self._toggle_password_visibility(self.gemini_api_key, self.show_gemini_key_button, checked))
+        gemini_key_layout.addWidget(self.show_gemini_key_button)
+        
+        gemini_layout.addRow("API Key:", gemini_key_layout)
+        
+        # Gemini model selection
+        self.gemini_model = QComboBox()
+        self.gemini_model.addItems(["gemini-pro", "gemini-1.5-pro"])
+        gemini_layout.addRow("Model:", self.gemini_model)
+        
+        api_tabs.addTab(gemini_tab, "Gemini")
+        
+        # Claude tab
+        claude_tab = QWidget()
+        claude_layout = QFormLayout(claude_tab)
+        
+        # Claude API key
+        claude_key_layout = QHBoxLayout()
+        self.claude_api_key = QLineEdit()
+        self.claude_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        claude_key_layout.addWidget(self.claude_api_key)
+        
+        self.show_claude_key_button = QPushButton("Show")
+        self.show_claude_key_button.setCheckable(True)
+        self.show_claude_key_button.toggled.connect(lambda checked: self._toggle_password_visibility(self.claude_api_key, self.show_claude_key_button, checked))
+        claude_key_layout.addWidget(self.show_claude_key_button)
+        
+        claude_layout.addRow("API Key:", claude_key_layout)
+        
+        # Claude model selection
+        self.claude_model = QComboBox()
+        self.claude_model.addItems(["claude-3-haiku-20240307", "claude-3-sonnet-20240229", "claude-3-opus-20240229"])
+        claude_layout.addRow("Model:", self.claude_model)
+        
+        api_tabs.addTab(claude_tab, "Claude")
+        
+        # OpenRouter tab
+        openrouter_tab = QWidget()
+        openrouter_layout = QFormLayout(openrouter_tab)
+        
+        # OpenRouter API key
+        openrouter_key_layout = QHBoxLayout()
+        self.openrouter_api_key = QLineEdit()
+        self.openrouter_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        openrouter_key_layout.addWidget(self.openrouter_api_key)
+        
+        self.show_openrouter_key_button = QPushButton("Show")
+        self.show_openrouter_key_button.setCheckable(True)
+        self.show_openrouter_key_button.toggled.connect(lambda checked: self._toggle_password_visibility(self.openrouter_api_key, self.show_openrouter_key_button, checked))
+        openrouter_key_layout.addWidget(self.show_openrouter_key_button)
+        
+        openrouter_layout.addRow("API Key:", openrouter_key_layout)
+        
+        # OpenRouter model selection
+        self.openrouter_model = QLineEdit("openai/gpt-3.5-turbo")
+        openrouter_layout.addRow("Model:", self.openrouter_model)
+        
+        # Add description
+        openrouter_info = QLabel(
+            "OpenRouter provides access to many LLMs through a single API.\n"
+            "Model format is provider/model-name (e.g., anthropic/claude-3-opus)"
+        )
+        openrouter_info.setWordWrap(True)
+        openrouter_layout.addRow("", openrouter_info)
+        
+        api_tabs.addTab(openrouter_tab, "OpenRouter")
+        
+        # Ollama tab
+        ollama_tab = QWidget()
+        ollama_layout = QFormLayout(ollama_tab)
+        
+        # Ollama host
+        self.ollama_host = QLineEdit("http://localhost:11434")
+        ollama_layout.addRow("Host:", self.ollama_host)
+        
+        # Ollama model selection
+        self.ollama_model = QLineEdit("llama3")
+        ollama_layout.addRow("Model:", self.ollama_model)
+        
+        # Test connection button
+        test_ollama_button = QPushButton("Test Connection")
+        test_ollama_button.clicked.connect(self._test_ollama_connection)
+        ollama_layout.addRow("", test_ollama_button)
+        
+        api_tabs.addTab(ollama_tab, "Ollama")
+        
+        # Default LLM service selection
+        default_service_layout = QFormLayout()
+        self.default_llm_service = QComboBox()
+        self.default_llm_service.addItems(["OpenAI", "Gemini", "Claude", "OpenRouter", "Ollama"])
+        default_service_layout.addRow("Default LLM service:", self.default_llm_service)
+        
+        # Add tabs to main layout
+        tab_layout.addLayout(default_service_layout)
+        tab_layout.addWidget(api_tabs)
+        
+        # Add tab
+        self.tab_widget.addTab(tab, "API Settings")
+    
     def _create_backup_tab(self):
         """Create the Backup settings tab."""
         tab = QWidget()
@@ -364,6 +536,41 @@ class SettingsDialog(QDialog):
         
         # Add tab
         self.tab_widget.addTab(tab, "Advanced")
+    
+    def _toggle_password_visibility(self, line_edit, button, show):
+        """Toggle password visibility for API keys."""
+        if show:
+            line_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+            button.setText("Hide")
+        else:
+            line_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            button.setText("Show")
+    
+    def _test_ollama_connection(self):
+        """Test the Ollama connection."""
+        import requests
+        
+        host = self.ollama_host.text().strip()
+        try:
+            response = requests.get(f"{host}/api/version", timeout=5)
+            if response.status_code == 200:
+                QMessageBox.information(
+                    self, "Connection Successful", 
+                    f"Successfully connected to Ollama at {host}\n"
+                    f"Version: {response.json().get('version', 'unknown')}"
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Connection Failed", 
+                    f"Failed to connect to Ollama at {host}\n"
+                    f"Status code: {response.status_code}"
+                )
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Connection Failed", 
+                f"Failed to connect to Ollama at {host}\n"
+                f"Error: {str(e)}"
+            )
     
     def _load_settings(self):
         """Load settings from settings manager."""
@@ -487,6 +694,53 @@ class SettingsDialog(QDialog):
         
         synchronous = sqlite_pragma.get("synchronous", "NORMAL").upper()
         self.sqlite_synchronous.setCurrentText(synchronous)
+        
+        # API settings
+        self.jina_api_key.setText(
+            self.settings_manager.get_setting("api", "jina_api_key", "")
+        )
+        self.openai_api_key.setText(
+            self.settings_manager.get_setting("api", "openai_api_key", "")
+        )
+        openai_model = self.settings_manager.get_setting("api", "openai_model", "gpt-3.5-turbo")
+        index = self.openai_model.findText(openai_model)
+        if index >= 0:
+            self.openai_model.setCurrentIndex(index)
+            
+        self.gemini_api_key.setText(
+            self.settings_manager.get_setting("api", "gemini_api_key", "")
+        )
+        gemini_model = self.settings_manager.get_setting("api", "gemini_model", "gemini-pro")
+        index = self.gemini_model.findText(gemini_model)
+        if index >= 0:
+            self.gemini_model.setCurrentIndex(index)
+            
+        self.claude_api_key.setText(
+            self.settings_manager.get_setting("api", "claude_api_key", "")
+        )
+        claude_model = self.settings_manager.get_setting("api", "claude_model", "claude-3-haiku-20240307")
+        index = self.claude_model.findText(claude_model)
+        if index >= 0:
+            self.claude_model.setCurrentIndex(index)
+            
+        self.openrouter_api_key.setText(
+            self.settings_manager.get_setting("api", "openrouter_api_key", "")
+        )
+        self.openrouter_model.setText(
+            self.settings_manager.get_setting("api", "openrouter_model", "openai/gpt-3.5-turbo")
+        )
+        
+        self.ollama_host.setText(
+            self.settings_manager.get_setting("api", "ollama_host", "http://localhost:11434")
+        )
+        self.ollama_model.setText(
+            self.settings_manager.get_setting("api", "ollama_model", "llama3")
+        )
+        
+        default_llm = self.settings_manager.get_setting("api", "default_llm_service", "OpenAI")
+        index = self.default_llm_service.findText(default_llm)
+        if index >= 0:
+            self.default_llm_service.setCurrentIndex(index)
     
     def _save_settings(self) -> bool:
         """
@@ -556,6 +810,20 @@ class SettingsDialog(QDialog):
                 "synchronous": self.sqlite_synchronous.currentText()
             }
             self.settings_manager.set_setting("advanced", "sqlite_pragma", sqlite_pragma)
+            
+            # API settings
+            self.settings_manager.set_setting("api", "jina_api_key", self.jina_api_key.text())
+            self.settings_manager.set_setting("api", "openai_api_key", self.openai_api_key.text())
+            self.settings_manager.set_setting("api", "openai_model", self.openai_model.currentText())
+            self.settings_manager.set_setting("api", "gemini_api_key", self.gemini_api_key.text())
+            self.settings_manager.set_setting("api", "gemini_model", self.gemini_model.currentText())
+            self.settings_manager.set_setting("api", "claude_api_key", self.claude_api_key.text())
+            self.settings_manager.set_setting("api", "claude_model", self.claude_model.currentText())
+            self.settings_manager.set_setting("api", "openrouter_api_key", self.openrouter_api_key.text())
+            self.settings_manager.set_setting("api", "openrouter_model", self.openrouter_model.text())
+            self.settings_manager.set_setting("api", "ollama_host", self.ollama_host.text())
+            self.settings_manager.set_setting("api", "ollama_model", self.ollama_model.text())
+            self.settings_manager.set_setting("api", "default_llm_service", self.default_llm_service.currentText())
             
             # Save to file
             if not self.settings_manager.save_settings():
