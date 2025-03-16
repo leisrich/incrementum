@@ -14,6 +14,9 @@ env/
 .env/
 .venv/
 
+# Libraries
+incrementum/lib/
+
 # IDE specific files
 .idea/
 .vscode/
