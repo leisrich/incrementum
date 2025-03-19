@@ -10,7 +10,7 @@ pdfminer.six==20221105  # PDF text extraction
 PyPDF2==3.0.1           # PDF manipulation
 beautifulsoup4==4.12.2  # HTML parsing
 lxml==4.9.2             # XML/HTML processing
-ebooklib==0.18          # ePub handling
+ebooklib>=0.17.1        # ePub handling
 markdown==3.4.3         # Markdown processing
 python-docx==0.8.11     # DOCX processing
 
@@ -44,3 +44,7 @@ pytest-qt==4.2.0    # Qt testing utilities
 black==23.3.0       # Code formatting
 isort==5.12.0       # Import sorting
 pylint==2.17.4      # Linting
+
+# Add these packages for EPUB handling
+html2text>=2020.1.16
+chardet>=4.0.0

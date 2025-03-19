@@ -45,6 +45,10 @@ class ShortcutManager:
     GRADE_5 = QKeySequence("6")
     SHOW_ANSWER = QKeySequence("Space")
     
+    # Queue Navigation
+    NEXT_DOCUMENT = QKeySequence("Alt+Right")
+    PREV_DOCUMENT = QKeySequence("Alt+Left")
+    
     # Navigation
     NEXT_TAB = QKeySequence("Ctrl+Tab")
     PREV_TAB = QKeySequence("Ctrl+Shift+Tab")
@@ -96,6 +100,10 @@ class ShortcutManager:
                 {"key": "Ctrl+R", "description": "Start review session"},
                 {"key": "Space", "description": "Show answer during review"},
                 {"key": "1-6", "description": "Grade item during review (1=worst, 6=best)"}
+            ],
+            "Queue Navigation": [
+                {"key": "Alt+Right", "description": "Next document in queue"},
+                {"key": "Alt+Left", "description": "Previous document in queue"}
             ],
             "Navigation": [
                 {"key": "Ctrl+Tab", "description": "Next tab"},

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>JavaScript Libraries Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 20px;
+            color: #333;
+        }
+        h1, h2, h3 {
+            color: #0066cc;
+        }
+        section {
+            margin-bottom: 40px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        .math {
+            background-color: #f5f5f5;
+            padding: 10px;
+            margin: 10px 0;
+            border-left: 3px solid #0066cc;
+        }
+        .markdown {
+            background-color: #f5f5f5;
+            padding: 10px;
+            margin: 10px 0;
+            border-left: 3px solid #00cc66;
+        }
+        #three-canvas {
+            width: 100%;
+            height: 300px;
+            background-color: #f0f0f0;
+        }
+        pre {
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        code {
+            font-family: 'Courier New', monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>JavaScript Libraries Test</h1>
+    <p>This document demonstrates the use of various JavaScript libraries in Incrementum.</p>
+
+    <section id="markdown-section">
+        <h2>Markdown.js Test</h2>
+        <div class="markdown">
+# Markdown Example
+
+This is a **bold text** and this is an *italic text*.
+
+## Subheading
+
+- List item 1
+- List item 2
+- List item 3
+
+[Link to Incrementum](https://github.com/incrementum)
+
+```javascript
+// Code block
+function example() {
+    console.log("Hello World!");
+}
+```
+        </div>
+    </section>
+
+    <section id="mermaid-section">
+        <h2>Mermaid.js Test</h2>
+        <pre class="mermaid">
+graph TD
+    A[Start] --> B{Is it Incrementum?}
+    B -->|Yes| C[Process Document]
+    B -->|No| D[Reject]
+    C --> E[Extract Knowledge]
+    E --> F[Learn]
+    F --> A
+        </pre>
+
+        <pre class="mermaid">
+sequenceDiagram
+    participant User
+    participant Incrementum
+    participant Database
+    
+    User->>Incrementum: Read Document
+    Incrementum->>Database: Store Position
+    User->>Incrementum: Create Extract
+    Incrementum->>Database: Save Extract
+    Database-->>Incrementum: Confirm Saved
+    Incrementum-->>User: Display Success
+        </pre>
+    </section>
+
+    <section id="katex-section">
+        <h2>KaTeX Test</h2>
+        <p>Inline math example: <span class="math-inline">E = mc^2</span></p>
+        
+        <div class="math display">
+        \begin{align}
+        \nabla \times \vec{\mathbf{B}} -\, \frac1c\, \frac{\partial\vec{\mathbf{E}}}{\partial t} & = \frac{4\pi}{c}\vec{\mathbf{j}} \\
+        \nabla \cdot \vec{\mathbf{E}} & = 4 \pi \rho \\
+        \nabla \times \vec{\mathbf{E}}\, +\, \frac1c\, \frac{\partial\vec{\mathbf{B}}}{\partial t} & = \vec{\mathbf{0}} \\
+        \nabla \cdot \vec{\mathbf{B}} & = 0
+        \end{align}
+        </div>
+        
+        <p>The quadratic formula is:</p>
+        <div class="math display">
+        x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
+        </div>
+    </section>
+
+    <section id="plotly-section">
+        <h2>Plotly.js Test</h2>
+        <div id="plotly-chart" style="width:100%;height:400px;"></div>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                if (typeof Plotly !== 'undefined') {
+                    var trace1 = {
+                        x: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                        y: [1, 4, 9, 16, 25, 36, 49, 64, 81, 100],
+                        type: 'scatter',
+                        name: 'Square'
+                    };
+                    
+                    var trace2 = {
+                        x: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                        y: [1, 8, 27, 64, 125, 216, 343, 512, 729, 1000],
+                        type: 'scatter',
+                        name: 'Cube'
+                    };
+                    
+                    var data = [trace1, trace2];
+                    
+                    var layout = {
+                        title: 'Learning Progress Example',
+                        xaxis: {
+                            title: 'Days'
+                        },
+                        yaxis: {
+                            title: 'Knowledge'
+                        }
+                    };
+                    
+                    Plotly.newPlot('plotly-chart', data, layout);
+                } else {
+                    document.getElementById('plotly-chart').innerHTML = 'Plotly.js not available';
+                }
+            });
+        </script>
+    </section>
+
+    <section id="three-section">
+        <h2>Three.js Test</h2>
+        <div id="three-canvas"></div>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                if (typeof THREE !== 'undefined') {
+                    var scene = new THREE.Scene();
+                    scene.background = new THREE.Color(0xf0f0f0);
+                    
+                    var camera = new THREE.PerspectiveCamera(75, window.innerWidth / 300, 0.1, 1000);
+                    camera.position.z = 5;
+                    
+                    var renderer = new THREE.WebGLRenderer({ antialias: true });
+                    renderer.setSize(document.getElementById('three-canvas').clientWidth, 300);
+                    document.getElementById('three-canvas').appendChild(renderer.domElement);
+                    
+                    // Create a cube
+                    var geometry = new THREE.BoxGeometry(2, 2, 2);
+                    var material = new THREE.MeshBasicMaterial({
+                        color: 0x0066cc,
+                        wireframe: true
+                    });
+                    var cube = new THREE.Mesh(geometry, material);
+                    scene.add(cube);
+                    
+                    // Animation
+                    function animate() {
+                        requestAnimationFrame(animate);
+                        cube.rotation.x += 0.01;
+                        cube.rotation.y += 0.01;
+                        renderer.render(scene, camera);
+                    }
+                    animate();
+                    
+                    // Handle window resize
+                    window.addEventListener('resize', function() {
+                        renderer.setSize(document.getElementById('three-canvas').clientWidth, 300);
+                        camera.aspect = document.getElementById('three-canvas').clientWidth / 300;
+                        camera.updateProjectionMatrix();
+                    });
+                } else {
+                    document.getElementById('three-canvas').innerHTML = 'Three.js not available';
+                }
+            });
+        </script>
+    </section>
+</body>
+</html> 

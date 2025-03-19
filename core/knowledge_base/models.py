@@ -61,6 +61,7 @@ class Document(Base):
     last_accessed = Column(DateTime, default=datetime.utcnow)
     processing_progress = Column(Float, default=0.0)  # 0-100%
     category_id = Column(Integer, ForeignKey('categories.id'))
+    position = Column(Integer, nullable=True)  # Reading position
     
     # Queue management fields
     priority = Column(Integer, default=50)  # 1-100 scale

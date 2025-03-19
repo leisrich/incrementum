@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>KaTeX and Markdown Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .math {
+            background-color: #f8f8f8;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        .markdown {
+            background-color: #f8f8f8;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        pre {
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>KaTeX and Markdown Rendering Test</h1>
+    
+    <div class="section">
+        <h2>KaTeX Examples</h2>
+        <div id="auto-render-test">
+            <p>This is inline math with dollar signs: $E = mc^2$</p>
+            <p>This is display math with double dollar signs:</p>
+            $$\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}$$
+        </div>
+        
+        <p>Direct KaTeX rendering with class="math":</p>
+        <div class="math">
+            F(x) = \int_{-\infty}^x f(t) dt
+        </div>
+        
+        <p>Inline example: <span class="math-inline">a^2 + b^2 = c^2</span></p>
+    </div>
+    
+    <div class="section">
+        <h2>Markdown Examples</h2>
+        <div class="markdown">
+# Heading Level 1
+## Heading Level 2
+
+This is **bold text** and this is *italic text*.
+
+- List item 1
+- List item 2
+  - Nested item
+  - Another nested item
+- List item 3
+
+Code example:
+```javascript
+function hello() {
+  console.log("Hello, world!");
+}
+```
+
+> This is a blockquote with a [link to Google](https://www.google.com)
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>Debug Information</h2>
+        <div id="debug-output"></div>
+        <button id="debug-button" onclick="displayDebugInfo()">Show Debug Info</button>
+    </div>
+    
+    <script>
+        function displayDebugInfo() {
+            let debug = document.getElementById('debug-output');
+            debug.innerHTML = '';
+            
+            // Check which libraries are loaded
+            let libraries = {
+                'katex': typeof katex !== 'undefined',
+                'renderMathInElement': typeof renderMathInElement !== 'undefined',
+                'marked': typeof marked !== 'undefined'
+            };
+            
+            // Display library status
+            let libStatus = document.createElement('div');
+            libStatus.innerHTML = '<h3>Library Status</h3>';
+            
+            for (let lib in libraries) {
+                let status = document.createElement('p');
+                status.innerHTML = lib + ': ' + (libraries[lib] ? 
+                    '<span style="color:green">Loaded</span>' : 
+                    '<span style="color:red">Not Loaded</span>');
+                libStatus.appendChild(status);
+            }
+            
+            debug.appendChild(libStatus);
+            
+            // Count elements
+            let counts = {
+                'math elements': document.querySelectorAll('.math').length,
+                'math-inline elements': document.querySelectorAll('.math-inline').length,
+                'markdown elements': document.querySelectorAll('.markdown').length,
+                'katex-output elements': document.querySelectorAll('.katex-output').length,
+                'markdown-output elements': document.querySelectorAll('.markdown-output').length
+            };
+            
+            // Display element counts
+            let countDiv = document.createElement('div');
+            countDiv.innerHTML = '<h3>Element Counts</h3>';
+            
+            for (let type in counts) {
+                let count = document.createElement('p');
+                count.textContent = type + ': ' + counts[type];
+                countDiv.appendChild(count);
+            }
+            
+            debug.appendChild(countDiv);
+        }
+        
+        // Call once on load
+        window.addEventListener('load', function() {
+            displayDebugInfo();
+            
+            // Add a manual initialization button
+            let initButton = document.createElement('button');
+            initButton.textContent = 'Manual Initialize';
+            initButton.style.marginTop = '10px';
+            initButton.onclick = function() {
+                if (typeof initializeCustomLibraries === 'function') {
+                    initializeCustomLibraries();
+                    displayDebugInfo();
+                } else {
+                    alert('initializeCustomLibraries function not available');
+                }
+            };
+            
+            document.getElementById('debug-output').appendChild(initButton);
+        });
+    </script>
+</body>
+</html> 

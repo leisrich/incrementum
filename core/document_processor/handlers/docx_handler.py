@@ -307,7 +307,7 @@ class DOCXHandler(DocumentHandler):
     
     def download_from_url(self, url: str) -> Tuple[Optional[str], Dict[str, Any]]:
         """
-        Download a DOCX document from a URL.
+        Download a DOCX document from a URL and save it to permanent storage.
         
         Args:
             url: URL to download from
@@ -318,23 +318,34 @@ class DOCXHandler(DocumentHandler):
         metadata = {}
         
         try:
+            # Import document storage directory
+            from core.document_processor.document_importer import DOCUMENT_STORAGE_DIR
+            
+            # Generate a unique filename based on URL and timestamp
+            filename = f"docx_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.path.basename(url)}"
+            if not filename.endswith('.docx'):
+                filename += '.docx'
+            
+            # Sanitize filename
+            filename = ''.join(c for c in filename if c.isalnum() or c in '._-')
+            
+            # Full path to save the file
+            file_path = os.path.join(DOCUMENT_STORAGE_DIR, filename)
+            
             # Download the file
             response = requests.get(url, stream=True)
             response.raise_for_status()
             
-            # Create a temporary file
-            fd, temp_path = tempfile.mkstemp(suffix='.docx')
-            
             # Save the content
-            with os.fdopen(fd, 'wb') as f:
+            with open(file_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             
             # Extract metadata
-            metadata = self.extract_metadata(temp_path)
+            metadata = self.extract_metadata(file_path)
             metadata['source_url'] = url
             
-            return temp_path, metadata
+            return file_path, metadata
             
         except Exception as e:
             logger.exception(f"Error downloading DOCX: {e}")

@@ -95,6 +95,10 @@ def migrate_database():
         if 'difficulty' not in column_names:
             logger.info("Adding difficulty column to documents table")
             cursor.execute("ALTER TABLE documents ADD COLUMN difficulty FLOAT")
+            
+        if 'position' not in column_names:
+            logger.info("Adding position column to documents table")
+            cursor.execute("ALTER TABLE documents ADD COLUMN position INTEGER")
         
         # Commit the changes
         conn.commit()

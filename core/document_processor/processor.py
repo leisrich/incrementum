@@ -12,6 +12,7 @@ from .handlers.html_handler import HTMLHandler
 from .handlers.text_handler import TextHandler
 from .handlers.epub_handler import EPUBHandler
 from .handlers.docx_handler import DOCXHandler
+from .handlers.youtube_handler import YouTubeHandler
 
 # Database models
 from core.knowledge_base.models import Document, Category
@@ -30,6 +31,7 @@ class DocumentProcessor:
             'txt': TextHandler(),
             'epub': EPUBHandler(),
             'docx': DOCXHandler(),
+            'youtube': YouTubeHandler(),
         }
     
     def import_document(self, file_path: str, category_id: Optional[int] = None) -> Optional[Document]:
@@ -44,12 +46,21 @@ class DocumentProcessor:
             Document object if import successful, None otherwise
         """
         if not os.path.exists(file_path):
+            # Special handling for URLs - particularly YouTube
+            if file_path.startswith('http'):
+                return self.import_from_url(file_path, category_id)
+            
             logger.error(f"File not found: {file_path}")
             return None
         
         # Determine document type from extension
         _, ext = os.path.splitext(file_path)
         content_type = ext[1:].lower()  # Remove the dot
+        
+        # Special handling for EPUB
+        if content_type == 'epub':
+            # Make sure we use epub handler and content_type
+            content_type = 'epub'
         
         # Check if we have a handler for this type
         if content_type not in self.handlers:
@@ -88,37 +99,41 @@ class DocumentProcessor:
             self.db_session.rollback()
             return None
     
-    def _process_document_content(self, document_id: int) -> None:
+    def _process_document_content(self, document_id: int) -> bool:
         """
-        Process document content in the background.
-        This is a placeholder - in a real implementation, this would be a background task.
+        Process the content of a document in the background.
         
         Args:
             document_id: ID of the document to process
+            
+        Returns:
+            True if processing started successfully, False otherwise
         """
+        # For now, just retrieve document for context
         document = self.db_session.query(Document).get(document_id)
         if not document:
             logger.error(f"Document not found: {document_id}")
-            return
+            return False
         
         try:
-            # Get the appropriate handler
-            handler = self.handlers[document.content_type]
+            # Mark processing as started
+            document.processing_progress = 10.0
+            self.db_session.commit()
             
-            # Extract content
-            content = handler.extract_content(document.file_path)
+            # TODO: Implement background processing logic
+            # This would extract text, generate thumbnails, etc.
             
-            # Process content (this would be more complex in a real implementation)
-            # For now, just update the progress
+            # Mark as complete
             document.processing_progress = 100.0
             self.db_session.commit()
             
-            logger.info(f"Document processed successfully: {document.title}")
+            return True
             
         except Exception as e:
-            logger.exception(f"Error processing document content: {e}")
-            document.processing_progress = -1.0  # Indicate error
+            logger.exception(f"Error processing document: {e}")
+            document.processing_progress = -1.0  # Error state
             self.db_session.commit()
+            return False
     
     def import_from_url(self, url: str, category_id: Optional[int] = None) -> Optional[Document]:
         """
@@ -142,6 +157,10 @@ class DocumentProcessor:
             ext_type = ext[1:].lower()
             if ext_type in self.handlers:
                 content_type = ext_type
+        
+        # Check for YouTube URLs
+        if 'youtube.com' in parsed_url.netloc or 'youtu.be' in parsed_url.netloc:
+            content_type = 'youtube'
         
         try:
             # Download the content

@@ -276,22 +276,23 @@ class PDFViewWidget(QWidget):
         
         self.document = document
         self.db_session = db_session
-        self.extractor = ContentExtractor(db_session)
-        
         self.doc = None
         self.current_page = 0
-        self.extracts = []
-        self.bookmarks = []
+        self.total_pages = 0
+        self.extractor = ContentExtractor(db_session)
+        
+        # Create UI components
+        self._create_ui()
         
         # Load the PDF
         self._load_pdf()
         
-        # Set up UI
-        self._create_ui()
-        
         # Load existing extracts and bookmarks
         self._load_extracts()
         self._load_bookmarks()
+        
+        # Restore last position if available
+        self._restore_position()
     
     def _create_ui(self):
         """Create the UI layout."""
@@ -313,8 +314,8 @@ class PDFViewWidget(QWidget):
         self.page_spin.valueChanged.connect(self._on_page_changed)
         toolbar.addWidget(self.page_spin)
         
-        self.page_count_label = QLabel(f" / {len(self.doc) if self.doc else 1}")
-        toolbar.addWidget(self.page_count_label)
+        self.page_label = QLabel(f" of {len(self.doc) if self.doc else 1}")
+        toolbar.addWidget(self.page_label)
         
         self.next_page_action = QAction("Next Page", self)
         self.next_page_action.setShortcut(QKeySequence("PgDown"))
@@ -410,21 +411,24 @@ class PDFViewWidget(QWidget):
     def _load_pdf(self):
         """Load the PDF document."""
         try:
-            if os.path.exists(self.document.file_path):
-                self.doc = fitz.open(self.document.file_path)
-                logger.info(f"Loaded PDF with {len(self.doc)} pages")
-            else:
-                logger.error(f"PDF file not found: {self.document.file_path}")
-                QMessageBox.warning(
-                    self, "Error", f"PDF file not found: {self.document.file_path}"
-                )
-                self.doc = None
+            file_path = self.document.file_path
+            
+            # Open the PDF document
+            self.doc = fitz.open(file_path)
+            self.total_pages = len(self.doc)
+            
+            # Set initial page
+            if self.total_pages > 0:
+                self.page_spin.setMaximum(self.total_pages)
+                self.page_label.setText(f" of {self.total_pages}")
+                
+                # Set the first page initially
+                self.pdf_view.set_page(self.doc, 0)
+            
+            logger.info(f"Loaded PDF: {file_path} with {self.total_pages} pages")
         except Exception as e:
             logger.exception(f"Error loading PDF: {e}")
-            QMessageBox.warning(
-                self, "Error", f"Error loading PDF: {str(e)}"
-            )
-            self.doc = None
+            QMessageBox.warning(self, "Error", f"Error loading PDF: {str(e)}")
     
     def _load_extracts(self):
         """Load existing extracts for this document."""
@@ -561,3 +565,45 @@ class PDFViewWidget(QWidget):
             self.current_page = page_number
             self.page_spin.setValue(self.current_page + 1)
             self.pdf_view.set_page(self.doc, self.current_page)
+
+    def _save_position(self):
+        """Save the current page position to the document."""
+        try:
+            if not hasattr(self, 'document') or not self.document:
+                return
+            
+            # Save current page number as position
+            self.document.position = self.current_page
+            self.db_session.commit()
+            logger.info(f"Saved PDF position: page {self.current_page} for {self.document.title}")
+        except Exception as e:
+            logger.exception(f"Error saving PDF position: {e}")
+    
+    def _restore_position(self):
+        """Restore the last reading position (page number)."""
+        try:
+            if not hasattr(self, 'document') or not self.document:
+                return
+            
+            # Get stored position (page number)
+            position = getattr(self.document, 'position', None)
+            if position is None or position < 0:
+                return
+            
+            # Make sure position is a valid page number
+            page_number = min(int(position), self.total_pages - 1)
+            page_number = max(0, page_number)  # Ensure it's not negative
+            
+            # Set current page and update display
+            self.current_page = page_number
+            self.page_spin.setValue(page_number + 1)  # +1 for display (1-based)
+            self.pdf_view.set_page(self.doc, page_number)
+            
+            logger.info(f"Restored PDF position: page {page_number} for {self.document.title}")
+        except Exception as e:
+            logger.exception(f"Error restoring PDF position: {e}")
+            
+    def closeEvent(self, event):
+        """Handle widget close event to save position."""
+        self._save_position()
+        super().closeEvent(event)

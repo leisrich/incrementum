@@ -7,6 +7,8 @@ import requests
 import shutil
 import zipfile
 import chardet
+import html2text
+import io
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +16,6 @@ from pathlib import Path
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
-import html2text
 
 from .base_handler import DocumentHandler
 
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 class EPUBHandler(DocumentHandler):
     """
-    Handler for processing EPUB documents with improved character encoding support.
+    Handler for processing EPUB documents with improved content extraction.
     """
     
     def extract_metadata(self, file_path: str) -> Dict[str, Any]:
@@ -46,7 +47,11 @@ class EPUBHandler(DocumentHandler):
         }
         
         try:
-            book = epub.read_epub(file_path)
+            # Suppress warnings from ebooklib
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                book = epub.read_epub(file_path)
             
             # Extract metadata
             if book.get_metadata('DC', 'title'):
@@ -89,7 +94,7 @@ class EPUBHandler(DocumentHandler):
     
     def extract_content(self, file_path: str) -> Dict[str, Any]:
         """
-        Extract content from an EPUB document with proper character encoding handling.
+        Extract content from an EPUB document with enhanced format support.
         
         Args:
             file_path: Path to the EPUB file
@@ -106,91 +111,132 @@ class EPUBHandler(DocumentHandler):
         }
         
         try:
-            # Create temporary directory for extraction
-            temp_dir = tempfile.mkdtemp()
+            # Suppress warnings from ebooklib
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                book = epub.read_epub(file_path)
             
-            try:
-                # Extract EPUB as ZIP
-                with zipfile.ZipFile(file_path, 'r') as zipf:
-                    zipf.extractall(temp_dir)
-                
-                # Find content files (HTML)
-                html_files = []
-                for root, _, files in os.walk(temp_dir):
-                    for file in files:
-                        if file.endswith(('.html', '.xhtml', '.htm')):
-                            html_files.append(os.path.join(root, file))
-                
-                # Process HTML files with proper encoding detection
-                all_text = []
-                all_html = []
-                
-                for html_file in sorted(html_files):
-                    # Detect encoding
-                    with open(html_file, 'rb') as f:
-                        raw_data = f.read()
-                        detected = chardet.detect(raw_data)
-                        encoding = detected['encoding'] or 'utf-8'
+            # Process TOC
+            toc = book.toc
+            for item in toc:
+                if isinstance(item, tuple):
+                    result['toc'].append({
+                        'title': item[0].title,
+                        'href': item[0].href
+                    })
+                else:
+                    result['toc'].append({
+                        'title': item.title,
+                        'href': item.href
+                    })
+            
+            # Build a combined HTML document with all chapters
+            all_html = []
+            all_html.append('<!DOCTYPE html>\n<html>\n<head>\n<meta charset="UTF-8">\n')
+            
+            # Add title
+            if book.get_metadata('DC', 'title'):
+                title = book.get_metadata('DC', 'title')[0][0]
+                all_html.append(f'<title>{title}</title>\n')
+            
+            # Add CSS from the EPUB
+            css_content = ''
+            for item in book.get_items_of_type(ebooklib.ITEM_STYLE):
+                try:
+                    css_text = item.get_content().decode('utf-8', errors='replace')
+                    css_content += css_text + '\n'
+                except Exception as e:
+                    logger.warning(f"Error extracting CSS: {e}")
+            
+            if css_content:
+                all_html.append(f'<style>\n{css_content}\n</style>\n')
+            else:
+                # Add default style if no CSS was found
+                all_html.append("""
+                <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; margin: 2em; }
+                h1, h2, h3 { color: #333; }
+                img { max-width: 100%; height: auto; }
+                </style>
+                """)
+            
+            all_html.append('</head>\n<body>\n')
+            
+            # Map of image IDs to base64 encoded data
+            images = {}
+            for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+                try:
+                    image_id = item.id
+                    image_href = item.get_name()
+                    images[image_href] = image_id
+                except Exception as e:
+                    logger.warning(f"Error processing image: {e}")
+            
+            # Extract content chapter by chapter
+            for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+                try:
+                    # Get raw content
+                    content = item.get_content().decode('utf-8', errors='replace')
                     
-                    # Read with detected encoding
-                    with open(html_file, 'r', encoding=encoding, errors='replace') as f:
-                        html_content = f.read()
+                    # Fix relative paths for images
+                    soup = BeautifulSoup(content, 'html.parser')
                     
-                    # Parse HTML
-                    soup = BeautifulSoup(html_content, 'html.parser')
+                    # Process images within the chapter
+                    for img in soup.find_all('img'):
+                        src = img.get('src', '')
+                        
+                        # Fix relative paths
+                        if src in images:
+                            # Point to original file path in our setup
+                            img['src'] = src
                     
-                    # Clean up HTML
-                    for script in soup(["script", "style"]):
-                        script.extract()
-                    
-                    # Get text
-                    text = soup.get_text(separator='\n\n')
-                    all_text.append(text)
-                    
-                    # Get cleaned HTML
+                    # Clean up HTML content
                     clean_html = str(soup)
-                    all_html.append(clean_html)
                     
-                    # Add chapter
+                    # Extract text
+                    text = soup.get_text(separator='\n\n')
+                    
+                    # Add chapter to combined HTML
+                    all_html.append(f'<div class="chapter" id="{item.id}">\n')
+                    all_html.append(clean_html)
+                    all_html.append('</div>\n')
+                    
+                    # Add to chapters
                     result['chapters'].append({
-                        'file': os.path.basename(html_file),
+                        'id': item.id,
+                        'href': item.get_name(),
                         'html': clean_html,
                         'text': text
                     })
-                
-                # Combine all content
-                result['text'] = '\n\n'.join(all_text)
-                result['html'] = '\n\n'.join(all_html)
-                
-                # Convert to markdown
-                h2t = html2text.HTML2Text()
-                h2t.ignore_links = False
-                h2t.ignore_images = False
-                h2t.unicode_snob = True
-                result['markdown'] = h2t.handle(result['html'])
-                
-                # Try to extract TOC using ebooklib as backup
-                try:
-                    book = epub.read_epub(file_path)
-                    toc = book.toc
                     
-                    for item in toc:
-                        if isinstance(item, tuple):
-                            result['toc'].append({
-                                'title': item[0].title,
-                                'href': item[0].href
-                            })
-                        else:
-                            result['toc'].append({
-                                'title': item.title,
-                                'href': item.href
-                            })
+                    # Add to full text
+                    result['text'] += text + '\n\n'
+                    
                 except Exception as e:
-                    logger.warning(f"Error extracting TOC with ebooklib: {e}")
+                    logger.warning(f"Error processing EPUB item {item.id}: {e}")
             
-            finally:
-                # Clean up temp directory
-                shutil.rmtree(temp_dir)
+            all_html.append('</body>\n</html>')
+            
+            # Combined HTML content
+            result['html'] = '\n'.join(all_html)
+            
+            # Generate markdown
+            h2t = html2text.HTML2Text()
+            h2t.ignore_links = False
+            h2t.ignore_images = False
+            h2t.unicode_snob = True
+            h2t.single_line_break = False
+            result['markdown'] = h2t.handle(result['html'])
+            
+            # Save HTML for easier viewing
+            html_path = os.path.splitext(file_path)[0] + '.html'
+            try:
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(result['html'])
+                logger.info(f"Saved HTML version of EPUB to {html_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save HTML version: {e}")
             
         except Exception as e:
             logger.exception(f"Error extracting EPUB content: {e}")
@@ -199,7 +245,7 @@ class EPUBHandler(DocumentHandler):
     
     def download_from_url(self, url: str) -> Tuple[Optional[str], Dict[str, Any]]:
         """
-        Download an EPUB document from a URL.
+        Download an EPUB document from a URL and save it to permanent storage.
         
         Args:
             url: URL to download from
@@ -210,23 +256,40 @@ class EPUBHandler(DocumentHandler):
         metadata = {}
         
         try:
+            # Import document storage directory
+            from core.document_processor.document_importer import DOCUMENT_STORAGE_DIR
+            
+            # Generate a unique filename based on URL and timestamp
+            filename = f"epub_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.path.basename(url)}"
+            if not filename.endswith('.epub'):
+                filename += '.epub'
+            
+            # Sanitize filename
+            filename = ''.join(c for c in filename if c.isalnum() or c in '._-')
+            
+            # Full path to save the file
+            file_path = os.path.join(DOCUMENT_STORAGE_DIR, filename)
+            
             # Download the file
             response = requests.get(url, stream=True)
             response.raise_for_status()
             
-            # Create a temporary file
-            fd, temp_path = tempfile.mkstemp(suffix='.epub')
-            
             # Save the content
-            with os.fdopen(fd, 'wb') as f:
+            with open(file_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             
             # Extract metadata
-            metadata = self.extract_metadata(temp_path)
+            metadata = self.extract_metadata(file_path)
             metadata['source_url'] = url
             
-            return temp_path, metadata
+            # Attempt to convert EPUB to HTML immediately for better viewing
+            try:
+                self.extract_content(file_path)
+            except Exception as e:
+                logger.warning(f"Failed to pre-extract EPUB content: {e}")
+            
+            return file_path, metadata
             
         except Exception as e:
             logger.exception(f"Error downloading EPUB: {e}")

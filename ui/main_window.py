@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QLineEdit,
     QDockWidget, QInputDialog, QSizePolicy, QDialog
 )
-from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread
+from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread, QByteArray
 from PyQt6.QtGui import QIcon, QAction, QKeySequence, QPixmap
 
 from core.knowledge_base.models import init_database, Document, Category, Extract, LearningItem, Tag
@@ -43,6 +43,7 @@ from .import_dialog import ImportDialog
 from .learning_item_editor import LearningItemEditor
 from .models.document_model import DocumentModel
 from .models.category_model import CategoryModel
+from .web_browser_view import WebBrowserView
 from core.utils.shortcuts import ShortcutManager
 from .arxiv_dialog import ArxivDialog
 from core.document_processor.summarizer import SummarizeDialog
@@ -71,7 +72,10 @@ class DockablePDFView(QDockWidget):
         # Set as dock widget content
         self.setWidget(self.pdf_widget)
         
-        # Allow closable and floatable
+        # Allow positioning in all areas
+        self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        
+        # Allow closable, floatable, and movable
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable |
             QDockWidget.DockWidgetFeature.DockWidgetFloatable |
@@ -80,6 +84,12 @@ class DockablePDFView(QDockWidget):
         
         # Set initial size
         self.setMinimumSize(600, 800)
+    
+    def closeEvent(self, event):
+        """Handle close event to save the PDF position."""
+        if hasattr(self.pdf_widget, '_save_position'):
+            self.pdf_widget._save_position()
+        super().closeEvent(event)
 
 class MainWindow(QMainWindow):
     """Main application window with multi-pane interface."""
@@ -118,6 +128,9 @@ class MainWindow(QMainWindow):
         self._load_recent_documents()
         self._update_status()
         
+        # Restore saved layout if available
+        self._restore_saved_layout()
+        
         # Set up auto-save timer
         self._setup_auto_save()
         
@@ -126,6 +139,20 @@ class MainWindow(QMainWindow):
         
         # Show startup statistics if configured
         self._check_startup_statistics()
+    
+    def _restore_saved_layout(self):
+        """Restore the saved dock layout if available."""
+        # Get saved layout from settings
+        layout_data = self.settings_manager.get_setting("ui", "dock_layout", None)
+        
+        if layout_data:
+            try:
+                # Restore layout state
+                self.restoreState(QByteArray.fromBase64(layout_data.encode()))
+                logger.info("Restored saved layout")
+            except Exception as e:
+                logger.error(f"Failed to restore saved layout: {e}")
+                # Fall back to default layout
     
     def _create_actions(self):
         """Create actions for menus and toolbars with keyboard shortcuts."""
@@ -196,6 +223,18 @@ class MainWindow(QMainWindow):
         self.action_toggle_queue_panel.setChecked(False)
         self.action_toggle_queue_panel.triggered.connect(self._on_toggle_queue_panel)
         
+        # Queue and document navigation
+        self.action_read_next = QAction("Read Next in Queue", self)
+        self.action_read_next.triggered.connect(self._on_read_next)
+        
+        self.action_prev_document = QAction("Previous Document", self)
+        self.action_prev_document.setShortcut(ShortcutManager.PREV_DOCUMENT)
+        self.action_prev_document.triggered.connect(self._on_prev_document)
+        
+        self.action_next_document = QAction("Next Document", self)
+        self.action_next_document.setShortcut(ShortcutManager.NEXT_DOCUMENT)
+        self.action_next_document.triggered.connect(self._on_read_next)
+        
         # Learning menu actions
         self.action_start_review = QAction("Start Review Session", self)
         self.action_start_review.setShortcut(ShortcutManager.START_REVIEW)
@@ -244,10 +283,6 @@ class MainWindow(QMainWindow):
         self.action_view_queue.setShortcut(QKeySequence("Ctrl+Q"))
         self.action_view_queue.triggered.connect(self._on_view_queue)
         
-        self.action_read_next = QAction("Read Next Document", self)
-        self.action_read_next.setShortcut(QKeySequence("Ctrl+Shift+N"))
-        self.action_read_next.triggered.connect(self._on_read_next)
-
         # Dock management actions
         self.action_tile_docks = QAction("Tile PDF Viewers", self)
         self.action_tile_docks.triggered.connect(self._on_tile_docks)
@@ -257,6 +292,24 @@ class MainWindow(QMainWindow):
         
         self.action_tab_docks = QAction("Tab PDF Viewers", self)
         self.action_tab_docks.triggered.connect(self._on_tab_docks)
+
+        # Import actions
+        self.action_import_file = QAction("Import File", self)
+        self.action_import_file.setStatusTip("Import a document from a file")
+        self.action_import_file.triggered.connect(self._on_import_file)
+        
+        self.action_import_url = QAction("Import URL", self)
+        self.action_import_url.setStatusTip("Import a document from a URL")
+        self.action_import_url.triggered.connect(self._on_import_url)
+        
+        self.action_import_knowledge = QAction("Import Knowledge", self)
+        self.action_import_knowledge.setStatusTip("Import knowledge from other sources")
+        self.action_import_knowledge.triggered.connect(self._on_import_knowledge)
+        
+        self.action_web_browser = QAction("Web Browser", self)
+        self.action_web_browser.setStatusTip("Browse the web and create extracts")
+        self.action_web_browser.setShortcut(QKeySequence("Ctrl+B"))
+        self.action_web_browser.triggered.connect(self._on_open_web_browser)
 
     @pyqtSlot()
     def _on_save(self):
@@ -331,7 +384,7 @@ class MainWindow(QMainWindow):
             
    
     def _create_menu_bar(self):
-        """Create the menu bar with main menus."""
+        """Create the menu bar with all menus."""
         self.menu_bar = self.menuBar()
         
         # File menu
@@ -374,11 +427,13 @@ class MainWindow(QMainWindow):
         self.action_import_url.triggered.connect(self._on_import_url)
         self.import_menu.addAction(self.action_import_url)
         
-        # Add import from ArXiv action
-        self.action_import_arxiv = QAction("Import from &ArXiv...", self)
-        self.action_import_arxiv.setStatusTip("Import a paper from ArXiv")
-        self.action_import_arxiv.triggered.connect(self._on_import_arxiv)
-        self.import_menu.addAction(self.action_import_arxiv)
+        # Add web browser action if enabled in settings
+        if self.settings_manager.get_setting("ui", "web_browser_enabled", True):
+            self.action_web_browser = QAction("Open &Web Browser...", self)
+            self.action_web_browser.setStatusTip("Browse the web and create extracts")
+            self.action_web_browser.setShortcut(QKeySequence("Ctrl+B"))
+            self.action_web_browser.triggered.connect(self._on_open_web_browser)
+            self.import_menu.addAction(self.action_web_browser)
         
         # Add import knowledge action
         self.action_import_knowledge = QAction("Import &Knowledge Base...", self)
@@ -441,6 +496,7 @@ class MainWindow(QMainWindow):
         tools_menu = self.menu_bar.addMenu("&Tools")
         tools_menu.addAction(self.action_start_review)
         tools_menu.addAction(self.action_view_queue)
+        tools_menu.addAction(self.action_prev_document)
         tools_menu.addAction(self.action_read_next)
         tools_menu.addSeparator()
         tools_menu.addAction(self.action_search)
@@ -454,6 +510,8 @@ class MainWindow(QMainWindow):
         # Help menu
         help_menu = self.menu_bar.addMenu("&Help")
         help_action = help_menu.addAction("Documentation")
+        layout_help_action = help_menu.addAction("Interface Layout")
+        layout_help_action.triggered.connect(self._on_layout_help)
         about_action = help_menu.addAction("About")
         about_action.triggered.connect(self._on_about)
     
@@ -465,8 +523,15 @@ class MainWindow(QMainWindow):
         
         # Add common actions
         self.tool_bar.addAction(self.action_import_file)
+        self.tool_bar.addAction(self.action_import_url)
+        
+        # Add web browser action if enabled
+        if self.settings_manager.get_setting("ui", "web_browser_enabled", True):
+            self.tool_bar.addAction(self.action_web_browser)
+        
         self.tool_bar.addAction(self.action_save)
         self.tool_bar.addSeparator()
+        
         self.tool_bar.addAction(self.action_add_bookmark)
         self.tool_bar.addAction(self.action_highlight)
         self.tool_bar.addSeparator()
@@ -474,6 +539,7 @@ class MainWindow(QMainWindow):
         self.tool_bar.addSeparator()
         self.tool_bar.addAction(self.action_start_review)
         self.tool_bar.addAction(self.action_view_queue)
+        self.tool_bar.addAction(self.action_prev_document)
         self.tool_bar.addAction(self.action_read_next)
         self.tool_bar.addSeparator()
         self.tool_bar.addAction(self.action_search)
@@ -513,7 +579,12 @@ class MainWindow(QMainWindow):
         """Create dock widgets."""
         # Categories dock
         self.category_dock = QDockWidget("Categories", self)
-        self.category_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.category_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.category_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable |
+            QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
         
         # Create category widget
         category_widget = QWidget()
@@ -556,7 +627,12 @@ class MainWindow(QMainWindow):
         
         # Search dock
         self.search_dock = QDockWidget("Search", self)
-        self.search_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.search_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.search_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable |
+            QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
         self.search_view = SearchView(self.db_session)
         self.search_view.itemSelected.connect(self._on_search_item_selected)
         self.search_dock.setWidget(self.search_view)
@@ -565,7 +641,12 @@ class MainWindow(QMainWindow):
         
         # Statistics dock
         self.stats_dock = QDockWidget("Statistics", self)
-        self.stats_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.stats_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.stats_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable |
+            QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
         self.stats_view = StatisticsWidget(self.db_session)
         self.stats_dock.setWidget(self.stats_view)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.stats_dock)
@@ -573,7 +654,12 @@ class MainWindow(QMainWindow):
         
         # Queue dock
         self.queue_dock = QDockWidget("Reading Queue", self)
-        self.queue_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.queue_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.queue_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable |
+            QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
         
         # Create queue widget
         self.queue_view = QueueView(self.db_session)
@@ -585,6 +671,125 @@ class MainWindow(QMainWindow):
         # Initially hidden
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.queue_dock)
         self.queue_dock.setVisible(False)
+
+    def _setup_dock_options(self):
+        """Set up dock widget options and behavior."""
+        # Allow dock widgets to be nested and tabbed
+        self.setDockOptions(
+            QMainWindow.DockOption.AllowNestedDocks |
+            QMainWindow.DockOption.AllowTabbedDocks |
+            QMainWindow.DockOption.AnimatedDocks |
+            QMainWindow.DockOption.GroupedDragging
+        )
+
+        # Add a menu for layout management
+        layout_menu = self.view_menu.addMenu("Layout Management")
+
+        # Add action to reset dock layout
+        self.action_reset_layout = QAction("Reset to Default Layout", self)
+        self.action_reset_layout.triggered.connect(self._on_reset_layout)
+        layout_menu.addAction(self.action_reset_layout)
+
+        # Add action to save current layout
+        self.action_save_layout = QAction("Save Current Layout", self)
+        self.action_save_layout.triggered.connect(self._on_save_layout)
+        layout_menu.addAction(self.action_save_layout)
+
+        # Add action to load saved layout
+        self.action_load_layout = QAction("Load Saved Layout", self)
+        self.action_load_layout.triggered.connect(self._on_load_layout)
+        layout_menu.addAction(self.action_load_layout)
+
+        # Add separator
+        self.view_menu.addSeparator()
+
+        # Add action to tile dock widgets
+        self.action_tile_docks = QAction("Tile PDF Viewers", self)
+        self.action_tile_docks.triggered.connect(self._on_tile_docks)
+        self.view_menu.addAction(self.action_tile_docks)
+
+        # Add action to cascade dock widgets
+        self.action_cascade_docks = QAction("Cascade PDF Viewers", self)
+        self.action_cascade_docks.triggered.connect(self._on_cascade_docks)
+        self.view_menu.addAction(self.action_cascade_docks)
+
+        # Add action to tab dock widgets
+        self.action_tab_docks = QAction("Tab PDF Viewers", self)
+        self.action_tab_docks.triggered.connect(self._on_tab_docks)
+        self.view_menu.addAction(self.action_tab_docks)
+    
+    @pyqtSlot()
+    def _on_reset_layout(self):
+        """Reset dock widgets to default layout."""
+        # Close all docks first
+        for dock in self.findChildren(QDockWidget):
+            dock.close()
+        
+        # Re-add docks to their default positions
+        if hasattr(self, 'category_dock'):
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.category_dock)
+            self.category_dock.setVisible(True)
+        
+        if hasattr(self, 'search_dock'):
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.search_dock)
+            self.search_dock.setVisible(False)
+        
+        if hasattr(self, 'stats_dock'):
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.stats_dock)
+            self.stats_dock.setVisible(False)
+        
+        if hasattr(self, 'queue_dock'):
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.queue_dock)
+            self.queue_dock.setVisible(False)
+        
+        # Show confirmation
+        QMessageBox.information(
+            self, "Layout Reset", 
+            "The layout has been reset to default positions."
+        )
+    
+    @pyqtSlot()
+    def _on_save_layout(self):
+        """Save the current dock layout."""
+        # Create layout state
+        state = self.saveState()
+        
+        # Save in settings
+        self.settings_manager.set_setting("ui", "dock_layout", state.toBase64().data().decode())
+        self.settings_manager.save_settings()
+        
+        # Show confirmation
+        QMessageBox.information(
+            self, "Layout Saved", 
+            "The current layout has been saved and will be restored on next launch."
+        )
+    
+    @pyqtSlot()
+    def _on_load_layout(self):
+        """Load the saved dock layout."""
+        # Get saved layout from settings
+        layout_data = self.settings_manager.get_setting("ui", "dock_layout", None)
+        
+        if not layout_data:
+            QMessageBox.information(
+                self, "No Saved Layout", 
+                "No saved layout found. Save a layout first."
+            )
+            return
+        
+        # Restore layout state
+        success = self.restoreState(QByteArray.fromBase64(layout_data.encode()))
+        
+        if success:
+            QMessageBox.information(
+                self, "Layout Restored", 
+                "The saved layout has been restored."
+            )
+        else:
+            QMessageBox.warning(
+                self, "Layout Restore Failed", 
+                "Failed to restore the saved layout."
+            )
 
     def _load_recent_documents(self):
         """Load and populate recent documents menu."""
@@ -672,12 +877,15 @@ class MainWindow(QMainWindow):
             url = dialog.url_line.text().strip()
             if not url:
                 return
+            
+            # Check if this is a YouTube URL - don't use Jina for YouTube
+            is_youtube = 'youtube.com' in url or 'youtu.be' in url
                 
-            # Check if we should use Jina.ai
-            use_jina = dialog.use_jina_checkbox.isChecked()
+            # Check if we should use Jina.ai (but not for YouTube)
+            use_jina = dialog.use_jina_checkbox.isChecked() and not is_youtube
             
             # Check if we should process with LLM
-            process_with_llm = dialog.process_with_llm_checkbox.isChecked()
+            process_with_llm = dialog.process_with_llm_checkbox.isChecked() and not is_youtube
             
             # Set up progress bar
             self.statusBar().showMessage(f"Downloading document from {url}...")
@@ -701,6 +909,17 @@ class MainWindow(QMainWindow):
                     importer = DocumentImporter(self.session)
                     
                     try:
+                        # Check if this is a YouTube URL - always use YouTube handler
+                        if 'youtube.com' in self.url or 'youtu.be' in self.url:
+                            from core.document_processor.handlers.youtube_handler import YouTubeHandler
+                            youtube_handler = YouTubeHandler()
+                            document_id = importer.import_from_url(self.url, handler=youtube_handler)
+                            if document_id:
+                                self.downloadFinished.emit(document_id)
+                            else:
+                                self.downloadFailed.emit("Failed to import YouTube video.")
+                            return
+                                    
                         # If using Jina.ai, import through JinaWebHandler
                         if self.use_jina:
                             from core.document_processor.handlers.jina_web_handler import JinaWebHandler
@@ -945,33 +1164,6 @@ class MainWindow(QMainWindow):
                 for tag in suggested_tags:
                     self.tag_manager.add_document_tag(document_id, tag)
     
-    def _setup_dock_options(self):
-        """Set up dock widget options and behavior."""
-        # Allow dock widgets to be nested and tabbed
-        self.setDockOptions(
-            QMainWindow.DockOption.AllowNestedDocks |
-            QMainWindow.DockOption.AllowTabbedDocks |
-            QMainWindow.DockOption.AnimatedDocks
-        )
-
-        # Add actions for dock management to the View menu
-        self.view_menu.addSeparator()
-
-        # Add action to tile dock widgets
-        self.action_tile_docks = QAction("Tile PDF Viewers", self)
-        self.action_tile_docks.triggered.connect(self._on_tile_docks)
-        self.view_menu.addAction(self.action_tile_docks)
-
-        # Add action to cascade dock widgets
-        self.action_cascade_docks = QAction("Cascade PDF Viewers", self)
-        self.action_cascade_docks.triggered.connect(self._on_cascade_docks)
-        self.view_menu.addAction(self.action_cascade_docks)
-
-        # Add action to tab dock widgets
-        self.action_tab_docks = QAction("Tab PDF Viewers", self)
-        self.action_tab_docks.triggered.connect(self._on_tab_docks)
-        self.view_menu.addAction(self.action_tab_docks)
-
     @pyqtSlot()
     def _on_tile_docks(self):
         """Tile all floating dock widgets."""
@@ -1077,6 +1269,10 @@ class MainWindow(QMainWindow):
         document.last_accessed = datetime.utcnow()
         self.db_session.commit()
         
+        # Update the queue view with the current document
+        if hasattr(self, 'queue_view'):
+            self.queue_view.set_current_document(document_id)
+        
         # Create appropriate document view based on content type
         if document.content_type == 'pdf':
             # Create a dockable PDF viewer for PDF documents
@@ -1094,12 +1290,38 @@ class MainWindow(QMainWindow):
             pdf_dock.activateWindow()
         else:
             # For non-PDF documents, use the regular tab approach
-            document_view = DocumentView(document, self.db_session)
+            document_view = DocumentView(self.db_session, document_id)
             
             # Add to tab widget
             tab_index = self.tab_widget.addTab(document_view, document.title)
             self.tab_widget.setCurrentIndex(tab_index)
-   
+    
+    @pyqtSlot()
+    def _on_read_next(self):
+        """Read the next document from the queue."""
+        try:
+            # Use the queue view's logic for finding the next document
+            self.queue_view._on_read_next()
+        except Exception as e:
+            logger.exception(f"Error getting next document to read: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error retrieving next document: {str(e)}"
+            )
+    
+    @pyqtSlot()
+    def _on_prev_document(self):
+        """Navigate to the previous document in the queue."""
+        try:
+            # Use the queue view's logic for finding the previous document
+            self.queue_view._on_read_prev()
+        except Exception as e:
+            logger.exception(f"Error getting previous document: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error retrieving previous document: {str(e)}"
+            )
+    
     def _open_extract(self, extract_id):
         """Open an extract in a new tab."""
         extract = self.db_session.query(Extract).get(extract_id)
@@ -1527,6 +1749,10 @@ class MainWindow(QMainWindow):
         
         # Check if widget is a document view
         if isinstance(widget, DocumentView):
+            # Save document position
+            if hasattr(widget, '_save_position'):
+                widget._save_position()
+                
             # Get document ID
             document_id = widget.document.id
             
@@ -1645,6 +1871,7 @@ class MainWindow(QMainWindow):
         self.search_view._on_search()
     
     
+    
     @pyqtSlot()
     def _on_browse_learning_items(self):
         """Handler for browsing learning items."""
@@ -1736,21 +1963,21 @@ class MainWindow(QMainWindow):
             document_id = action.data()
             self._open_document(document_id)
     
-    @pyqtSlot(Extract)
-    def _on_extract_created(self, extract):
-        """Handler for extract creation from PDF view."""
+    @pyqtSlot(int)
+    def _on_extract_created(self, extract_id):
+        """Handler for extract creation."""
         # Open extract view
-        self._open_extract(extract.id)
+        self._open_extract(extract_id)
         
         # Auto suggest tags if enabled
         auto_suggest = self.settings_manager.get_setting("document", "auto_suggest_tags", True)
         if auto_suggest:
-            suggested_tags = self.tag_manager.suggest_tags_for_extract(extract.id)
+            suggested_tags = self.tag_manager.suggest_tags_for_extract(extract_id)
             
             if suggested_tags:
                 # Add tags automatically
                 for tag in suggested_tags:
-                    self.tag_manager.add_extract_tag(extract.id, tag)
+                    self.tag_manager.add_extract_tag(extract_id, tag)
     
     @pyqtSlot(int)
     def _on_learning_item_saved(self, item_id):
@@ -1783,7 +2010,18 @@ class MainWindow(QMainWindow):
             <li>Spaced repetition with SM-18 algorithm</li>
             <li>Knowledge network visualization</li>
             <li>Advanced search and tagging</li>
+            <li>Customizable interface layout</li>
         </ul>
+        
+        <h3>Customizing Your Layout</h3>
+        <p>You can customize the interface layout to suit your workflow:</p>
+        <ul>
+            <li>Drag any panel (Categories, Queue, Search, etc.) by its title bar to move it to a different position</li>
+            <li>Drag to the left, right, top, or bottom edge of the window to dock in that position</li>
+            <li>Drag to the center of another panel to create tabs</li>
+            <li>Double-click a panel's title bar to float it as a separate window</li>
+        </ul>
+        <p>Use the <b>View > Layout Management</b> menu to save your custom layout or restore defaults.</p>
         """
         
         QMessageBox.about(self, "About Incrementum", about_text)
@@ -1870,18 +2108,35 @@ class MainWindow(QMainWindow):
                 "Please select a document tab."
             )
 
+    @pyqtSlot(int)
     def _on_tab_changed(self, index):
-        """Handle tab selection change."""
-        # Update actions based on current tab
-        if index >= 0:
-            widget = self.tab_widget.widget(index)
-            # Enable document-specific actions if current tab is a document
-            if hasattr(widget, 'document') and widget.document:
-                self.action_summarize_document.setEnabled(True)
-            else:
-                self.action_summarize_document.setEnabled(False)
+        """Handler for tab change."""
+        if index == -1:
+            return  # No tabs
+        
+        # Get the widget at the current tab
+        widget = self.tab_widget.widget(index)
+        
+        # Update UI based on current tab
+        if hasattr(widget, 'document') and hasattr(widget, 'document_id'):
+            # It's a document view - enable document actions
+            self.action_new_extract.setEnabled(True)
+            self.action_add_bookmark.setEnabled(True)
+            self.action_highlight.setEnabled(True)
+            
+            # Update the queue view with the current document
+            if hasattr(self, 'queue_view'):
+                self.queue_view.set_current_document(widget.document_id)
+        elif hasattr(widget, 'extract') and hasattr(widget, 'extract_id'):
+            # It's an extract view - enable specific actions
+            self.action_new_extract.setEnabled(False)
+            self.action_add_bookmark.setEnabled(False)
+            self.action_highlight.setEnabled(False)
         else:
-            self.action_summarize_document.setEnabled(False)
+            # Other kind of tab
+            self.action_new_extract.setEnabled(False)
+            self.action_add_bookmark.setEnabled(False)
+            self.action_highlight.setEnabled(False)
 
     @pyqtSlot()
     def _on_view_queue(self):
@@ -1894,21 +2149,6 @@ class MainWindow(QMainWindow):
         self.queue_view.setFocus()
     
     @pyqtSlot()
-    def _on_read_next(self):
-        """Handler for reading the next document in the queue."""
-        # Get next document(s)
-        next_docs = self.queue_manager.get_next_document(count=1)
-        
-        if next_docs:
-            # Open the document
-            self._open_document(next_docs[0].id)
-        else:
-            QMessageBox.information(
-                self, "No Documents", 
-                "There are no documents in the queue."
-            )
-
-    @pyqtSlot()
     def _on_import_arxiv(self):
         """Handler for importing from ArXiv."""
         # Create dialog
@@ -1919,3 +2159,75 @@ class MainWindow(QMainWindow):
             # Dialog will handle the import directly
             self._load_recent_documents()
             self._update_status()
+
+    @pyqtSlot()
+    def _on_layout_help(self):
+        """Show help about interface layout customization."""
+        layout_help_text = """
+        <h2>Customizing Your Interface Layout</h2>
+        
+        <p>Incrementum offers a fully customizable interface to suit your workflow. You can arrange 
+        panels in any configuration you prefer, including moving the reading view to the center.</p>
+        
+        <h3>Moving Panels</h3>
+        <ul>
+            <li><b>Drag and Drop:</b> Click and drag a panel's title bar to move it</li>
+            <li><b>Dock Position:</b> Drag to any edge of the window (left, right, top, bottom) to dock it there</li>
+            <li><b>Center Reading View:</b> Move side panels away from the center to give the reading view more space</li>
+            <li><b>Create Tabs:</b> Drag a panel onto another panel to create tabbed interfaces</li>
+            <li><b>Floating Windows:</b> Double-click a panel's title bar to detach it as a floating window</li>
+        </ul>
+        
+        <h3>Layout Management</h3>
+        <p>Use the <b>View > Layout Management</b> menu to:</p>
+        <ul>
+            <li><b>Save Current Layout:</b> Save your current panel arrangement</li>
+            <li><b>Load Saved Layout:</b> Restore your saved panel arrangement</li>
+            <li><b>Reset to Default Layout:</b> Return to the default panel arrangement</li>
+        </ul>
+        
+        <p>Your saved layout will be automatically restored when you restart the application.</p>
+        """
+        
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Interface Layout Help")
+        msg_box.setText(layout_help_text)
+        msg_box.setTextFormat(Qt.TextFormat.RichText)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.exec()
+
+    @pyqtSlot()
+    def _on_open_web_browser(self):
+        """Open the web browser view."""
+        # Check if web browsing is enabled in settings
+        if not self.settings_manager.get_setting("ui", "web_browser_enabled", True):
+            QMessageBox.information(
+                self, "Web Browser Disabled", 
+                "Web browsing is disabled in settings. Please enable it in Settings > User Interface."
+            )
+            return
+
+        try:
+            # Create new web browser view
+            browser_view = WebBrowserView(self.db_session)
+            
+            # Connect extract created signal
+            browser_view.extractCreated.connect(self._on_extract_created)
+            
+            # Add to tab widget
+            tab_index = self.tab_widget.addTab(browser_view, "Web Browser")
+            self.tab_widget.setCurrentIndex(tab_index)
+            
+            # Update status
+            self.status_label.setText("Web browser opened")
+            
+        except ImportError as e:
+            QMessageBox.warning(
+                self, "Web Browser Error", 
+                f"Could not open web browser: {str(e)}\n\nWeb browsing requires QtWebEngine which may not be installed."
+            )
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Web Browser Error", 
+                f"Error opening web browser: {str(e)}"
+            )

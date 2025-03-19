@@ -248,13 +248,15 @@ class ExtractView(QWidget):
         self.date_label = QLabel()
         if self.extract.created_date:
             self.date_label.setText(self.extract.created_date.strftime("%Y-%m-%d %H:%M"))
+        else:
+            self.date_label.setText("Unknown")
         metadata_form.addRow("Created:", self.date_label)
         
         # Priority
         priority_layout = QHBoxLayout()
         self.priority_spin = QSpinBox()
         self.priority_spin.setRange(1, 100)
-        self.priority_spin.setValue(self.extract.priority or 50)
+        self.priority_spin.setValue(self.extract.priority)
         priority_layout.addWidget(self.priority_spin)
         
         self.priority_apply = QPushButton("Apply")
@@ -265,24 +267,29 @@ class ExtractView(QWidget):
         
         # Tags
         self.tags_label = QLabel()
-        self._update_tags_label()
         metadata_form.addRow("Tags:", self.tags_label)
+        
+        # Update tags display
+        self._update_tags_label()
         
         extract_layout.addLayout(metadata_form)
         
-        # Extract content
+        # Content
         extract_layout.addWidget(QLabel("<b>Content:</b>"))
         
         self.content_edit = QTextEdit()
+        self.content_edit.setText(self.extract.content)
         extract_layout.addWidget(self.content_edit)
         
         content_tabs.addTab(extract_tab, "Extract")
         
-        # Learning Items tab
+        # Learning items tab
         items_tab = QWidget()
         items_layout = QVBoxLayout(items_tab)
         
-        # Learning items table
+        items_layout.addWidget(QLabel("<b>Learning Items:</b>"))
+        
+        # Items table
         self.items_table = QTableWidget()
         self.items_table.setColumnCount(4)
         self.items_table.setHorizontalHeaderLabels(["Type", "Question", "Answer", "Priority"])
@@ -290,9 +297,9 @@ class ExtractView(QWidget):
         self.items_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.items_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.items_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.items_table.doubleClicked.connect(self._on_item_double_clicked)
         self.items_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.items_table.customContextMenuRequested.connect(self._on_items_context_menu)
-        self.items_table.doubleClicked.connect(self._on_item_double_clicked)
         
         items_layout.addWidget(self.items_table)
         
@@ -309,6 +316,9 @@ class ExtractView(QWidget):
         """Load extract data into UI."""
         # Set content
         self.content_edit.setText(self.extract.content)
+        
+        # Make sure priority is set to the correct value
+        self.priority_spin.setValue(self.extract.priority)
         
         # Load learning items
         self._load_learning_items()
@@ -387,13 +397,56 @@ class ExtractView(QWidget):
     @pyqtSlot()
     def _on_priority_changed(self):
         """Update extract priority."""
-        new_priority = self.priority_spin.value()
-        if new_priority != self.extract.priority:
-            self.extract.priority = new_priority
-            self.db_session.commit()
+        try:
+            new_priority = self.priority_spin.value()
+            logger.info(f"Attempting to update priority from {self.extract.priority} to {new_priority}")
             
-            # Emit signal
-            self.extractSaved.emit(self.extract.id)
+            # Force refresh from database to ensure we have the latest version
+            self.db_session.refresh(self.extract)
+            
+            if new_priority != self.extract.priority:
+                logger.info(f"Setting extract ID {self.extract.id} priority to {new_priority}")
+                
+                # Start a transaction
+                try:
+                    # Update the priority
+                    self.extract.priority = new_priority
+                    
+                    # Explicitly mark as modified
+                    self.db_session.add(self.extract)
+                    
+                    # Commit with explicit flush
+                    self.db_session.flush()
+                    self.db_session.commit()
+                    
+                    # Log success
+                    logger.info(f"Successfully updated extract priority to {new_priority}")
+                    
+                    # Emit signal
+                    self.extractSaved.emit(self.extract.id)
+                    
+                    # Show confirmation message
+                    QMessageBox.information(
+                        self, "Priority Updated",
+                        f"Extract priority has been updated to {new_priority}."
+                    )
+                except Exception as tx_error:
+                    # Rollback on exception
+                    self.db_session.rollback()
+                    logger.exception(f"Transaction error updating priority: {tx_error}")
+                    raise  # Re-raise to be caught by outer try/except
+            else:
+                logger.info(f"Priority unchanged: {new_priority}")
+                QMessageBox.information(
+                    self, "Priority Unchanged",
+                    f"Extract priority was already set to {new_priority}."
+                )
+        except Exception as e:
+            logger.exception(f"Error updating priority: {e}")
+            QMessageBox.critical(
+                self, "Error",
+                f"Failed to update priority: {str(e)}\n\nCheck the application logs for details."
+            )
     
     @pyqtSlot()
     def _on_manage_tags(self):

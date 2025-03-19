@@ -120,36 +120,90 @@ class SettingsDialog(QDialog):
     
     def _create_ui_tab(self):
         """Create the UI settings tab."""
-        tab = QWidget()
-        layout = QFormLayout(tab)
+        ui_tab = QWidget()
+        layout = QVBoxLayout(ui_tab)
+        
+        # UI theme group
+        theme_group = QGroupBox("UI Theme")
+        theme_layout = QVBoxLayout(theme_group)
+        
+        self.dark_mode_checkbox = QCheckBox("Use dark mode")
+        dark_mode = self.settings_manager.get_setting("ui", "dark_mode", False)
+        self.dark_mode_checkbox.setChecked(dark_mode)
+        theme_layout.addWidget(self.dark_mode_checkbox)
+        
+        self.custom_theme_checkbox = QCheckBox("Use custom theme")
+        custom_theme = self.settings_manager.get_setting("ui", "custom_theme", False)
+        self.custom_theme_checkbox.setChecked(custom_theme)
+        theme_layout.addWidget(self.custom_theme_checkbox)
+        
+        self.theme_file_path = QLineEdit()
+        theme_file = self.settings_manager.get_setting("ui", "theme_file", "")
+        self.theme_file_path.setText(theme_file)
+        self.theme_file_path.setEnabled(custom_theme)
+        theme_layout.addWidget(self.theme_file_path)
+        
+        self.theme_browse_button = QPushButton("Browse...")
+        self.theme_browse_button.clicked.connect(self._on_browse_theme)
+        self.theme_browse_button.setEnabled(custom_theme)
+        theme_layout.addWidget(self.theme_browse_button)
+        
+        self.custom_theme_checkbox.toggled.connect(self.theme_file_path.setEnabled)
+        self.custom_theme_checkbox.toggled.connect(self.theme_browse_button.setEnabled)
+        
+        layout.addWidget(theme_group)
+        
+        # Web features group
+        web_group = QGroupBox("Web Features")
+        web_layout = QVBoxLayout(web_group)
+        
+        self.web_browser_checkbox = QCheckBox("Enable web browser for extracts")
+        web_browser_enabled = self.settings_manager.get_setting("ui", "web_browser_enabled", True)
+        self.web_browser_checkbox.setChecked(web_browser_enabled)
+        self.web_browser_checkbox.setToolTip("Enables browsing the web and creating extracts from websites")
+        web_layout.addWidget(self.web_browser_checkbox)
+        
+        self.auto_save_web_checkbox = QCheckBox("Auto-save extracted websites")
+        auto_save_web = self.settings_manager.get_setting("ui", "auto_save_web", True)
+        self.auto_save_web_checkbox.setChecked(auto_save_web)
+        self.auto_save_web_checkbox.setToolTip("Automatically save web pages when creating extracts from them")
+        web_layout.addWidget(self.auto_save_web_checkbox)
+        
+        layout.addWidget(web_group)
+        
+        # Layout settings group
+        layout_group = QGroupBox("Layout Settings")
+        layout_layout = QFormLayout(layout_group)
         
         # Theme
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Light", "Dark", "System"])
-        layout.addRow("Theme:", self.theme_combo)
+        layout_layout.addRow("Theme:", self.theme_combo)
         
         # Font family
         self.font_family = QComboBox()
         self.font_family.addItems(["Arial", "Times New Roman", "Courier New", "Verdana", "System"])
-        layout.addRow("Font family:", self.font_family)
+        layout_layout.addRow("Font family:", self.font_family)
         
         # Font size
         self.font_size = QSpinBox()
         self.font_size.setRange(8, 24)
-        layout.addRow("Font size:", self.font_size)
+        layout_layout.addRow("Font size:", self.font_size)
         
         # Show category panel
         self.show_category_panel = QCheckBox()
-        layout.addRow("Show category panel:", self.show_category_panel)
+        layout_layout.addRow("Show category panel:", self.show_category_panel)
         
         # Default split ratio
         self.default_split_ratio = QDoubleSpinBox()
         self.default_split_ratio.setRange(0.1, 0.5)
         self.default_split_ratio.setSingleStep(0.05)
-        layout.addRow("Default split ratio:", self.default_split_ratio)
+        layout_layout.addRow("Default split ratio:", self.default_split_ratio)
+        
+        layout.addWidget(layout_group)
         
         # Add tab
-        self.tab_widget.addTab(tab, "User Interface")
+        self.tab_widget.addTab(ui_tab, "User Interface")
     
     def _create_document_tab(self):
         """Create the Document settings tab."""
@@ -532,7 +586,7 @@ class SettingsDialog(QDialog):
         self.sqlite_synchronous.addItems(["OFF", "NORMAL", "FULL", "EXTRA"])
         sqlite_layout.addRow("Synchronous:", self.sqlite_synchronous)
         
-        layout.addRow(sqlite_group)
+        layout.addWidget(sqlite_group)
         
         # Add tab
         self.tab_widget.addTab(tab, "Advanced")
@@ -603,6 +657,14 @@ class SettingsDialog(QDialog):
         )
         self.default_split_ratio.setValue(
             self.settings_manager.get_setting("ui", "default_split_ratio", 0.25)
+        )
+        
+        # Web browser settings
+        self.web_browser_checkbox.setChecked(
+            self.settings_manager.get_setting("ui", "web_browser_enabled", True)
+        )
+        self.auto_save_web_checkbox.setChecked(
+            self.settings_manager.get_setting("ui", "auto_save_web", True)
         )
         
         # Document settings
@@ -762,6 +824,10 @@ class SettingsDialog(QDialog):
             self.settings_manager.set_setting("ui", "font_size", self.font_size.value())
             self.settings_manager.set_setting("ui", "show_category_panel", self.show_category_panel.isChecked())
             self.settings_manager.set_setting("ui", "default_split_ratio", self.default_split_ratio.value())
+            
+            # Web browser settings
+            self.settings_manager.set_setting("ui", "web_browser_enabled", self.web_browser_checkbox.isChecked())
+            self.settings_manager.set_setting("ui", "auto_save_web", self.auto_save_web_checkbox.isChecked())
             
             # Document settings
             self.settings_manager.set_setting("document", "default_document_directory", self.default_document_directory.text())

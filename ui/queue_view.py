@@ -73,9 +73,20 @@ class QueueView(QWidget):
         self.refresh_button.clicked.connect(self._on_refresh)
         buttons_layout.addWidget(self.refresh_button)
         
-        self.read_next_button = QPushButton("Read Next Document")
+        # Add navigation buttons in a horizontal layout
+        nav_buttons_layout = QHBoxLayout()
+        
+        self.prev_button = QPushButton("Previous Document")
+        self.prev_button.clicked.connect(self._on_read_prev)
+        self.prev_button.setToolTip("Open the previous document in the queue")
+        nav_buttons_layout.addWidget(self.prev_button)
+        
+        self.read_next_button = QPushButton("Next Document")
         self.read_next_button.clicked.connect(self._on_read_next)
-        buttons_layout.addWidget(self.read_next_button)
+        self.read_next_button.setToolTip("Open the next document in the queue")
+        nav_buttons_layout.addWidget(self.read_next_button)
+        
+        buttons_layout.addLayout(nav_buttons_layout)
         
         controls_layout.addLayout(buttons_layout)
         
@@ -402,20 +413,84 @@ class QueueView(QWidget):
     @pyqtSlot()
     def _on_read_next(self):
         """Handle read next document button click."""
-        # Get next document(s)
-        next_docs = self.queue_manager.get_next_document(
-            count=1,
-            category_id=self.category_combo.currentData()
-        )
+        # Find current document in the queue
+        current_row = -1
+        current_doc_id = self._get_current_document_id()
         
-        if next_docs:
-            # Open the document
-            self.documentSelected.emit(next_docs[0].id)
+        if current_doc_id:
+            # Try to find the document in the queue table
+            for row in range(self.queue_table.rowCount()):
+                doc_id = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                if doc_id == current_doc_id:
+                    current_row = row
+                    break
+            
+            # If found and not the last one, get the next document
+            if current_row >= 0 and current_row < self.queue_table.rowCount() - 1:
+                next_doc_id = self.queue_table.item(current_row + 1, 0).data(Qt.ItemDataRole.UserRole)
+                self.documentSelected.emit(next_doc_id)
+                return
+        
+        # If no current document or it's the last one, get the first document in the queue
+        if self.queue_table.rowCount() > 0:
+            first_doc_id = self.queue_table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+            self.documentSelected.emit(first_doc_id)
         else:
             QMessageBox.information(
                 self, "No Documents", 
                 "There are no documents in the queue matching your filters."
             )
+    
+    @pyqtSlot()
+    def _on_read_prev(self):
+        """Handle previous document button click."""
+        # Find current document in the queue
+        current_row = -1
+        current_doc_id = self._get_current_document_id()
+        
+        if current_doc_id:
+            # Try to find the document in the queue table
+            for row in range(self.queue_table.rowCount()):
+                doc_id = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                if doc_id == current_doc_id:
+                    current_row = row
+                    break
+            
+            # If found, get the previous document
+            if current_row > 0:
+                prev_doc_id = self.queue_table.item(current_row - 1, 0).data(Qt.ItemDataRole.UserRole)
+                self.documentSelected.emit(prev_doc_id)
+                return
+        
+        # If no current document or it's the first one, get the last document in the queue
+        if self.queue_table.rowCount() > 0:
+            last_row = self.queue_table.rowCount() - 1
+            last_doc_id = self.queue_table.item(last_row, 0).data(Qt.ItemDataRole.UserRole)
+            self.documentSelected.emit(last_doc_id)
+        else:
+            QMessageBox.information(
+                self, "No Documents", 
+                "There are no documents in the queue matching your filters."
+            )
+    
+    def _get_current_document_id(self):
+        """Get the ID of the currently open document."""
+        # This method will be connected to the main window to get the current document ID
+        return getattr(self, '_current_document_id', None)
+    
+    def set_current_document(self, doc_id):
+        """Set the current document ID for navigation purposes."""
+        self._current_document_id = doc_id
+        
+        # Update button states based on queue position
+        self._update_navigation_buttons()
+    
+    def _update_navigation_buttons(self):
+        """Update the enabled state of navigation buttons."""
+        has_docs = self.queue_table.rowCount() > 0
+        
+        self.read_next_button.setEnabled(has_docs)
+        self.prev_button.setEnabled(has_docs)
     
     @pyqtSlot(QPoint)
     def _on_queue_context_menu(self, pos):
