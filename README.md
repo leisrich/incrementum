@@ -51,7 +51,10 @@ On Linux/macOS:
 ```bash
 source incrementum-env/bin/activate
 ```
-
+On Windows run this command to get going quickly:
+```bash
+.\setup.ps1
+```
 On Windows:
 ```bash
 incrementum-env\Scripts\activate
