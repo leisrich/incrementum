@@ -35,7 +35,7 @@ This guide will walk you through setting up and using Incrementum to create your
 1. **Clone or download the repository**
 
 ```bash
-git clone https://github.com/your-username/incrementum.git
+git clone https://github.com/melpomenex/incrementum.git
 cd incrementum
 ```
 
