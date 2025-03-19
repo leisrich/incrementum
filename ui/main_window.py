@@ -19,7 +19,7 @@ from PyQt6.QtGui import QIcon, QAction, QKeySequence, QPixmap
 
 from core.knowledge_base.models import init_database, Document, Category, Extract, LearningItem, Tag
 from core.document_processor.processor import DocumentProcessor
-from core.spaced_repetition.sm18 import SM18Algorithm
+from core.spaced_repetition import FSRSAlgorithm
 from core.content_extractor.nlp_extractor import NLPExtractor
 from core.knowledge_base.search_engine import SearchEngine
 from core.knowledge_base.tag_manager import TagManager
@@ -102,14 +102,14 @@ class MainWindow(QMainWindow):
         
         # Initialize managers and components
         self.document_processor = DocumentProcessor(self.db_session)
-        self.spaced_repetition = SM18Algorithm(self.db_session)
+        self.spaced_repetition = FSRSAlgorithm(self.db_session)
         self.nlp_extractor = NLPExtractor(self.db_session)
         self.search_engine = SearchEngine(self.db_session)
         self.tag_manager = TagManager(self.db_session)
         self.export_manager = ExportManager(self.db_session)
         self.network_builder = KnowledgeNetworkBuilder(self.db_session)
         self.settings_manager = SettingsManager()
-        self.queue_manager = QueueManager(self.db_session)
+        self.queue_manager = FSRSAlgorithm(self.db_session)
         
         # Set window properties
         self.setWindowTitle("Incrementum - Incremental Learning System")

@@ -13,13 +13,13 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QDateTime
 from PyQt6.QtGui import QColor, QPen, QBrush, QPainter, QPainterPath
-from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QBarSeries, QBarSet
+from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QBarSeries, QBarSet, QBarCategoryAxis, QValueAxis
 
 from sqlalchemy import func, and_, extract, case
 from core.knowledge_base.models import (
     Document, Extract, LearningItem, ReviewLog, Category
 )
-from core.spaced_repetition.sm18 import SM18Algorithm
+from core.spaced_repetition import FSRSAlgorithm
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class StatisticsWidget(QWidget):
         super().__init__()
         
         self.db_session = db_session
-        self.spaced_repetition = SM18Algorithm(db_session)
+        self.spaced_repetition = FSRSAlgorithm(db_session)
         
         # Set up UI
         self._create_ui()
@@ -577,30 +577,70 @@ class StatisticsWidget(QWidget):
         self.difficulty_chart.axes()[1].setTitleText("Count")
     
     def _load_workload_chart(self, category_id: Optional[int]):
-        """Load workload forecast chart data."""
-        # Clear previous chart
-        self.workload_chart.removeAllSeries()
-        
-        # Create series for workload forecast
-        workload_series = QLineSeries()
-        workload_series.setName("Due Items")
-        
-        # Get workload data
-        workload = self.spaced_repetition.estimate_workload(30)  # 30 days
-        
-        # Convert to series data
-        for date_str, count in workload.items():
-            date = datetime.strptime(date_str, "%Y-%m-%d")
-            date_ts = QDateTime(date.year, date.month, date.day, 0, 0).toMSecsSinceEpoch()
-            workload_series.append(date_ts, count)
-        
-        # Add series to chart
-        self.workload_chart.addSeries(workload_series)
-        
-        # Create axes
-        self.workload_chart.createDefaultAxes()
-        self.workload_chart.axes()[0].setTitleText("Date")
-        self.workload_chart.axes()[1].setTitleText("Items Due")
+        """Load workload forecast chart."""
+        try:
+            # Clear existing chart
+            self.workload_chart.removeAllSeries()
+            
+            # Get workload forecast for the next 30 days
+            workload = {}
+            today = datetime.utcnow().date()
+            
+            # Use SQL query directly instead of the SM18 estimate_workload method
+            for i in range(30):
+                date = today + timedelta(days=i)
+                date_start = datetime.combine(date, datetime.min.time())
+                date_end = datetime.combine(date, datetime.max.time())
+                date_str = date.strftime("%Y-%m-%d")
+                
+                # Count items due on this date
+                query = self.db_session.query(func.count(LearningItem.id)).filter(
+                    LearningItem.next_review.between(date_start, date_end)
+                )
+                
+                # Apply category filter if specified
+                if category_id is not None:
+                    query = query.join(LearningItem.extract).join(Extract.document).filter(
+                        Document.category_id == category_id
+                    )
+                
+                count = query.scalar() or 0
+                workload[date_str] = count
+            
+            # Create bar set for the chart
+            bar_set = QBarSet("Items Due")
+            
+            # Add data points
+            dates = []
+            for i in range(30):
+                date = today + timedelta(days=i)
+                date_str = date.strftime("%Y-%m-%d")
+                count = workload.get(date_str, 0)
+                bar_set.append(count)
+                dates.append(date_str)
+            
+            # Create bar series
+            series = QBarSeries()
+            series.append(bar_set)
+            
+            # Add series to chart
+            self.workload_chart.addSeries(series)
+            
+            # Set axis
+            axis_x = QBarCategoryAxis()
+            axis_x.append(dates)
+            self.workload_chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
+            series.attachAxis(axis_x)
+            
+            axis_y = QValueAxis()
+            max_count = max(workload.values()) if workload.values() else 10
+            axis_y.setRange(0, max_count + 5)
+            axis_y.setTitleText("Number of Items")
+            self.workload_chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
+            series.attachAxis(axis_y)
+            
+        except Exception as e:
+            logger.exception(f"Error loading workload chart: {e}")
     
     def _load_distribution_chart(self, category_id: Optional[int]):
         """Load interval distribution chart data."""

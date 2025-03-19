@@ -12,14 +12,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 
 from core.knowledge_base.models import LearningItem, Extract
-from core.spaced_repetition.sm18 import SM18Algorithm
+from core.spaced_repetition import FSRSAlgorithm
 
 logger = logging.getLogger(__name__)
 
 class ReviewView(QWidget):
     """UI component for spaced repetition review sessions."""
     
-    def __init__(self, items: List[LearningItem], spaced_repetition: SM18Algorithm, db_session):
+    def __init__(self, items: List[LearningItem], spaced_repetition: FSRSAlgorithm, db_session):
         super().__init__()
         
         self.items = items
@@ -234,8 +234,19 @@ class ReviewView(QWidget):
         # Get current item
         item = self.items[self.current_index]
         
-        # Process response with spaced repetition algorithm
-        result = self.spaced_repetition.process_response(item.id, grade, response_time)
+        # Convert SM2 grade (0-5) to FSRS rating (1-4)
+        fsrs_rating = 1  # Default to "Again"
+        if grade <= 1:  # Complete blackout or familiar but forgotten
+            fsrs_rating = 1  # Again
+        elif grade == 2:  # Incorrect but easy to recall
+            fsrs_rating = 2  # Hard
+        elif grade in [3, 4]:  # Correct with effort or hesitation
+            fsrs_rating = 3  # Good
+        else:  # Perfect response (5)
+            fsrs_rating = 4  # Easy
+        
+        # Process response with FSRS algorithm
+        result = self.spaced_repetition.process_item_response(item.id, fsrs_rating, response_time)
         
         # Update stats
         self.stats['completed'] += 1

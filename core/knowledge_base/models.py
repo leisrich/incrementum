@@ -70,6 +70,7 @@ class Document(Base):
     reading_count = Column(Integer, default=0)  # Number of times read
     stability = Column(Float, nullable=True)  # Stability for FSRS algorithm
     difficulty = Column(Float, nullable=True)  # Difficulty for FSRS algorithm
+    reps = Column(Integer, default=0)  # Successful repetition count for FSRS
     
     # Relationships
     category = relationship("Category", back_populates="documents")
@@ -109,15 +110,19 @@ class LearningItem(Base):
     created_date = Column(DateTime, default=datetime.utcnow)
     last_reviewed = Column(DateTime, nullable=True)
     
-    # SM-18 algorithm fields
+    # Spaced repetition algorithm fields
     interval = Column(Integer, default=0)  # Days until next review
-    repetitions = Column(Integer, default=0)  # Number of successful repetitions
-    easiness = Column(Float, default=2.5)  # E-factor in SM algorithm
+    repetitions = Column(Integer, default=0)  # Legacy: Number of successful repetitions
+    easiness = Column(Float, default=2.5)  # Legacy: E-factor in SM algorithm
     next_review = Column(DateTime, nullable=True)
+    
+    # FSRS algorithm fields
+    stability = Column(Float, nullable=True)  # Memory stability
+    difficulty = Column(Float, default=0.0)  # Item difficulty
+    reps = Column(Integer, default=0)  # Successful repetition count for FSRS
     
     # Priority and metadata
     priority = Column(Integer, default=50)  # Inherited from extract initially
-    difficulty = Column(Float, default=0.0)  # Calculated from review history
     
     # Relationships
     extract = relationship("Extract", back_populates="learning_items")

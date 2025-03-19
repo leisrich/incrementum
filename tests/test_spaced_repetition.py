@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.knowledge_base.models import Base, Extract, LearningItem, ReviewLog
-from core.spaced_repetition.sm18 import SM18Algorithm
+from core.spaced_repetition import FSRSAlgorithm
 
 class TestSpacedRepetition(unittest.TestCase):
     """Test cases for spaced repetition algorithm."""
@@ -32,7 +32,7 @@ class TestSpacedRepetition(unittest.TestCase):
         self._create_test_data()
         
         # Create algorithm instance
-        self.sm18 = SM18Algorithm(self.session)
+        self.fsrs = FSRSAlgorithm(self.session)
     
     def tearDown(self):
         """Clean up test database."""
@@ -42,146 +42,151 @@ class TestSpacedRepetition(unittest.TestCase):
         os.rmdir(self.temp_dir)
     
     def _create_test_data(self):
-        """Create test data for testing."""
-        # Create extract
-        self.extract = Extract(
+        """Create test data for algorithm testing."""
+        # Create test extract
+        extract = Extract(
             content="Test extract content",
+            context="Test context",
+            document_id=1,  # This is just a placeholder for testing
             priority=50,
             created_date=datetime.utcnow()
         )
-        self.session.add(self.extract)
-        self.session.flush()
-        
-        # Create learning items
-        self.new_item = LearningItem(
-            extract=self.extract,
-            item_type="qa",
-            question="New item question?",
-            answer="New item answer",
-            priority=50,
-            created_date=datetime.utcnow(),
-            interval=0,
-            repetitions=0,
-            easiness=2.5
-        )
-        
-        self.learned_item = LearningItem(
-            extract=self.extract,
-            item_type="qa",
-            question="Learned item question?",
-            answer="Learned item answer",
-            priority=50,
-            created_date=datetime.utcnow(),
-            interval=10,
-            repetitions=3,
-            easiness=2.5,
-            last_reviewed=datetime.utcnow() - timedelta(days=5),
-            next_review=datetime.utcnow() + timedelta(days=5)
-        )
-        
-        self.overdue_item = LearningItem(
-            extract=self.extract,
-            item_type="qa",
-            question="Overdue item question?",
-            answer="Overdue item answer",
-            priority=50,
-            created_date=datetime.utcnow(),
-            interval=10,
-            repetitions=2,
-            easiness=2.5,
-            last_reviewed=datetime.utcnow() - timedelta(days=15),
-            next_review=datetime.utcnow() - timedelta(days=5)
-        )
-        
-        self.session.add_all([self.new_item, self.learned_item, self.overdue_item])
+        self.session.add(extract)
         self.session.commit()
+        
+        # Create test learning items with varying difficulty
+        items = []
+        for i in range(10):
+            item = LearningItem(
+                extract_id=extract.id,
+                item_type="qa",
+                question=f"Test question {i}",
+                answer=f"Test answer {i}",
+                priority=50,
+                difficulty=0.0,
+                created_date=datetime.utcnow()
+            )
+            self.session.add(item)
+            items.append(item)
+        
+        self.session.commit()
+        self.test_items = items
+    
+    def test_initial_process_response(self):
+        """Test initial processing of a response."""
+        # Process a response for the first item
+        item = self.test_items[0]
+        result = self.fsrs.process_item_response(item.id, 3)  # Good response
+        
+        # Verify the result
+        self.assertIsNotNone(result)
+        self.assertIn('interval', result)
+        self.assertIn('stability', result)
+        self.assertIn('difficulty', result)
+        self.assertIn('next_review', result)
+        
+        # Verify that the interval is positive
+        self.assertGreater(result['interval'], 0)
+        
+        # Verify that the item was updated in the database
+        updated_item = self.session.query(LearningItem).get(item.id)
+        self.assertEqual(updated_item.interval, result['interval'])
+        self.assertEqual(updated_item.stability, result['stability'])
+        self.assertEqual(updated_item.difficulty, result['difficulty'])
+        self.assertEqual(updated_item.next_review, result['next_review'])
+    
+    def test_repeated_responses(self):
+        """Test processing multiple responses for the same item."""
+        item = self.test_items[1]
+        
+        # First response (Good)
+        result1 = self.fsrs.process_item_response(item.id, 3)
+        interval1 = result1['interval']
+        
+        # Update the last_reviewed date to simulate time passing
+        item.last_reviewed = datetime.utcnow() - timedelta(days=interval1)
+        self.session.commit()
+        
+        # Second response (Easy)
+        result2 = self.fsrs.process_item_response(item.id, 4)
+        interval2 = result2['interval']
+        
+        # Interval should increase for an easy response
+        self.assertGreater(interval2, interval1)
+        
+        # Update the last_reviewed date again
+        item.last_reviewed = datetime.utcnow() - timedelta(days=interval2)
+        self.session.commit()
+        
+        # Third response (Hard)
+        result3 = self.fsrs.process_item_response(item.id, 2)
+        interval3 = result3['interval']
+        
+        # Interval should decrease for a hard response
+        self.assertLess(interval3, interval2)
     
     def test_get_due_items(self):
-        """Test getting due items."""
-        # Should return new and overdue items
-        due_items = self.sm18.get_due_items()
+        """Test retrieving due items."""
+        # Set up some due items
+        now = datetime.utcnow()
         
-        self.assertEqual(len(due_items), 2)
+        # First item: due today
+        self.test_items[0].next_review = now - timedelta(hours=1)
         
-        # Check that the due items are the new and overdue items
+        # Second item: due tomorrow
+        self.test_items[1].next_review = now + timedelta(days=1)
+        
+        # Third item: due in a week
+        self.test_items[2].next_review = now + timedelta(days=7)
+        
+        # Fourth item: overdue
+        self.test_items[3].next_review = now - timedelta(days=3)
+        
+        # Fifth item: no review date (new)
+        self.test_items[4].next_review = None
+        
+        self.session.commit()
+        
+        # Get due items
+        due_items = self.fsrs.get_due_items()
+        
+        # Should include items that are due or overdue, plus new items
+        self.assertGreaterEqual(len(due_items), 3)  # At least items 0, 3, and 4
+        
+        # Check that item IDs are in the result
         due_ids = [item.id for item in due_items]
-        self.assertIn(self.new_item.id, due_ids)
-        self.assertIn(self.overdue_item.id, due_ids)
-        self.assertNotIn(self.learned_item.id, due_ids)
+        self.assertIn(self.test_items[0].id, due_ids)  # Due today
+        self.assertIn(self.test_items[3].id, due_ids)  # Overdue
+        self.assertIn(self.test_items[4].id, due_ids)  # New
+        
+        # Items not due yet should not be included
+        self.assertNotIn(self.test_items[1].id, due_ids)  # Due tomorrow
+        self.assertNotIn(self.test_items[2].id, due_ids)  # Due in a week
     
-    def test_process_response_new_item(self):
-        """Test processing a response for a new item."""
-        # Process a response for the new item with grade 4
-        result = self.sm18.process_response(self.new_item.id, 4)
+    def test_again_response(self):
+        """Test the 'Again' (forgotten) response."""
+        item = self.test_items[5]
         
-        # Verify the result
-        self.assertTrue(result['passed'])
-        self.assertEqual(result['repetitions'], 1)
-        self.assertEqual(result['interval'], 1)  # First interval is always 1 day
-        self.assertTrue(result['easiness'] > 2.5)  # Easiness should increase
+        # First response (Good)
+        result1 = self.fsrs.process_item_response(item.id, 3)
+        stability1 = result1['stability']
         
-        # Verify the item was updated
-        self.session.refresh(self.new_item)
-        self.assertEqual(self.new_item.repetitions, 1)
-        self.assertEqual(self.new_item.interval, 1)
-        self.assertTrue(self.new_item.easiness > 2.5)
-        self.assertIsNotNone(self.new_item.last_reviewed)
-        self.assertIsNotNone(self.new_item.next_review)
+        # Update the last_reviewed date
+        item.last_reviewed = datetime.utcnow() - timedelta(days=1)
+        self.session.commit()
         
-        # Verify a review log was created
-        review_logs = self.session.query(ReviewLog).filter(
-            ReviewLog.learning_item_id == self.new_item.id
-        ).all()
+        # Second response (Again - forgotten)
+        result2 = self.fsrs.process_item_response(item.id, 1)
+        stability2 = result2['stability']
         
-        self.assertEqual(len(review_logs), 1)
-        self.assertEqual(review_logs[0].grade, 4)
-    
-    def test_process_response_learned_item(self):
-        """Test processing a response for a learned item."""
-        # Process a response for the learned item with grade 5
-        old_easiness = self.learned_item.easiness
-        old_interval = self.learned_item.interval
+        # Stability should decrease for a forgotten item
+        self.assertLess(stability2, stability1)
         
-        result = self.sm18.process_response(self.learned_item.id, 5)
+        # Interval should be reset to a small value
+        self.assertLessEqual(result2['interval'], 1)
         
-        # Verify the result
-        self.assertTrue(result['passed'])
-        self.assertEqual(result['repetitions'], 4)
-        self.assertTrue(result['interval'] > old_interval)  # Interval should increase
-        self.assertTrue(result['easiness'] > old_easiness)  # Easiness should increase
-        
-        # Verify the item was updated
-        self.session.refresh(self.learned_item)
-        self.assertEqual(self.learned_item.repetitions, 4)
-        self.assertTrue(self.learned_item.interval > old_interval)
-        self.assertTrue(self.learned_item.easiness > old_easiness)
-    
-    def test_process_response_failed(self):
-        """Test processing a failed response."""
-        # Process a response for the learned item with grade 2 (fail)
-        old_easiness = self.learned_item.easiness
-        
-        result = self.sm18.process_response(self.learned_item.id, 2)
-        
-        # Verify the result
-        self.assertFalse(result['passed'])
-        self.assertEqual(result['repetitions'], 0)  # Reset to 0
-        self.assertEqual(result['interval'], 1)  # Reset to 1
-        self.assertTrue(result['easiness'] < old_easiness)  # Easiness should decrease
-        
-        # Verify the item was updated
-        self.session.refresh(self.learned_item)
-        self.assertEqual(self.learned_item.repetitions, 0)
-        self.assertEqual(self.learned_item.interval, 1)
-        self.assertTrue(self.learned_item.easiness < old_easiness)
-    
-    def test_estimate_workload(self):
-        """Test estimating review workload."""
-        # Estimate workload for the next 7 days
-        workload = self.sm18.estimate_workload(7)
-        
-        # Should have at least one day with due items
-        self.assertGreater(len(workload), 0)
-        
-        # At least one day should have 2 items (new + overdue)
-        self.assertTrue(any(count >= 2 for count in workload.values()))
+        # Repetition counter should be reset
+        self.assertEqual(result2['reps'], 0)
+
+if __name__ == '__main__':
+    unittest.main()

@@ -2,17 +2,19 @@
 
 # Core dependencies
 PyQt6==6.5.0        # UI framework with good Linux support
+PyQt6-WebEngine==6.5.0
 SQLAlchemy==2.0.15  # ORM for database operations
-alembic==1.10.4     # Database migrations
+alembic==1.11.1     # Database migrations
 
 # Document processing
 pdfminer.six==20221105  # PDF text extraction
 PyPDF2==3.0.1           # PDF manipulation
 beautifulsoup4==4.12.2  # HTML parsing
 lxml==4.9.2             # XML/HTML processing
-ebooklib>=0.17.1        # ePub handling
+ebooklib==0.18          # ePub handling
 markdown==3.4.3         # Markdown processing
 python-docx==0.8.11     # DOCX processing
+pdftotext==2.2.2         # PDF text extraction
 
 # Content extraction
 nltk==3.8.1          # Natural language processing
@@ -25,7 +27,7 @@ spacy==3.5.3         # Advanced NLP capabilities
 # Data storage and sync
 appdirs==1.4.4      # Application directories
 python-dateutil==2.8.2  # Date manipulation
-requests==2.30.0    # HTTP for optional cloud sync
+requests==2.31.0    # HTTP for optional cloud sync
 
 # PDF processing and viewing
 pymupdf==1.22.3     # Fast PDF rendering and text extraction
@@ -48,3 +50,13 @@ pylint==2.17.4      # Linting
 # Add these packages for EPUB handling
 html2text>=2020.1.16
 chardet>=4.0.0
+
+# Additional packages
+Pillow==9.5.0
+pyyaml==6.0
+pandas==2.0.2
+faiss-cpu==1.7.4
+transformers==4.30.2
+regex==2023.6.3
+tqdm==4.65.0
+youtube-transcript-api==0.6.1

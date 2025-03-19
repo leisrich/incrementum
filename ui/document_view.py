@@ -5,6 +5,7 @@ import os
 import logging
 from typing import Optional, List, Dict
 from datetime import datetime
+import json
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -14,8 +15,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer
 try:
-    # Import QWebEngineView if available for better HTML rendering
     from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebEngineCore import QWebEngineSettings
     from PyQt6.QtWebChannel import QWebChannel
     HAS_WEBENGINE = True
 except ImportError:
@@ -27,6 +28,7 @@ from core.content_extractor.extractor import ContentExtractor
 from .document_extracts_view import DocumentExtractsView
 from .load_epub_helper import setup_epub_webview
 from .load_youtube_helper import setup_youtube_webview
+from .youtube_transcript_view import YouTubeTranscriptView
 
 logger = logging.getLogger(__name__)
 
@@ -764,185 +766,170 @@ window.addEventListener('load', function() {
     def _load_youtube(self):
         """Load and display a YouTube video."""
         try:
-            logger.info(f"Starting to load YouTube video for document {self.document.id}")
             if not HAS_WEBENGINE:
-                raise ImportError("YouTube viewing requires QWebEngineView")
+                raise ImportError("YouTube videos require QWebEngineView which is not available")
             
-            # Create a web view for the YouTube content
-            webview = QWebEngineView()
+            if not self.document.file_path or not os.path.isfile(self.document.file_path):
+                raise FileNotFoundError(f"YouTube metadata file not found: {self.document.file_path}")
+
+            # Read metadata from file
+            with open(self.document.file_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
             
-            # Double-check that we have a valid source_url as a fallback
-            if (not hasattr(self.document, 'file_path') or not self.document.file_path or 
-                not os.path.exists(self.document.file_path)) and hasattr(self.document, 'source_url'):
-                logger.warning(f"YouTube document {self.document.id} has invalid file_path, using source_url instead")
-                self.document.file_path = self.document.source_url
-                self.db_session.commit()
+            video_id = metadata.get('video_id')
+            if not video_id:
+                raise ValueError("No video ID found in metadata")
+
+            # Set window title
+            title = metadata.get('title', 'YouTube Video')
             
-            # Log file path info to help diagnose
-            logger.info(f"YouTube document file_path: {self.document.file_path}")
-            if hasattr(self.document, 'source_url'):
-                logger.info(f"YouTube document source_url: {self.document.source_url}")
+            # Create the web view for the YouTube player
+            self.web_view = QWebEngineView()
             
-            # Configure web view settings for better performance
-            if hasattr(webview, 'settings'):
-                settings = webview.settings()
-                settings.setAttribute(settings.WebAttribute.JavascriptEnabled, True)
-                settings.setAttribute(settings.WebAttribute.PluginsEnabled, True)
-                settings.setAttribute(settings.WebAttribute.AutoLoadImages, True)
-                settings.setAttribute(settings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+            # Configure settings
+            self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+            self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
             
-            # Setup the YouTube player with position tracking
-            logger.info("Calling setup_youtube_webview")
-            success, callback = setup_youtube_webview(self.document, webview, self.db_session)
-            logger.info(f"setup_youtube_webview result: success={success}")
+            # Create a splitter to hold both the video and transcript
+            self.content_splitter = QSplitter(Qt.Orientation.Vertical)
             
-            if not success:
-                # If direct loading failed, try to extract ID from source_url
-                logger.warning("Direct setup failed, trying to recover video ID")
-                if hasattr(self.document, 'source_url') and self.document.source_url:
-                    from core.document_processor.handlers.youtube_handler import YouTubeHandler
-                    handler = YouTubeHandler()
-                    
-                    # Try to get the video ID
-                    video_id = handler._extract_video_id(self.document.source_url)
-                    logger.info(f"Extracted video ID from source_url: {video_id}")
-                    if video_id:
-                        logger.info(f"Recovered YouTube video ID {video_id} from source_url for document {self.document.id}")
-                        
-                        # Create a temporary metadata file with the video ID
-                        import json
-                        import tempfile
-                        
-                        metadata = {
-                            'video_id': video_id,
-                            'title': self.document.title,
-                            'author': getattr(self.document, 'author', 'Unknown'),
-                            'source_url': self.document.source_url
-                        }
-                        
-                        fd, temp_path = tempfile.mkstemp(suffix='.json')
-                        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                            json.dump(metadata, f, ensure_ascii=False, indent=2)
-                        
-                        logger.info(f"Created temporary metadata file at {temp_path}")
-                        
-                        # Update the document's file path
-                        self.document.file_path = temp_path
-                        self.db_session.commit()
-                        
-                        # Try to set up again with the new metadata
-                        logger.info("Trying setup_youtube_webview again with new metadata")
-                        success, callback = setup_youtube_webview(self.document, webview, self.db_session)
-                        logger.info(f"Second setup_youtube_webview result: success={success}")
-                
-                # If still not successful, try a direct iframe embed as last resort
-                if not success:
-                    logger.warning("Setup still failed, trying direct iframe embed")
-                    try:
-                        # Try to extract video ID directly
-                        from core.document_processor.handlers.youtube_handler import YouTubeHandler
-                        handler = YouTubeHandler()
-                        
-                        # Try all possible sources for the video ID
-                        video_id = None
-                        sources = []
-                        
-                        if hasattr(self.document, 'source_url') and self.document.source_url:
-                            sources.append(self.document.source_url)
-                        
-                        if hasattr(self.document, 'file_path') and self.document.file_path:
-                            sources.append(self.document.file_path)
-                            
-                            # If it's a JSON file, try to read it
-                            if os.path.exists(self.document.file_path) and self.document.file_path.endswith('.json'):
-                                try:
-                                    with open(self.document.file_path, 'r') as f:
-                                        data = json.load(f)
-                                        if 'video_id' in data:
-                                            sources.append(data['video_id'])
-                                except Exception as e:
-                                    logger.error(f"Error reading JSON file: {e}")
-                        
-                        # Try each source
-                        for source in sources:
-                            video_id = handler._extract_video_id(source)
-                            if video_id:
-                                break
-                        
-                        if video_id:
-                            logger.info(f"Found video ID {video_id} using direct extraction")
-                            
-                            # Create direct HTML
-                            position = getattr(self.document, 'position', 0) or 0
-                            html = f"""
-                            <!DOCTYPE html>
-                            <html>
-                            <head>
-                                <meta charset="utf-8">
-                                <meta name="viewport" content="width=device-width, initial-scale=1">
-                                <title>{self.document.title}</title>
-                                <style>
-                                    body {{
-                                        margin: 0;
-                                        padding: 0;
-                                        overflow: hidden;
-                                        background-color: #000;
-                                    }}
-                                    iframe {{
-                                        width: 100%;
-                                        height: 100vh;
-                                        border: none;
-                                    }}
-                                </style>
-                            </head>
-                            <body>
-                                <iframe 
-                                    src="https://www.youtube.com/embed/{video_id}?autoplay=1&start={position}" 
-                                    allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture" 
-                                    allowfullscreen>
-                                </iframe>
-                            </body>
-                            </html>
-                            """
-                            
-                            logger.info("Loading direct iframe HTML")
-                            webview.setHtml(html)
-                            success = True
-                        else:
-                            raise ValueError("Could not determine YouTube video ID")
-                    except Exception as direct_error:
-                        logger.exception(f"Error with direct iframe: {direct_error}")
-                        raise ValueError("Failed to set up YouTube player with any method")
-            
-            # Store the callback for later use
-            self.youtube_callback = callback
+            # Add web view (YouTube player) to the splitter
+            self.content_splitter.addWidget(self.web_view)
             
             # Add to layout
-            self.content_layout.addWidget(webview)
-            logger.info("Added YouTube webview to layout")
+            self.content_layout.addWidget(self.content_splitter)
             
-            # Store for later use
-            self.content_edit = webview
+            # Load HTML for YouTube player
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body {{ margin: 0; padding: 0; overflow: hidden; }}
+                    #player {{ width: 100%; height: 100vh; }}
+                </style>
+            </head>
+            <body>
+                <div id="player"></div>
+                
+                <script>
+                    // YouTube API
+                    var tag = document.createElement('script');
+                    tag.src = "https://www.youtube.com/iframe_api";
+                    var firstScriptTag = document.getElementsByTagName('script')[0];
+                    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+                    
+                    var player;
+                    function onYouTubeIframeAPIReady() {{
+                        player = new YT.Player('player', {{
+                            videoId: '{video_id}',
+                            playerVars: {{
+                                'autoplay': 0,
+                                'rel': 0,
+                                'cc_load_policy': 1,
+                                'modestbranding': 1
+                            }},
+                            events: {{
+                                'onReady': onPlayerReady,
+                                'onStateChange': onPlayerStateChange
+                            }}
+                        }});
+                    }}
+                    
+                    function onPlayerReady(event) {{
+                        console.log('Player ready');
+                    }}
+                    
+                    function onPlayerStateChange(event) {{
+                        console.log('Player state changed');
+                        // 0=ended, 1=playing, 2=paused, 3=buffering, 5=video cued
+                        if (event.data === 0) {{
+                            console.log('Video ended');
+                        }}
+                    }}
+                </script>
+            </body>
+            </html>
+            """
             
-            # Extract video info for content text (for extracts)
-            try:
-                from core.document_processor.handlers.youtube_handler import YouTubeHandler
-                handler = YouTubeHandler()
-                self.content_text = handler.extract_content(self.document.file_path)
-            except Exception as extract_error:
-                logger.warning(f"Could not extract YouTube content: {extract_error}")
-                self.content_text = f"YouTube video: {self.document.title}"
+            # Load the HTML content
+            self.web_view.setHtml(html_content, QUrl(f"https://www.youtube.com/watch?v={video_id}"))
             
-            logger.info("YouTube video loaded successfully")
+            # Check for transcript in metadata
+            if 'transcript' in metadata and metadata['transcript']:
+                # Create transcript view
+                self.transcript_view = YouTubeTranscriptView(
+                    self.db_session,
+                    document_id=self.document_id,
+                    metadata_file=self.document.file_path
+                )
+                
+                # Connect extract created signal
+                self.transcript_view.extractCreated.connect(self.extractCreated)
+                
+                # Add to splitter
+                self.content_splitter.addWidget(self.transcript_view)
+                
+                # Set size ratios (60% video, 40% transcript)
+                self.content_splitter.setSizes([600, 400])
+                
+                logger.info(f"Loaded YouTube video with transcript: {video_id}")
+            else:
+                logger.info(f"Loaded YouTube video without transcript: {video_id}, metadata keys: {list(metadata.keys())}")
+                
+                # Create a label explaining that no transcript is available
+                no_transcript_label = QLabel(
+                    "No transcript is available for this video.\n\n"
+                    "Possible reasons:\n"
+                    "• Transcripts are disabled by the video creator\n"
+                    "• The video does not have any captions\n"
+                    "• The video is age-restricted or private\n\n"
+                    "Try reimporting or using a different video."
+                )
+                no_transcript_label.setWordWrap(True)
+                no_transcript_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                no_transcript_label.setStyleSheet("background-color: #f0f0f0; padding: 20px; border-radius: 5px;")
+                
+                # Create a button to reimport the video with transcript
+                reimport_container = QWidget()
+                reimport_layout = QVBoxLayout(reimport_container)
+                
+                reimport_button = QPushButton("Reimport Video with Transcript")
+                reimport_button.clicked.connect(self._on_reimport_youtube)
+                reimport_layout.addWidget(reimport_button)
+                reimport_layout.addWidget(no_transcript_label)
+                
+                # Add to splitter
+                self.content_splitter.addWidget(reimport_container)
             
-        except ImportError as e:
-            logger.error(f"YouTube viewing requires QWebEngineView: {e}")
-            label = QLabel("YouTube viewing requires QWebEngineView which is not available.")
-            self.content_layout.addWidget(label)
+            # Save original source URL if available
+            self.source_url = metadata.get('source_url', '')
+            
+            # Add a callback to handle JavaScript messages
+            self.youtube_callback = None
+            
+            # Setup position tracking if supported
+            if hasattr(setup_youtube_webview, '__call__'):
+                try:
+                    logger.debug(f"Setting up YouTube position tracking for {self.document_id}")
+                    self.youtube_callback = setup_youtube_webview(
+                        self.web_view,
+                        self.document_id,
+                        self.db_session
+                    )
+                except Exception as e:
+                    logger.exception(f"Error setting up YouTube position tracking: {e}")
+            
         except Exception as e:
             logger.exception(f"Error loading YouTube video: {e}")
-            label = QLabel(f"Error loading YouTube video: {str(e)}")
-            self.content_layout.addWidget(label)
+            error_widget = QLabel(f"Error loading YouTube video: {str(e)}")
+            error_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_widget)
     
     def _handle_webview_selection(self, selected_text):
         """Handle text selection from web view."""
@@ -1131,6 +1118,76 @@ window.addEventListener('load', function() {
                 
         except Exception as e:
             logger.exception(f"Error restoring document position: {e}")
+
+    def _on_reimport_youtube(self):
+        """Reimport the current YouTube video to try getting transcript."""
+        if not hasattr(self, 'document') or not self.document:
+            return
+        
+        try:
+            # Get the source URL
+            source_url = self.document.source_url
+            if not source_url:
+                QMessageBox.warning(
+                    self, "Reimport Error", 
+                    "Cannot reimport video: No source URL available."
+                )
+                return
+            
+            # Show a message about what's happening
+            QMessageBox.information(
+                self, "Reimporting Video", 
+                "The video will be reimported to attempt to get a transcript. "
+                "This may take a moment. The page will reload when complete."
+            )
+            
+            # Use the YouTube handler to reimport
+            from core.document_processor.handlers.youtube_handler import YouTubeHandler
+            
+            # Create a new handler instance
+            youtube_handler = YouTubeHandler()
+            
+            # Download from URL and get metadata
+            file_path, metadata = youtube_handler.download_from_url(source_url)
+            
+            if not file_path:
+                QMessageBox.warning(
+                    self, "Reimport Error", 
+                    "Failed to reimport the video. Please try again later."
+                )
+                return
+            
+            # Check if transcript was found
+            if 'transcript' not in metadata or not metadata['transcript']:
+                QMessageBox.warning(
+                    self, "No Transcript Available", 
+                    "No transcript could be found for this video.\n\n"
+                    "Possible reasons:\n"
+                    "• Transcripts are disabled by the video creator\n"
+                    "• The video does not have any captions\n"
+                    "• The video is age-restricted or private\n\n"
+                    "Try a different video or manually create extracts."
+                )
+                return
+            
+            # Update the document with the new file path
+            self.document.file_path = file_path
+            self.db_session.commit()
+            
+            # Reload the document
+            self.load_document(self.document_id)
+            
+            QMessageBox.information(
+                self, "Success", 
+                "The video has been reimported successfully with its transcript."
+            )
+            
+        except Exception as e:
+            logger.exception(f"Error reimporting YouTube video: {e}")
+            QMessageBox.warning(
+                self, "Reimport Error", 
+                f"Failed to reimport the video: {str(e)}"
+            )
 
     # Import necessary module to avoid error
     from datetime import datetime

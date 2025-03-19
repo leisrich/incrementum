@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex
 from PyQt6.QtGui import QIcon, QAction, QColor, QBrush
 
 from core.knowledge_base.models import Document, Category
-from core.spaced_repetition.queue_manager import QueueManager
+from core.spaced_repetition import FSRSAlgorithm
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class QueueView(QWidget):
         super().__init__()
         
         self.db_session = db_session
-        self.queue_manager = QueueManager(db_session)
+        self.fsrs = FSRSAlgorithm(db_session)
         
         # Create UI
         self._create_ui()
@@ -178,18 +178,11 @@ class QueueView(QWidget):
             days_ahead = self.days_ahead_spin.value()
             include_new = self.include_new_check.isChecked()
             
-            # Get queue statistics
-            stats = self.queue_manager.get_queue_stats()
-            
-            # Update stats display
-            self.total_label.setText(str(stats['total_documents']))
-            self.due_today_label.setText(str(stats['due_today']))
-            self.due_week_label.setText(str(stats['due_this_week']))
-            self.overdue_label.setText(str(stats['overdue']))
-            self.new_label.setText(str(stats['new_documents']))
+            # Update stats display - we need to implement this with FSRS
+            self._update_queue_stats()
             
             # Load documents by due date
-            doc_by_date = self.queue_manager.get_documents_by_due_date(
+            doc_by_date = self._get_documents_by_due_date(
                 days=days_ahead,
                 category_id=category_id,
                 include_new=include_new
@@ -207,6 +200,104 @@ class QueueView(QWidget):
                 self, "Error", 
                 f"Error loading queue data: {str(e)}"
             )
+    
+    def _update_queue_stats(self):
+        """Update the queue statistics using FSRS."""
+        # Count total documents
+        total_docs = self.db_session.query(Document).count()
+        
+        # Count documents due today
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+        
+        due_today = self.db_session.query(Document).filter(
+            Document.next_reading_date.between(today_start, today_end)
+        ).count()
+        
+        # Count documents due in the next 7 days
+        next_week = today_start + timedelta(days=7)
+        
+        due_this_week = self.db_session.query(Document).filter(
+            Document.next_reading_date.between(today_start, next_week)
+        ).count()
+        
+        # Count new documents (never read)
+        new_documents = self.db_session.query(Document).filter(
+            Document.next_reading_date == None
+        ).count()
+        
+        # Count overdue documents (due date in the past)
+        overdue = self.db_session.query(Document).filter(
+            Document.next_reading_date < today_start
+        ).count()
+        
+        # Update stats display
+        self.total_label.setText(str(total_docs))
+        self.due_today_label.setText(str(due_today))
+        self.due_week_label.setText(str(due_this_week))
+        self.overdue_label.setText(str(overdue))
+        self.new_label.setText(str(new_documents))
+    
+    def _get_documents_by_due_date(self, days: int = 7, 
+                                   category_id: Optional[int] = None,
+                                   include_new: bool = True) -> Dict[str, List[Document]]:
+        """
+        Get documents grouped by due date.
+        
+        Args:
+            days: Number of days to look ahead
+            category_id: Optional category filter
+            include_new: Whether to include new documents
+            
+        Returns:
+            Dictionary mapping date strings to lists of documents
+        """
+        result = {}
+        
+        # Base query
+        query = self.db_session.query(Document)
+        
+        # Apply category filter if specified
+        if category_id is not None:
+            query = query.filter(Document.category_id == category_id)
+        
+        # Add "Overdue" category
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        overdue_docs = query.filter(Document.next_reading_date < today).order_by(
+            Document.priority.desc(),
+            Document.next_reading_date.asc()
+        ).all()
+        
+        if overdue_docs:
+            result["Overdue"] = overdue_docs
+        
+        # Add documents by due date
+        for i in range(days):
+            date = today + timedelta(days=i)
+            date_end = date + timedelta(days=1)
+            date_str = date.strftime("%Y-%m-%d")
+            
+            # Get documents due on this date
+            date_docs = query.filter(
+                Document.next_reading_date.between(date, date_end)
+            ).order_by(
+                Document.priority.desc()
+            ).all()
+            
+            if date_docs:
+                result[date_str] = date_docs
+        
+        # Add "New" category (documents never reviewed)
+        if include_new:
+            new_docs = query.filter(Document.next_reading_date == None).order_by(
+                Document.priority.desc(),
+                Document.imported_date.desc()
+            ).all()
+            
+            if new_docs:
+                result["New"] = new_docs
+        
+        return result
     
     def _populate_queue_table(self, doc_by_date: Dict[str, List[Document]]):
         """Populate the queue table with documents."""
@@ -412,33 +503,32 @@ class QueueView(QWidget):
     
     @pyqtSlot()
     def _on_read_next(self):
-        """Handle read next document button click."""
-        # Find current document in the queue
-        current_row = -1
-        current_doc_id = self._get_current_document_id()
-        
-        if current_doc_id:
-            # Try to find the document in the queue table
-            for row in range(self.queue_table.rowCount()):
-                doc_id = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-                if doc_id == current_doc_id:
-                    current_row = row
-                    break
+        """Open the next document for reading."""
+        try:
+            # Get next document from FSRS
+            next_docs = self.fsrs.get_next_documents(count=1)
             
-            # If found and not the last one, get the next document
-            if current_row >= 0 and current_row < self.queue_table.rowCount() - 1:
-                next_doc_id = self.queue_table.item(current_row + 1, 0).data(Qt.ItemDataRole.UserRole)
-                self.documentSelected.emit(next_doc_id)
+            if not next_docs:
+                QMessageBox.information(
+                    self, "No Documents", 
+                    "There are no documents in the queue."
+                )
                 return
-        
-        # If no current document or it's the last one, get the first document in the queue
-        if self.queue_table.rowCount() > 0:
-            first_doc_id = self.queue_table.item(0, 0).data(Qt.ItemDataRole.UserRole)
-            self.documentSelected.emit(first_doc_id)
-        else:
-            QMessageBox.information(
-                self, "No Documents", 
-                "There are no documents in the queue matching your filters."
+            
+            # Get the document
+            doc = next_docs[0]
+            
+            # Emit signal to open the document
+            self.documentSelected.emit(doc.id)
+            
+            # Update UI to reflect selection
+            self.set_current_document(doc.id)
+            
+        except Exception as e:
+            logger.exception(f"Error getting next document: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error opening next document: {str(e)}"
             )
     
     @pyqtSlot()
@@ -552,7 +642,7 @@ class QueueView(QWidget):
     
     def _on_set_priority(self, doc_id: int, priority: int):
         """Handle setting document priority."""
-        if self.queue_manager.update_document_priority(doc_id, priority):
+        if self.fsrs.update_document_priority(doc_id, priority):
             self._load_queue_data()
         else:
             QMessageBox.warning(
@@ -561,21 +651,41 @@ class QueueView(QWidget):
             )
     
     def _on_rate_document(self, doc_id: int, rating: int):
-        """Handle rating a document."""
-        result = self.queue_manager.schedule_document(doc_id, rating)
-        
-        if result:
-            # Show scheduling info
-            QMessageBox.information(
-                self, "Document Scheduled", 
-                f"Document rated as {rating}/5.\n"
-                f"Next review in {result['interval_days']} days."
-            )
+        """Rate a document and schedule it."""
+        try:
+            # Map rating from 1-5 scale to 1-4 FSRS scale
+            fsrs_rating = 1  # Default to "Again"
+            if rating == 1:  # Hard/Forgot
+                fsrs_rating = 1  # Again
+            elif rating == 2:  # Medium/Difficult
+                fsrs_rating = 2  # Hard
+            elif rating == 3:  # Good
+                fsrs_rating = 3  # Good
+            elif rating >= 4:  # Easy or Very Easy
+                fsrs_rating = 4  # Easy
             
-            # Reload queue data
-            self._load_queue_data()
-        else:
+            # Schedule using FSRS
+            result = self.fsrs.schedule_document(doc_id, fsrs_rating)
+            
+            if result:
+                next_date = result['next_reading_date'].strftime("%Y-%m-%d")
+                QMessageBox.information(
+                    self, "Document Scheduled", 
+                    f"Document scheduled for next review on {next_date} "
+                    f"(in {result['interval_days']} days)."
+                )
+                
+                # Refresh the queue
+                self._load_queue_data()
+            else:
+                QMessageBox.warning(
+                    self, "Error", 
+                    "Failed to schedule document."
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error rating document: {e}")
             QMessageBox.warning(
                 self, "Error", 
-                f"Failed to schedule document."
+                f"Error rating document: {str(e)}"
             )
