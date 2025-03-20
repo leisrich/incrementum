@@ -56,7 +56,7 @@ brew install poppler tesseract
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/incrementum.git
+git clone https://github.com/melpomenex/incrementum.git
 cd incrementum
 
 # Create and activate a virtual environment
