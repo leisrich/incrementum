@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 class DockablePDFView(QDockWidget):
     """Dockable widget containing a PDF viewer."""
     
-    extractCreated = pyqtSignal(Extract)
+    extractCreated = pyqtSignal(int)
     
     def __init__(self, document, db_session, parent=None):
         title = f"PDF: {document.title}"
@@ -67,7 +67,7 @@ class DockablePDFView(QDockWidget):
         
         # Create PDF viewer widget
         self.pdf_widget = PDFViewWidget(document, db_session)
-        self.pdf_widget.extractCreated.connect(self.extractCreated)
+        self.pdf_widget.extractCreated.connect(self.extractCreated.emit)
         
         # Set as dock widget content
         self.setWidget(self.pdf_widget)
@@ -1273,28 +1273,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'queue_view'):
             self.queue_view.set_current_document(document_id)
         
-        # Create appropriate document view based on content type
-        if document.content_type == 'pdf':
-            # Create a dockable PDF viewer for PDF documents
-            pdf_dock = DockablePDFView(document, self.db_session, self)
-            pdf_dock.extractCreated.connect(self._on_extract_created)
-            
-            # Add dock widget to the right side initially
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, pdf_dock)
-            
-            # Show the dock widget
-            pdf_dock.show()
-            
-            # Focus on the PDF viewer
-            pdf_dock.raise_()
-            pdf_dock.activateWindow()
-        else:
-            # For non-PDF documents, use the regular tab approach
-            document_view = DocumentView(self.db_session, document_id)
-            
-            # Add to tab widget
-            tab_index = self.tab_widget.addTab(document_view, document.title)
-            self.tab_widget.setCurrentIndex(tab_index)
+        # Use the regular tab approach for all document types, including PDFs
+        document_view = DocumentView(self.db_session, document_id)
+        
+        # Connect the extractCreated signal
+        document_view.extractCreated.connect(self._on_extract_created)
+        
+        # Add to tab widget
+        tab_index = self.tab_widget.addTab(document_view, document.title)
+        self.tab_widget.setCurrentIndex(tab_index)
     
     @pyqtSlot()
     def _on_read_next(self):

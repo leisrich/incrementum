@@ -563,6 +563,64 @@ window.addEventListener('load', function() {
     def _load_pdf(self):
         """Load and display a PDF document."""
         try:
+            file_path = self.document.file_path
+            
+            # Check if file exists
+            if not os.path.isfile(file_path):
+                logger.error(f"PDF file not found: {file_path}")
+                
+                # Try alternative file path if in temporary directory
+                if '/tmp/' in file_path:
+                    tmp_dir = os.path.dirname(file_path)
+                    if os.path.exists(tmp_dir):
+                        files = os.listdir(tmp_dir)
+                        pdf_files = [f for f in files if f.endswith('.pdf')]
+                        if pdf_files:
+                            new_path = os.path.join(tmp_dir, pdf_files[0])
+                            logger.info(f"Using alternative PDF file found in the same directory: {new_path}")
+                            file_path = new_path
+                            
+                            # Update the document's file_path
+                            self.document.file_path = file_path
+                            self.db_session.commit()
+                        else:
+                            logger.error(f"No PDF files found in {tmp_dir}")
+                            raise FileNotFoundError(f"PDF file not found: {file_path}")
+                    else:
+                        logger.error(f"Temporary directory not found: {tmp_dir}")
+                        raise FileNotFoundError(f"PDF file not found: {file_path}")
+                else:
+                    raise FileNotFoundError(f"PDF file not found: {file_path}")
+            
+            # First try using PyMuPDF for advanced features
+            try:
+                import fitz  # PyMuPDF
+                
+                # Custom PDF viewer using PyMuPDF
+                from ui.pdf_view import PDFViewWidget
+                
+                # Create the PDF view widget
+                pdf_widget = PDFViewWidget(self.document, self.db_session)
+                
+                # Connect extract created signal if available
+                if hasattr(self, 'extractCreated') and hasattr(pdf_widget, 'extractCreated'):
+                    pdf_widget.extractCreated.connect(self.extractCreated.emit)
+                
+                # Add to layout
+                self.content_layout.addWidget(pdf_widget)
+                
+                # Store content edit for later use
+                self.content_edit = pdf_widget
+                
+                logger.info(f"Loaded PDF with PyMuPDF: {file_path}")
+                return
+                
+            except (ImportError, Exception) as e:
+                logger.warning(f"Could not use PyMuPDF for PDF: {str(e)}. Falling back to QPdfView.")
+                # Fall back to QPdfView
+                pass
+                
+            # Fallback: Use QPdfView from Qt
             from PyQt6.QtPdf import QPdfDocument
             from PyQt6.QtPdfWidgets import QPdfView
             
@@ -573,7 +631,7 @@ window.addEventListener('load', function() {
             pdf_document = QPdfDocument()
             
             # Load the PDF file
-            pdf_document.load(self.document.file_path)
+            pdf_document.load(file_path)
             
             # Set the document to the view
             pdf_view.setDocument(pdf_document)
@@ -590,6 +648,8 @@ window.addEventListener('load', function() {
             
             # Restore reading position if available
             self._restore_position()
+            
+            logger.info(f"Loaded PDF with QPdfView: {file_path}")
             
         except ImportError:
             logger.error("PDF viewing requires PyQt6.QtPdf and PyQt6.QtPdfWidgets")

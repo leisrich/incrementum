@@ -269,7 +269,7 @@ class PDFGraphicsView(QWidget):
 class PDFViewWidget(QWidget):
     """Widget for displaying and interacting with PDF documents."""
     
-    extractCreated = pyqtSignal(Extract)
+    extractCreated = pyqtSignal(int)
     
     def __init__(self, document: Document, db_session):
         super().__init__()
@@ -413,19 +413,103 @@ class PDFViewWidget(QWidget):
         try:
             file_path = self.document.file_path
             
-            # Open the PDF document
-            self.doc = fitz.open(file_path)
-            self.total_pages = len(self.doc)
-            
-            # Set initial page
-            if self.total_pages > 0:
-                self.page_spin.setMaximum(self.total_pages)
-                self.page_label.setText(f" of {self.total_pages}")
+            # Check if file exists
+            if not os.path.isfile(file_path):
+                logger.error(f"PDF file not found: {file_path}")
                 
-                # Set the first page initially
-                self.pdf_view.set_page(self.doc, 0)
+                # Try alternative file path if in temporary directory
+                if '/tmp/' in file_path:
+                    # Check if the file was moved or renamed
+                    tmp_dir = os.path.dirname(file_path)
+                    if os.path.exists(tmp_dir):
+                        files = os.listdir(tmp_dir)
+                        pdf_files = [f for f in files if f.endswith('.pdf')]
+                        if pdf_files:
+                            new_path = os.path.join(tmp_dir, pdf_files[0])
+                            logger.info(f"Using alternative PDF file found in the same directory: {new_path}")
+                            file_path = new_path
+                            
+                            # Update the document's file_path
+                            self.document.file_path = file_path
+                            self.db_session.commit()
+                        else:
+                            logger.error(f"No PDF files found in {tmp_dir}")
+                            raise FileNotFoundError(f"PDF file not found: {file_path}")
+                    else:
+                        logger.error(f"Temporary directory not found: {tmp_dir}")
+                        raise FileNotFoundError(f"PDF file not found: {file_path}")
+                else:
+                    raise FileNotFoundError(f"PDF file not found: {file_path}")
             
-            logger.info(f"Loaded PDF: {file_path} with {self.total_pages} pages")
+            # Try loading with PyMuPDF
+            try:
+                # Open the PDF document
+                self.doc = fitz.open(file_path)
+                self.total_pages = len(self.doc)
+                
+                # Set initial page
+                if self.total_pages > 0:
+                    self.page_spin.setMaximum(self.total_pages)
+                    self.page_label.setText(f" of {self.total_pages}")
+                    
+                    # Set the first page initially
+                    self.pdf_view.set_page(self.doc, 0)
+                
+                logger.info(f"Loaded PDF with PyMuPDF: {file_path} with {self.total_pages} pages")
+            except Exception as mupdf_error:
+                # If PyMuPDF fails, try using QtPdf as a fallback
+                logger.warning(f"PyMuPDF failed to load PDF: {mupdf_error}. Trying QPdfView fallback.")
+                
+                try:
+                    from PyQt6.QtPdf import QPdfDocument
+                    from PyQt6.QtPdfWidgets import QPdfView
+                    
+                    # Remove the old PDF view
+                    self.pdf_view.setParent(None)
+                    self.pdf_view.deleteLater()
+                    
+                    # Create a new layout for the QPdfView
+                    layout = QVBoxLayout()
+                    container = QWidget()
+                    container.setLayout(layout)
+                    
+                    # Create QPdfView
+                    pdf_qt_view = QPdfView()
+                    
+                    # Create PDF document
+                    pdf_document = QPdfDocument()
+                    
+                    # Load the PDF file
+                    pdf_document.load(file_path)
+                    
+                    # Set the document to the view
+                    pdf_qt_view.setDocument(pdf_document)
+                    
+                    # Add to layout
+                    layout.addWidget(pdf_qt_view)
+                    
+                    # Replace the PDF view with QPdfView
+                    self.content_layout.addWidget(container)
+                    
+                    # Disable the UI elements that won't work with QPdfView
+                    self.extract_action.setEnabled(False)
+                    self.bookmark_action.setEnabled(False)
+                    
+                    # Add a notice about limited functionality
+                    notice = QLabel("Limited functionality mode: Extract creation disabled")
+                    notice.setStyleSheet("background-color: #FFF3CD; padding: 5px; border: 1px solid #FFEEBA;")
+                    self.toolbar_layout.addWidget(notice)
+                    
+                    logger.info(f"Loaded PDF with QPdfView fallback: {file_path}")
+                except ImportError:
+                    # If QPdfView is not available, reraise the original error
+                    logger.error("QPdfView fallback not available. PDF cannot be displayed.")
+                    raise mupdf_error
+                except Exception as qt_error:
+                    # If QPdfView also fails, show both errors
+                    logger.exception(f"Both PDF viewers failed. PyMuPDF error: {mupdf_error}, QPdfView error: {qt_error}")
+                    raise Exception(f"Failed to load PDF with both viewers. PyMuPDF error: {mupdf_error}, QPdfView error: {qt_error}")
+                
         except Exception as e:
             logger.exception(f"Error loading PDF: {e}")
             QMessageBox.warning(self, "Error", f"Error loading PDF: {str(e)}")
@@ -536,7 +620,7 @@ class PDFViewWidget(QWidget):
             self._load_extracts()
             
             # Emit signal
-            self.extractCreated.emit(extract)
+            self.extractCreated.emit(extract.id)
         else:
             QMessageBox.warning(
                 self, "Extract Creation Failed", 
