@@ -15,6 +15,7 @@ from PyQt6.QtGui import QIcon, QAction, QColor, QBrush
 
 from core.knowledge_base.models import Document, Category
 from core.spaced_repetition import FSRSAlgorithm
+from core.utils.settings_manager import SettingsManager
 
 logger = logging.getLogger(__name__)
 
@@ -23,17 +24,41 @@ class QueueView(QWidget):
     
     documentSelected = pyqtSignal(int)  # document_id
     
-    def __init__(self, db_session):
+    def __init__(self, db_session, settings_manager=None):
         super().__init__()
         
         self.db_session = db_session
-        self.fsrs = FSRSAlgorithm(db_session)
+        self.settings_manager = settings_manager or SettingsManager()
+        
+        # Initialize FSRS with algorithm settings from the settings manager
+        fsrs_params = self._get_fsrs_params()
+        self.fsrs = FSRSAlgorithm(db_session, params=fsrs_params)
         
         # Create UI
         self._create_ui()
         
         # Load initial data
         self._load_queue_data()
+    
+    def _get_fsrs_params(self) -> Dict[str, Any]:
+        """Get FSRS algorithm parameters from settings."""
+        if not self.settings_manager:
+            return None
+            
+        # Get algorithm settings
+        min_interval = self.settings_manager.get_setting("algorithm", "minimum_interval", 1)
+        max_interval = self.settings_manager.get_setting("algorithm", "maximum_interval", 3650)
+        interval_modifier = self.settings_manager.get_setting("algorithm", "interval_modifier", 1.0)
+        target_retention = self.settings_manager.get_setting("algorithm", "target_retention", 0.9)
+        
+        # Create params dictionary with only the settings that should override defaults
+        params = {
+            "MIN_INTERVAL": min_interval,
+            "MAX_INTERVAL": max_interval,
+            "R_TARGET": target_retention,
+        }
+        
+        return params
     
     def _create_ui(self):
         """Create the UI layout."""
@@ -746,3 +771,17 @@ class QueueView(QWidget):
                 self, "Error", 
                 f"Error rating document: {str(e)}"
             )
+
+    def update_settings(self):
+        """Update FSRS parameters from settings."""
+        if not self.settings_manager:
+            return
+            
+        # Get updated parameters
+        fsrs_params = self._get_fsrs_params()
+        
+        # Update FSRS algorithm parameters
+        self.fsrs.params.update(fsrs_params)
+        
+        # Reload queue data with new parameters
+        self._load_queue_data()

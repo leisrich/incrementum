@@ -873,7 +873,7 @@ class MainWindow(QMainWindow):
         )
         
         # Create queue widget
-        self.queue_view = QueueView(self.db_session)
+        self.queue_view = QueueView(self.db_session, self.settings_manager)
         self.queue_view.documentSelected.connect(self._open_document)
         
         # Set as dock widget content
@@ -2307,6 +2307,10 @@ class MainWindow(QMainWindow):
         interval_minutes = self.settings_manager.get_setting("general", "auto_save_interval", 5)
         interval_ms = interval_minutes * 60 * 1000
         self.auto_save_timer.start(interval_ms)
+        
+        # Update FSRS parameters in queue view
+        if hasattr(self, 'queue_view'):
+            self.queue_view.update_settings()
     
     @pyqtSlot()
     def _on_show_statistics(self):

@@ -359,6 +359,11 @@ class FSRSAlgorithm:
         if document.last_reading_date and document.stability > 0:
             retrievability = math.exp(-(actual_interval_days / document.stability))
         
+        # Debug log
+        logger.debug(f"Before calculation - document: {document.title}, " 
+                    f"stability: {document.stability}, difficulty: {document.difficulty}, "
+                    f"reps: {document.reps}, retrievability: {retrievability}")
+        
         # Update difficulty based on rating and previous difficulty
         if document.reps > 0:
             document.difficulty = self._next_difficulty(document.difficulty, rating - 1)  # Convert 1-4 to 0-3
@@ -394,6 +399,9 @@ class FSRSAlgorithm:
         randomness = 1.0 + (random.random() * 0.1 - 0.05)
         optimal_interval *= randomness
         
+        # Debug calculated interval before bounds
+        logger.debug(f"Calculated interval before bounds: {optimal_interval:.2f} days")
+        
         # Ensure interval stays within bounds
         optimal_interval = max(self.params["MIN_INTERVAL"], min(self.params["MAX_INTERVAL"], optimal_interval))
         
@@ -402,6 +410,12 @@ class FSRSAlgorithm:
         
         # Calculate next reading date
         next_reading_date = now + timedelta(days=interval_days)
+        
+        # Debug log final calculation
+        logger.debug(f"After calculation - document: {document.title}, " 
+                    f"stability: {document.stability:.2f}, difficulty: {document.difficulty:.2f}, "
+                    f"min_interval: {self.params['MIN_INTERVAL']}, interval_days: {interval_days}, "
+                    f"next_reading_date: {next_reading_date}")
         
         # Update document
         document.last_reading_date = now
