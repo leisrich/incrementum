@@ -51,7 +51,7 @@ On Linux/macOS:
 ```bash
 source incrementum-env/bin/activate
 ```
-On Windows run this command to get going quickly:
+On Windows run this command to get going quickly in Powershell:
 ```bash
 .\setup.ps1
 ```
