@@ -368,5 +368,3 @@ Visit the Incrementum GitHub repository for:
 ---
 
 Remember that incremental learning is a process - start small, focus on quality extracts, and maintain a consistent review schedule for best results.
-# incrementum
-# incrementum
