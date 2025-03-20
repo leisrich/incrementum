@@ -194,6 +194,12 @@ class QueueView(QWidget):
             # Populate calendar view
             self._populate_calendar_view(doc_by_date)
             
+            # If there are documents in the queue, select the first one
+            if self.queue_table.rowCount() > 0:
+                self.queue_table.selectRow(0)
+                first_doc_id = self.queue_table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+                self.set_current_document(first_doc_id)
+            
         except Exception as e:
             logger.exception(f"Error loading queue data: {e}")
             QMessageBox.warning(
@@ -323,6 +329,31 @@ class QueueView(QWidget):
             for doc in doc_by_date["New"]:
                 self._add_document_to_queue(doc, row, QColor(200, 220, 255))
                 row += 1
+                
+        # Ensure the table is sorted by priority and due date within each group
+        self._ensure_queue_order()
+    
+    def _ensure_queue_order(self):
+        """
+        Sort the queue table to maintain proper order by priority and due date.
+        This ensures "Next Document" navigation follows the proper order.
+        """
+        try:
+            # The queue ordering is already handled correctly by _get_documents_by_due_date
+            # This method is a hook for future customization
+            
+            # If needed in the future, we could implement custom sorting here
+            # For now, we rely on the order from _get_documents_by_due_date
+            
+            # Update selection and navigation buttons
+            self._update_navigation_buttons()
+            
+            # If there are documents in the queue, select the first row by default
+            if self.queue_table.rowCount() > 0:
+                self.queue_table.selectRow(0)
+                
+        except Exception as e:
+            logger.exception(f"Error ensuring queue order: {e}")
     
     def _add_document_to_queue(self, doc: Document, row: int, background_color=None):
         """Add a document to the queue table."""
@@ -505,24 +536,50 @@ class QueueView(QWidget):
     def _on_read_next(self):
         """Open the next document for reading."""
         try:
-            # Get next document from FSRS
-            next_docs = self.fsrs.get_next_documents(count=1)
-            
-            if not next_docs:
-                QMessageBox.information(
-                    self, "No Documents", 
-                    "There are no documents in the queue."
-                )
+            # If there are no documents in the queue table, use the FSRS algorithm
+            if self.queue_table.rowCount() == 0:
+                next_docs = self.fsrs.get_next_documents(count=1)
+                
+                if not next_docs:
+                    QMessageBox.information(
+                        self, "No Documents", 
+                        "There are no documents in the queue."
+                    )
+                    return
+                
+                # Get the document
+                doc = next_docs[0]
+                
+                # Emit signal to open the document
+                self.documentSelected.emit(doc.id)
+                
+                # Update UI to reflect selection
+                self.set_current_document(doc.id)
                 return
             
-            # Get the document
-            doc = next_docs[0]
+            # If there are documents in the queue table, use the queue order
+            current_row = -1
+            current_doc_id = self._get_current_document_id()
             
-            # Emit signal to open the document
-            self.documentSelected.emit(doc.id)
+            if current_doc_id:
+                # Find the current document in the queue table
+                for row in range(self.queue_table.rowCount()):
+                    doc_id = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                    if doc_id == current_doc_id:
+                        current_row = row
+                        break
+            
+            # Move to the next document in the queue
+            next_row = current_row + 1
+            if next_row >= self.queue_table.rowCount():
+                next_row = 0  # Wrap around to the beginning
+            
+            next_doc_id = self.queue_table.item(next_row, 0).data(Qt.ItemDataRole.UserRole)
+            self.documentSelected.emit(next_doc_id)
+            self.set_current_document(next_doc_id)
             
             # Update UI to reflect selection
-            self.set_current_document(doc.id)
+            self.queue_table.selectRow(next_row)
             
         except Exception as e:
             logger.exception(f"Error getting next document: {e}")
