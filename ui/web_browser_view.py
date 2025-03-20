@@ -6,7 +6,8 @@ from urllib.parse import urlparse
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QToolBar, 
     QLineEdit, QPushButton, QSplitter, QMessageBox,
-    QStatusBar, QProgressBar, QMenu, QLabel, QSizePolicy
+    QStatusBar, QProgressBar, QMenu, QLabel, QSizePolicy,
+    QApplication
 )
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot, QObject
 try:
@@ -38,15 +39,15 @@ class WebBrowserView(QWidget):
     
     extractCreated = pyqtSignal(int)  # extract_id
     
-    def __init__(self, db_session):
-        super().__init__()
+    def __init__(self, db_session, parent=None):
+        super().__init__(parent)
         
         if not HAS_WEBENGINE:
             raise ImportError("Web browsing requires QWebEngineView")
         
         self.db_session = db_session
         self.selected_text = ""
-        self.current_url = ""
+        self._current_url = ""
         self.current_title = "New Tab"
         self.cached_content = ""
         self.current_document_id = None
@@ -56,6 +57,22 @@ class WebBrowserView(QWidget):
         
         # Load default page
         self.navigate_to("about:blank")
+    
+    @property
+    def current_url(self):
+        """Get the current URL of the web browser."""
+        if hasattr(self, 'web_view') and self.web_view:
+            return self.web_view.url().toString()
+        return self._current_url
+    
+    def load_url(self, url):
+        """Load the specified URL in the web browser."""
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        
+        self._current_url = url
+        self.url_bar.setText(url)
+        self.web_view.load(QUrl(url))
     
     def _create_ui(self):
         """Create the UI components."""
@@ -262,7 +279,7 @@ class WebBrowserView(QWidget):
     def _on_url_updated(self, url):
         """Handle URL changed event."""
         url_str = url.toString()
-        self.current_url = url_str
+        self._current_url = url_str
         self.url_bar.setText(url_str)
         
         # Update back/forward buttons
@@ -375,7 +392,7 @@ class WebBrowserView(QWidget):
                 content=extract_data['content'],
                 context=extract_data['context'],
                 document_id=self.current_document_id,
-                position=f"url:{self.current_url},{extract_data['position']}",
+                position=f"url:{self._current_url},{extract_data['position']}",
                 created_date=datetime.utcnow()
             )
             
@@ -401,18 +418,213 @@ class WebBrowserView(QWidget):
             )
     
     def _on_save_page(self):
-        """Save the current page as a document."""
+        """Save the current page as a document with all images and styling intact."""
         try:
-            self._ensure_document_exists(force_new=True)
-            QMessageBox.information(
-                self, "Page Saved", 
-                f"The page '{self.current_title}' has been saved as a document."
-            )
+            # Get the page HTML content and save it with resources
+            self.web_view.page().runJavaScript("document.documentElement.outerHTML;", self._save_page_with_resources)
         except Exception as e:
             logger.exception(f"Error saving page: {e}")
             QMessageBox.warning(
                 self, "Error", 
                 f"Failed to save page: {str(e)}"
+            )
+    
+    def _save_page_with_resources(self, html_content):
+        """Save the page with all resources (images, styles) intact."""
+        try:
+            import tempfile
+            import os
+            import re
+            import time
+            import uuid
+            from urllib.parse import urlparse, urljoin
+            
+            # Create a timestamp and sanitized title for the folder name
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            safe_title = re.sub(r'[^\w\-_]', '_', self.current_title[:50])
+            document_id = str(uuid.uuid4())[:8]
+            folder_name = f"{timestamp}_{safe_title}_{document_id}"
+            
+            # Create base directory for documents
+            app_data_dir = os.path.join(os.path.expanduser("~"), ".incrementum", "saved_pages")
+            if not os.path.exists(app_data_dir):
+                os.makedirs(app_data_dir, exist_ok=True)
+            
+            # Create document folder and images subfolder
+            document_dir = os.path.join(app_data_dir, folder_name)
+            images_dir = os.path.join(document_dir, "images")
+            css_dir = os.path.join(document_dir, "css")
+            
+            os.makedirs(document_dir, exist_ok=True)
+            os.makedirs(images_dir, exist_ok=True)
+            os.makedirs(css_dir, exist_ok=True)
+            
+            # Process the HTML to find and download images
+            # This will be a two-step process:
+            # 1. First pass to identify all resources (images, CSS)
+            # 2. Second pass to replace URLs with local paths
+            resources = []
+            
+            # Find all image sources
+            img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+            for match in img_pattern.finditer(html_content):
+                src = match.group(1)
+                if src and not src.startswith('data:'):
+                    resources.append(('img', src))
+            
+            # Find all CSS links
+            css_pattern = re.compile(r'<link[^>]+href=["\']([^"\']+\.css[^"\']*)["\']', re.IGNORECASE)
+            for match in css_pattern.finditer(html_content):
+                href = match.group(1)
+                if href:
+                    resources.append(('css', href))
+            
+            # Find background images in style attributes
+            style_pattern = re.compile(r'style=["\'].*?background(?:-image)?:\s*url\(["\']?([^)]+?)["\']?\).*?["\']', re.IGNORECASE)
+            for match in style_pattern.finditer(html_content):
+                url = match.group(1)
+                if url and not url.startswith('data:'):
+                    resources.append(('background', url))
+            
+            # We'll download these resources using QWebEngineView in a separate step
+            # For now, let's prepare the HTML file with placeholders
+            
+            # Replace image sources
+            replacement_count = 0
+            modified_html = html_content
+            
+            # Create a basic progress message function
+            def show_progress(message):
+                self.status_label.setText(message)
+                QApplication.processEvents()
+            
+            # Function to download a resource
+            def download_resource(res_type, url):
+                nonlocal replacement_count
+                try:
+                    # Make the URL absolute
+                    if not url.startswith(('http://', 'https://')):
+                        base_url = self.web_view.url().toString()
+                        url = urljoin(base_url, url)
+                    
+                    # Generate a filename for the resource
+                    parsed_url = urlparse(url)
+                    path_parts = parsed_url.path.split('/')
+                    filename = path_parts[-1] if path_parts[-1] else f"resource_{replacement_count}"
+                    
+                    # Add file extension if missing
+                    if res_type == 'img' and '.' not in filename:
+                        filename += '.jpg'  # Default to jpg if no extension
+                    elif res_type == 'css' and not filename.endswith('.css'):
+                        filename += '.css'
+                    
+                    # Clean the filename
+                    filename = re.sub(r'[^\w\-_\.]', '_', filename)
+                    
+                    # Ensure uniqueness
+                    filename = f"{replacement_count}_{filename}"
+                    replacement_count += 1
+                    
+                    # Determine target directory
+                    target_dir = images_dir if res_type in ('img', 'background') else css_dir
+                    file_path = os.path.join(target_dir, filename)
+                    
+                    # Create a relative path for the HTML
+                    if res_type in ('img', 'background'):
+                        rel_path = f"images/{filename}"
+                    else:
+                        rel_path = f"css/{filename}"
+                    
+                    # Download the resource
+                    show_progress(f"Downloading: {url}")
+                    
+                    # Use a direct HTTP request for simplicity
+                    import requests
+                    response = requests.get(url, timeout=10)
+                    if response.status_code == 200:
+                        with open(file_path, 'wb') as f:
+                            f.write(response.content)
+                        return rel_path
+                    else:
+                        logger.warning(f"Failed to download {url}: {response.status_code}")
+                        return url  # Keep the original URL if download fails
+                except Exception as e:
+                    logger.exception(f"Error downloading resource {url}: {e}")
+                    return url  # Keep the original URL if download fails
+            
+            # Download all resources
+            show_progress("Processing page resources...")
+            resource_map = {}
+            for res_type, url in resources:
+                if url not in resource_map:
+                    resource_map[url] = download_resource(res_type, url)
+            
+            # Replace all resource URLs in the HTML
+            for original_url, local_path in resource_map.items():
+                # Escape special regex characters in the URL
+                escaped_url = re.escape(original_url)
+                
+                # Replace img src
+                modified_html = re.sub(
+                    f'src=["\']({escaped_url})["\']', 
+                    f'src="{local_path}"', 
+                    modified_html
+                )
+                
+                # Replace CSS href
+                modified_html = re.sub(
+                    f'href=["\']({escaped_url})["\']', 
+                    f'href="{local_path}"', 
+                    modified_html
+                )
+                
+                # Replace background image URLs
+                modified_html = re.sub(
+                    f'url\\(["\']?({escaped_url})["\']?\\)', 
+                    f'url("{local_path}")', 
+                    modified_html
+                )
+            
+            # Write the HTML file
+            html_file_path = os.path.join(document_dir, "index.html")
+            with open(html_file_path, 'w', encoding='utf-8') as f:
+                f.write(modified_html)
+            
+            show_progress("Creating document record...")
+            
+            # Create document record in the database
+            document = Document(
+                title=self.current_title[:100],
+                file_path=html_file_path,
+                content_type="html",
+                author="Web",
+                source_url=self._current_url,
+                imported_date=datetime.utcnow(),
+                last_accessed=datetime.utcnow()
+            )
+            
+            # Add to database
+            self.db_session.add(document)
+            self.db_session.commit()
+            
+            # Update document ID
+            self.current_document_id = document.id
+            
+            show_progress("Ready")
+            
+            # Show success message
+            QMessageBox.information(
+                self, "Page Saved", 
+                f"The page '{self.current_title}' has been saved with all resources.\n\n"
+                f"Path: {html_file_path}\n"
+                f"Resources: {len(resource_map)} files"
+            )
+            
+        except Exception as e:
+            logger.exception(f"Error saving page with resources: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Failed to save page with resources: {str(e)}"
             )
     
     def _create_document(self, html_content, filename):
@@ -433,7 +645,7 @@ class WebBrowserView(QWidget):
                 file_path=file_path,
                 content_type="html",
                 author="Web",
-                source_url=self.current_url,
+                source_url=self._current_url,
                 imported_date=datetime.utcnow(),
                 last_accessed=datetime.utcnow()
             )
@@ -445,7 +657,7 @@ class WebBrowserView(QWidget):
             # Store document ID
             self.current_document_id = document.id
             
-            logger.info(f"Created document for web page: {self.current_url}")
+            logger.info(f"Created document for web page: {self._current_url}")
             
             # If we have pending extract creation, process it now
             if hasattr(self, 'pending_extract_data') and self.pending_extract_data:
@@ -474,7 +686,7 @@ class WebBrowserView(QWidget):
             return self.current_document_id
         
         # Parse the URL to create a valid filename
-        url_obj = urlparse(self.current_url)
+        url_obj = urlparse(self._current_url)
         hostname = url_obj.netloc
         path = url_obj.path.replace('/', '_')
         

@@ -5,10 +5,13 @@ import logging
 import tempfile
 import requests
 import json
+import base64
 from typing import Dict, Any, Optional, List, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from datetime import datetime
 from bs4 import BeautifulSoup
+import shutil
+import re
 
 from .base_handler import DocumentHandler
 from core.utils.settings_manager import SettingsManager
@@ -144,8 +147,178 @@ class JinaWebHandler(DocumentHandler):
         
         return result
     
+    def _download_images(self, jina_data: Dict[str, Any], base_folder: str) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+        """
+        Download images from the Jina data and save them to the specified folder.
+        
+        Args:
+            jina_data: Data from Jina API
+            base_folder: Folder to save images to
+            
+        Returns:
+            Tuple of (list of image metadata, mapping of original URL to local path)
+        """
+        image_folder = os.path.join(base_folder, 'images')
+        os.makedirs(image_folder, exist_ok=True)
+        
+        saved_images = []
+        image_map = {}  # Maps original URLs to local paths
+        
+        # Get source URL for building absolute image URLs
+        source_url = jina_data.get('url', '')
+        
+        # Process images from Jina data
+        if 'images' in jina_data and isinstance(jina_data['images'], list):
+            for i, image_data in enumerate(jina_data['images']):
+                if not isinstance(image_data, dict):
+                    continue
+                    
+                try:
+                    image_url = image_data.get('url', '')
+                    if not image_url:
+                        continue
+                    
+                    # Make URL absolute if it's relative
+                    if not urlparse(image_url).netloc and source_url:
+                        image_url = urljoin(source_url, image_url)
+                    
+                    # Create a safe filename from the URL
+                    filename = f"image_{i}_{os.path.basename(urlparse(image_url).path)}"
+                    filename = re.sub(r'[^\w\-\.]', '_', filename)
+                    if not filename.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                        filename += '.jpg'  # Default extension
+                    
+                    local_path = os.path.join(image_folder, filename)
+                    
+                    # Download the image
+                    response = requests.get(image_url, stream=True, timeout=10)
+                    if response.status_code == 200:
+                        with open(local_path, 'wb') as img_file:
+                            response.raw.decode_content = True
+                            shutil.copyfileobj(response.raw, img_file)
+                        
+                        # Save image metadata
+                        image_data['local_path'] = os.path.join('images', filename)
+                        saved_images.append(image_data)
+                        
+                        # Add to image map
+                        image_map[image_url] = os.path.join('images', filename)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to download image {image_url}: {e}")
+        
+        # Also look for images in the HTML content
+        html_content = jina_data.get('html', '')
+        if html_content:
+            soup = BeautifulSoup(html_content, 'lxml')
+            for i, img in enumerate(soup.find_all('img')):
+                src = img.get('src', '')
+                if not src or src in image_map:
+                    continue
+                
+                try:
+                    # Make URL absolute if it's relative
+                    if not urlparse(src).netloc and source_url:
+                        src = urljoin(source_url, src)
+                    
+                    # Handle data URLs (base64 encoded images)
+                    if src.startswith('data:image/'):
+                        # Parse data URL
+                        metadata, encoded = src.split(',', 1)
+                        image_type = metadata.split(';')[0].split('/')[1]
+                        
+                        # Create filename for data URL
+                        filename = f"inline_image_{i}.{image_type}"
+                        local_path = os.path.join(image_folder, filename)
+                        
+                        # Save the image
+                        with open(local_path, 'wb') as img_file:
+                            img_file.write(base64.b64decode(encoded))
+                        
+                        # Add to image map
+                        image_map[src] = os.path.join('images', filename)
+                        continue
+                    
+                    # Create a safe filename
+                    filename = f"img_{i}_{os.path.basename(urlparse(src).path)}"
+                    filename = re.sub(r'[^\w\-\.]', '_', filename)
+                    if not filename.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                        filename += '.jpg'
+                    
+                    local_path = os.path.join(image_folder, filename)
+                    
+                    # Download the image
+                    response = requests.get(src, stream=True, timeout=10)
+                    if response.status_code == 200:
+                        with open(local_path, 'wb') as img_file:
+                            response.raw.decode_content = True
+                            shutil.copyfileobj(response.raw, img_file)
+                        
+                        # Add to image map
+                        image_map[src] = os.path.join('images', filename)
+                        
+                        # Add to saved images if not already included
+                        if src not in [img.get('url', '') for img in saved_images]:
+                            saved_images.append({
+                                'url': src,
+                                'local_path': os.path.join('images', filename),
+                                'alt': img.get('alt', '')
+                            })
+                
+                except Exception as e:
+                    logger.warning(f"Failed to download image {src} from HTML: {e}")
+        
+        return saved_images, image_map
+    
+    def _update_html_with_local_images(self, html_content: str, image_map: Dict[str, str]) -> str:
+        """
+        Update HTML content to use local image paths instead of remote URLs.
+        
+        Args:
+            html_content: Original HTML content
+            image_map: Mapping of original URLs to local paths
+            
+        Returns:
+            Updated HTML content
+        """
+        if not html_content or not image_map:
+            return html_content
+        
+        soup = BeautifulSoup(html_content, 'lxml')
+        
+        # Update image sources
+        for img in soup.find_all('img'):
+            src = img.get('src', '')
+            if src in image_map:
+                img['src'] = image_map[src]
+                # Mark as local image
+                img['data-local'] = 'true'
+        
+        # Update CSS backgrounds (this is simplified and might not catch all cases)
+        style_tags = soup.find_all('style')
+        for style in style_tags:
+            css_content = style.string
+            if not css_content:
+                continue
+            
+            # Replace URLs in CSS
+            for original_url, local_path in image_map.items():
+                if original_url in css_content:
+                    css_content = css_content.replace(original_url, local_path)
+            
+            style.string = css_content
+        
+        # Update inline styles with background images
+        for element in soup.find_all(lambda tag: tag.has_attr('style') and 'background' in tag['style']):
+            style = element['style']
+            for original_url, local_path in image_map.items():
+                if original_url in style:
+                    element['style'] = style.replace(original_url, local_path)
+        
+        return str(soup)
+    
     def download_from_url(self, url: str) -> Tuple[Optional[str], Dict[str, Any]]:
-        """Download a webpage using Jina.ai API."""
+        """Download a webpage using Jina.ai API and save all associated images."""
         metadata = {'source_url': url, 'source_type': 'jina_web'}
         
         try:
@@ -167,12 +340,31 @@ class JinaWebHandler(DocumentHandler):
             # Parse the response
             jina_data = response.json()
             
-            # Create a temporary file
-            fd, temp_path = tempfile.mkstemp(suffix='.json')
+            # Create a temporary directory to store the webpage and its resources
+            temp_dir = tempfile.mkdtemp(prefix='jina_web_')
             
-            # Save the content
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            # Download and save images
+            saved_images, image_map = self._download_images(jina_data, temp_dir)
+            
+            # Update the HTML to use local image paths
+            if 'html' in jina_data:
+                jina_data['html'] = self._update_html_with_local_images(jina_data['html'], image_map)
+            
+            # Add saved images to the data
+            jina_data['saved_images'] = saved_images
+            
+            # Create a JSON file for metadata and content
+            json_path = os.path.join(temp_dir, 'content.json')
+            
+            # Save the updated content
+            with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(jina_data, f, ensure_ascii=False, indent=2)
+            
+            # Create an HTML file with the modified content
+            html_path = os.path.join(temp_dir, 'index.html')
+            if 'html' in jina_data:
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(jina_data['html'])
             
             # Extract basic metadata
             if 'url' in jina_data:
@@ -183,8 +375,10 @@ class JinaWebHandler(DocumentHandler):
             
             metadata['creation_date'] = datetime.now()
             metadata['modification_date'] = datetime.now()
+            metadata['saved_dir'] = temp_dir
+            metadata['image_count'] = len(saved_images)
             
-            return temp_path, metadata
+            return json_path, metadata
             
         except Exception as e:
             logger.exception(f"Error downloading from Jina.ai: {e}")

@@ -59,6 +59,14 @@ class DocumentView(QWidget):
         self.content_text = ""
         self.youtube_callback = None
         
+        # View state tracking
+        self.view_state = {
+            "zoom_factor": 1.0,
+            "position": None,
+            "size": None,
+            "scroll_position": 0
+        }
+        
         # Create the UI
         self._create_ui()
         
@@ -910,6 +918,17 @@ window.addEventListener('load', function() {
                             console.log('Video ended');
                         }}
                     }}
+
+                    // Function to get player state
+                    function getPlayerState() {{
+                        if (typeof player !== 'undefined' && player) {{
+                            return {{
+                                currentTime: player.getCurrentTime(),
+                                playerState: player.getPlayerState()
+                            }};
+                        }}
+                        return null;
+                    }}
                 </script>
             </body>
             </html>
@@ -1106,9 +1125,184 @@ window.addEventListener('load', function() {
                 f"Failed to create extract: {str(e)}"
             )
     
+    def showEvent(self, event):
+        """Handle widget show event to restore view state."""
+        super().showEvent(event)
+        
+        # Restore view state when tab is shown again
+        self._restore_view_state()
+        
+        # Emit signal when the document is shown
+        QTimer.singleShot(100, self._on_tab_activated)
+        
+    def hideEvent(self, event):
+        """Handle widget hide event to save view state."""
+        super().hideEvent(event)
+        
+        # Save view state when tab is hidden
+        self._save_view_state()
+        
+        # Emit signal when the document is hidden
+        QTimer.singleShot(0, self._on_tab_deactivated)
+    
+    def _on_tab_activated(self):
+        """Handle tab activation."""
+        # Additional things to do when a tab becomes active
+        # For example, update toolbar actions or refresh content
+        logger.debug(f"Tab activated for document: {self.document_id}")
+        
+        # Special handling for different content types
+        if hasattr(self, 'document') and self.document:
+            # For PDF content, ensure proper restoration
+            if self.document.content_type == 'pdf' and hasattr(self, 'content_edit'):
+                # If it's a PDFViewWidget, call its specific methods
+                if hasattr(self.content_edit, 'set_view_state') and hasattr(self.content_edit, 'get_view_state'):
+                    # Any specific PDF restoration
+                    pass
+            
+            # For YouTube content, which uses web_view instead of content_edit
+            elif self.document.content_type == 'youtube' and hasattr(self, 'web_view'):
+                logger.debug(f"Tab activated for YouTube video: {self.document.id}")
+                # YouTube-specific restoration if needed
+                pass
+                    
+            # For general web content, ensure JavaScript is running
+            elif hasattr(self, 'content_edit') and HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
+                # Refresh web content to ensure JavaScript is working
+                refresh_script = """
+                if (typeof refreshActiveContent === 'function') {
+                    refreshActiveContent();
+                }
+                """
+                self.content_edit.page().runJavaScript(refresh_script)
+    
+    def _on_tab_deactivated(self):
+        """Handle tab deactivation."""
+        # Additional things to do when a tab becomes inactive
+        logger.debug(f"Tab deactivated for document: {self.document_id}")
+        
+        # Save any unsaved changes or state
+        self._save_position()
+        
+        # Content type specific handling
+        if hasattr(self, 'document') and self.document:
+            # PDF-specific handling
+            if self.document.content_type == 'pdf' and hasattr(self, 'content_edit'):
+                # Additional PDF-specific state saving
+                pass
+            
+            # YouTube-specific handling
+            elif self.document.content_type == 'youtube' and hasattr(self, 'web_view'):
+                # Save YouTube position if needed
+                # This is usually handled automatically by the setup_youtube_webview callback
+                pass
+    
+    def _save_view_state(self):
+        """Save the current view state for later restoration."""
+        try:
+            # Handle YouTube specially since it uses web_view instead of content_edit
+            if hasattr(self, 'document') and self.document and self.document.content_type == 'youtube':
+                if hasattr(self, 'web_view') and HAS_WEBENGINE:
+                    # Using JavaScript to get YouTube player state
+                    self.web_view.page().runJavaScript(
+                        "getPlayerState();",
+                        lambda state: setattr(self, 'view_state', {**self.view_state, "youtube_state": state}) if state else None
+                    )
+                return
+            
+            # If content_edit is a PDFViewWidget, use its specific methods
+            if hasattr(self, 'content_edit'):
+                # Special handling for PDF view widget
+                if hasattr(self.content_edit, 'get_view_state'):
+                    pdf_state = self.content_edit.get_view_state()
+                    self.view_state.update(pdf_state)
+                    logger.debug(f"Saved PDF-specific view state: {pdf_state}")
+                elif hasattr(self.content_edit, 'zoom_factor'):
+                    self.view_state["zoom_factor"] = self.content_edit.zoom_factor
+                
+                # Save scroll position for QTextEdit and similar
+                if hasattr(self.content_edit, 'verticalScrollBar'):
+                    scrollbar = self.content_edit.verticalScrollBar()
+                    if scrollbar:
+                        self.view_state["scroll_position"] = scrollbar.value()
+                        
+                # Save scroll position for webviews
+                if HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
+                    # Using JavaScript to get scroll position
+                    self.content_edit.page().runJavaScript(
+                        "window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;",
+                        lambda pos: setattr(self, 'view_state', {**self.view_state, "scroll_position": pos})
+                    )
+                    
+            # Save size and position if needed
+            self.view_state["size"] = self.size()
+            
+            # Store state in database if needed for persistent storage across sessions
+            if hasattr(self, 'document') and self.document:
+                # In a production version, you might want to store this in the database
+                # import json
+                # self.document.view_state = json.dumps(self.view_state)
+                # self.db_session.commit()
+                pass
+                
+            logger.debug(f"Saved view state for document {self.document_id}: {self.view_state}")
+                
+        except Exception as e:
+            logger.exception(f"Error saving view state: {e}")
+    
+    def _restore_view_state(self):
+        """Restore the previously saved view state."""
+        try:
+            if not hasattr(self, 'content_edit') or not self.content_edit:
+                return
+                
+            # If content_edit is a PDFViewWidget, use its specific methods
+            if hasattr(self.content_edit, 'set_view_state'):
+                # Create a copy of the view state to avoid modifying the original
+                pdf_state = {k: v for k, v in self.view_state.items() 
+                            if k in ['page', 'zoom_factor', 'position']}
+                
+                if pdf_state:
+                    self.content_edit.set_view_state(pdf_state)
+                    logger.debug(f"Restored PDF-specific view state: {pdf_state}")
+                return  # Exit early since PDF view handles its own state
+                
+            # For other view types, apply generic restoration
+            
+            # Restore zoom factor
+            if "zoom_factor" in self.view_state and self.view_state["zoom_factor"]:
+                if hasattr(self.content_edit, 'set_zoom'):
+                    self.content_edit.set_zoom(self.view_state["zoom_factor"])
+                
+            # Restore scroll position
+            if "scroll_position" in self.view_state and self.view_state["scroll_position"] is not None:
+                # For QTextEdit and similar
+                if hasattr(self.content_edit, 'verticalScrollBar'):
+                    scrollbar = self.content_edit.verticalScrollBar()
+                    if scrollbar:
+                        scrollbar.setValue(self.view_state["scroll_position"])
+                        
+                # For web views
+                if HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
+                    pos = self.view_state["scroll_position"]
+                    script = f"window.scrollTo(0, {pos});"
+                    self.content_edit.page().runJavaScript(script)
+                    
+            # Apply sizing if needed
+            if "size" in self.view_state and self.view_state["size"]:
+                # Usually not needed as the tab widget will control size,
+                # but could be useful in some cases
+                pass
+                
+            logger.debug(f"Restored view state for document {self.document_id}: {self.view_state}")
+                
+        except Exception as e:
+            logger.exception(f"Error restoring view state: {e}")
+    
     def closeEvent(self, event):
         """Handle close event to save document position."""
         self._save_position()
+        self._save_view_state()
         super().closeEvent(event)
     
     def _save_position(self):
@@ -1248,6 +1442,32 @@ window.addEventListener('load', function() {
                 self, "Reimport Error", 
                 f"Failed to reimport the video: {str(e)}"
             )
+
+    def save_document(self):
+        """Save the current document state to the database."""
+        try:
+            if not self.document or not self.document_id:
+                logger.debug("No document to save")
+                return False
+                
+            # Save position
+            self._save_position()
+            
+            # Save view state
+            self._save_view_state()
+            
+            # Update last_modified timestamp
+            self.document.last_modified = datetime.utcnow()
+            
+            # Commit changes to the database
+            self.db_session.commit()
+            
+            logger.debug(f"Document {self.document_id} saved successfully")
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Error saving document: {e}")
+            return False
 
     # Import necessary module to avoid error
     from datetime import datetime

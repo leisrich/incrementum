@@ -3,6 +3,7 @@
 import os
 import sys
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from sqlalchemy import func
@@ -62,6 +63,9 @@ class DockablePDFView(QDockWidget):
         title = f"PDF: {document.title}"
         super().__init__(title, parent)
         
+        # Set object name for state saving
+        self.setObjectName(f"PDFDock_{document.id}")
+        
         self.document = document
         self.db_session = db_session
         
@@ -97,6 +101,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
+        # Flag to track initialization status
+        self._initialization_complete = False
+        
         # Initialize database session
         self.db_session = init_database()
         
@@ -131,6 +138,9 @@ class MainWindow(QMainWindow):
         # Restore saved layout if available
         self._restore_saved_layout()
         
+        # Restore session (open tabs) if available
+        self._restore_session()
+        
         # Set up auto-save timer
         self._setup_auto_save()
         
@@ -139,6 +149,198 @@ class MainWindow(QMainWindow):
         
         # Show startup statistics if configured
         self._check_startup_statistics()
+        
+        # Initialization is complete
+        self._initialization_complete = True
+        
+        # Add a timer to save session after the window is shown
+        QTimer.singleShot(1000, self._check_session_state)
+        
+        # Connect exit action
+        self.action_exit.triggered.connect(self.close)
+    
+    def _check_session_state(self):
+        """Debug check of session state after window is shown."""
+        logger.info(f"Content tabs widget exists: {hasattr(self, 'content_tabs')}")
+        if hasattr(self, 'content_tabs'):
+            logger.info(f"Content tabs count: {self.content_tabs.count()}")
+            self._save_session()
+        else:
+            logger.error("Content tabs widget not found during session state check")
+    
+    def _restore_session(self):
+        """Restore the previous session's open tabs and active document."""
+        try:
+            # Get saved session data from settings
+            session_data = self.settings_manager.get_setting("session", "open_tabs", None)
+            
+            if not session_data:
+                # No saved session data
+                logger.info("No saved session data found to restore")
+                return
+            
+            # Make sure we have a tab widget
+            if not hasattr(self, 'content_tabs') or not self.content_tabs:
+                logger.warning("No tab widget found, session not restored")
+                return
+                
+            # Parse the session data
+            tabs_data = json.loads(session_data)
+            logger.info(f"Attempting to restore session with {len(tabs_data)} tabs")
+            
+            # Restore tabs
+            for tab_data in tabs_data:
+                tab_type = tab_data.get("type")
+                item_id = tab_data.get("id")
+                
+                if not tab_type:
+                    logger.warning(f"Missing tab type in session data: {tab_data}")
+                    continue
+                    
+                if tab_type == "document":
+                    if item_id:
+                        logger.info(f"Restoring document tab: {item_id}")
+                        self._open_document(item_id)
+                    else:
+                        logger.warning("Document ID missing in session data")
+                elif tab_type == "extract":
+                    if item_id:
+                        logger.info(f"Restoring extract tab: {item_id}")
+                        self._open_extract(item_id)
+                    else:
+                        logger.warning("Extract ID missing in session data")
+                elif tab_type == "learning_item":
+                    if item_id:
+                        logger.info(f"Restoring learning item tab: {item_id}")
+                        self._open_learning_item(item_id)
+                    else:
+                        logger.warning("Learning item ID missing in session data")
+                elif tab_type == "web":
+                    # Special handling for web browser tabs
+                    url = tab_data.get("url")
+                    if url:
+                        logger.info(f"Restoring web tab: {url}")
+                        web_view = WebBrowserView(self.db_session, self)
+                        web_view.load_url(url)
+                        self.content_tabs.addTab(web_view, f"Web: {tab_data.get('title', url)}")
+                    else:
+                        logger.warning("Web URL missing in session data")
+                else:
+                    logger.warning(f"Unknown tab type in session data: {tab_type}")
+            
+            # Set active tab
+            active_tab = self.settings_manager.get_setting("session", "active_tab", 0)
+            if active_tab < self.content_tabs.count():
+                self.content_tabs.setCurrentIndex(active_tab)
+                logger.info(f"Set active tab to index {active_tab}")
+            else:
+                logger.warning(f"Active tab index {active_tab} out of range ({self.content_tabs.count()} tabs)")
+                
+            logger.info(f"Restored session with {len(tabs_data)} tabs")
+            
+        except Exception as e:
+            logger.exception(f"Error restoring session: {e}")
+    
+    def _save_session(self):
+        """Save the current session's open tabs and active document."""
+        # Skip if initialization is not complete
+        if not hasattr(self, '_initialization_complete') or not self._initialization_complete:
+            return
+            
+        try:
+            tabs_data = []
+            
+            # Save information about each open tab
+            if hasattr(self, 'content_tabs') and self.content_tabs:
+                logger.info(f"Saving session with {self.content_tabs.count()} tabs")
+                
+                for i in range(self.content_tabs.count()):
+                    tab_widget = self.content_tabs.widget(i)
+                    tab_info = {"type": "unknown", "id": None}
+                    
+                    # Different handling based on tab type
+                    if isinstance(tab_widget, DocumentView):
+                        tab_info["type"] = "document"
+                        tab_info["id"] = tab_widget.document_id
+                        logger.info(f"  Saving document tab: {tab_widget.document_id}")
+                    elif isinstance(tab_widget, ExtractView):
+                        tab_info["type"] = "extract" 
+                        tab_info["id"] = tab_widget.extract_id
+                        logger.info(f"  Saving extract tab: {tab_widget.extract_id}")
+                    elif isinstance(tab_widget, LearningItemEditor):
+                        tab_info["type"] = "learning_item"
+                        tab_info["id"] = tab_widget.item_id
+                        logger.info(f"  Saving learning item tab: {tab_widget.item_id}")
+                    elif isinstance(tab_widget, WebBrowserView):
+                        tab_info["type"] = "web"
+                        tab_info["url"] = tab_widget.current_url
+                        tab_info["title"] = self.content_tabs.tabText(i).replace("Web: ", "")
+                        logger.info(f"  Saving web tab: {tab_widget.current_url}")
+                    else:
+                        # Skip unknown tab types
+                        logger.info(f"  Skipping unknown tab type: {type(tab_widget).__name__}")
+                        continue
+                    
+                    tabs_data.append(tab_info)
+                
+                # Save the session data
+                self.settings_manager.set_setting("session", "open_tabs", json.dumps(tabs_data))
+                
+                # Save the active tab index
+                self.settings_manager.set_setting("session", "active_tab", self.content_tabs.currentIndex())
+                
+                # Force save settings to disk immediately
+                self.settings_manager.save_settings()
+                
+                logger.info(f"Saved session with {len(tabs_data)} tabs")
+            else:
+                logger.warning("No tab widget found, session not saved")
+                
+        except Exception as e:
+            logger.exception(f"Error saving session: {e}")
+    
+    def closeEvent(self, event):
+        """Handle the window close event to save session state."""
+        logger.info("Application closing, saving session state...")
+        
+        try:
+            # Save the current layout
+            layout_data = self.saveState().toBase64().data().decode()
+            self.settings_manager.set_setting("ui", "dock_layout", layout_data)
+            
+            # Save the current session
+            self._save_session()
+            
+            # Save any open document states
+            if hasattr(self, 'content_tabs') and self.content_tabs:
+                for i in range(self.content_tabs.count()):
+                    tab_widget = self.content_tabs.widget(i)
+                    
+                    # Save document position if it's a document view
+                    if isinstance(tab_widget, DocumentView) and hasattr(tab_widget, '_save_position'):
+                        tab_widget._save_position()
+                    elif isinstance(tab_widget, PDFViewWidget) and hasattr(tab_widget, '_save_position'):
+                        tab_widget._save_position()
+            
+            # Look for any open dock widgets that might be PDFViewWidget
+            for dock in self.findChildren(DockablePDFView):
+                if hasattr(dock, 'pdf_widget') and hasattr(dock.pdf_widget, '_save_position'):
+                    dock.pdf_widget._save_position()
+            
+            # Force settings to be saved immediately
+            self.settings_manager.save_settings()
+            
+            logger.info("Application state saved")
+            
+            # Stop any timers
+            if hasattr(self, 'auto_save_timer') and self.auto_save_timer.isActive():
+                self.auto_save_timer.stop()
+                
+        except Exception as e:
+            logger.exception(f"Error during application shutdown: {e}")
+        
+        # Accept the event to close the window
+        event.accept()
     
     def _restore_saved_layout(self):
         """Restore the saved dock layout if available."""
@@ -314,7 +516,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_save(self):
         """Save the current item."""
-        current_widget = self.tab_widget.currentWidget()
+        current_widget = self.content_tabs.currentWidget()
         
         # Check what type of widget we have and call appropriate save method
         if hasattr(current_widget, 'save_item') and callable(current_widget.save_item):
@@ -331,7 +533,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_add_bookmark(self):
         """Add a bookmark at the current location."""
-        current_widget = self.tab_widget.currentWidget()
+        current_widget = self.content_tabs.currentWidget()
         
         # Check if current widget is a PDF viewer
         if isinstance(current_widget, PDFViewWidget):
@@ -343,7 +545,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_highlight_selection(self):
         """Highlight the current selection."""
-        current_widget = self.tab_widget.currentWidget()
+        current_widget = self.content_tabs.currentWidget()
         
         # Check if current widget is a PDF viewer
         if isinstance(current_widget, PDFViewWidget):
@@ -357,7 +559,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_generate_items(self):
         """Generate learning items from the current extract."""
-        current_widget = self.tab_widget.currentWidget()
+        current_widget = self.content_tabs.currentWidget()
         
         # Check if current widget is an extract view
         if isinstance(current_widget, ExtractView):
@@ -518,6 +720,7 @@ class MainWindow(QMainWindow):
     def _create_tool_bar(self):
         """Create the toolbar with main actions."""
         self.tool_bar = QToolBar()
+        self.tool_bar.setObjectName("MainToolBar")
         self.tool_bar.setIconSize(QSize(24, 24))
         self.tool_bar.setMovable(False)
         
@@ -564,14 +767,14 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         
         # Create tab widget for document display
-        self.tab_widget = QTabWidget()
-        self.tab_widget.setTabsClosable(True)
-        self.tab_widget.setMovable(True)
-        self.tab_widget.setDocumentMode(True)
-        self.tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
-        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        self.content_tabs = QTabWidget()
+        self.content_tabs.setTabsClosable(True)
+        self.content_tabs.setMovable(True)
+        self.content_tabs.setDocumentMode(True)
+        self.content_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.content_tabs.currentChanged.connect(self._on_tab_changed)
         
-        main_layout.addWidget(self.tab_widget)
+        main_layout.addWidget(self.content_tabs)
         
         self.setCentralWidget(central_widget)
     
@@ -579,6 +782,7 @@ class MainWindow(QMainWindow):
         """Create dock widgets."""
         # Categories dock
         self.category_dock = QDockWidget("Categories", self)
+        self.category_dock.setObjectName("CategoriesDock")
         self.category_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
         self.category_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable |
@@ -627,6 +831,7 @@ class MainWindow(QMainWindow):
         
         # Search dock
         self.search_dock = QDockWidget("Search", self)
+        self.search_dock.setObjectName("SearchDock")
         self.search_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
         self.search_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable |
@@ -641,6 +846,7 @@ class MainWindow(QMainWindow):
         
         # Statistics dock
         self.stats_dock = QDockWidget("Statistics", self)
+        self.stats_dock.setObjectName("StatisticsDock")
         self.stats_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
         self.stats_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable |
@@ -654,6 +860,7 @@ class MainWindow(QMainWindow):
         
         # Queue dock
         self.queue_dock = QDockWidget("Reading Queue", self)
+        self.queue_dock.setObjectName("QueueDock")
         self.queue_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
         self.queue_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable |
@@ -820,15 +1027,177 @@ class MainWindow(QMainWindow):
         self.review_status.setText(f"Due: {due_count}")
     
     def _setup_auto_save(self):
-        """Set up auto-save timer."""
-        # Get auto-save interval from settings
-        interval_minutes = self.settings_manager.get_setting("general", "auto_save_interval", 5)
-        interval_ms = interval_minutes * 60 * 1000
+        """Set up auto-save timer for documents."""
+        self.auto_save_timer = QTimer()
+        self.auto_save_timer.timeout.connect(self._auto_save)
         
-        # Create timer
-        self.auto_save_timer = QTimer(self)
-        self.auto_save_timer.timeout.connect(self._on_auto_save)
-        self.auto_save_timer.start(interval_ms)
+        # Get auto-save interval from settings (default to 2 minutes)
+        interval = self.settings_manager.get_setting("general", "auto_save_interval", 120000)
+        
+        # If the interval is in minutes, convert to milliseconds
+        if interval < 1000:  # Probably in minutes
+            interval = interval * 60 * 1000
+        
+        logger.info(f"Setting up auto-save with interval: {interval}ms")
+        
+        # Start the timer if auto-save is enabled
+        auto_save_enabled = self.settings_manager.get_setting("general", "auto_save_enabled", True)
+        if auto_save_enabled:
+            # Use a longer interval to reduce unnecessary saves
+            self.auto_save_timer.start(interval)
+        
+    def _auto_save(self):
+        """Automatically save all open documents."""
+        # Skip if initialization is not complete
+        if not hasattr(self, '_initialization_complete') or not self._initialization_complete:
+            logger.debug("Skipping auto-save, initialization not complete")
+            return
+            
+        # Skip if no tabs are open
+        if not hasattr(self, 'content_tabs') or not self.content_tabs or self.content_tabs.count() == 0:
+            logger.debug("Skipping auto-save, no tabs open")
+            return
+            
+        try:
+            logger.debug("Running auto-save...")
+            
+            # Save the session state (only once every few auto-saves to reduce overhead)
+            if hasattr(self, '_auto_save_counter'):
+                self._auto_save_counter += 1
+                if self._auto_save_counter >= 5:  # Save session every 5th auto-save
+                    self._save_session()
+                    self._auto_save_counter = 0
+            else:
+                self._auto_save_counter = 0
+                self._save_session()
+            
+            # Save each open document
+            if hasattr(self, 'content_tabs') and self.content_tabs:
+                for i in range(self.content_tabs.count()):
+                    tab_widget = self.content_tabs.widget(i)
+                    
+                    # Only save DocumentView and LearningItemEditor widgets
+                    if hasattr(tab_widget, 'document') and hasattr(tab_widget, 'document_id'):
+                        # Skip YouTube and other web content that doesn't need saving
+                        if hasattr(tab_widget, 'document') and tab_widget.document:
+                            if hasattr(tab_widget.document, 'content_type') and tab_widget.document.content_type not in ['youtube', 'web']:
+                                # Check if the widget has a save_document method
+                                if hasattr(tab_widget, 'save_document') and callable(tab_widget.save_document):
+                                    try:
+                                        tab_widget.save_document()
+                                        logger.debug(f"Auto-saved document: {tab_widget.document_id}")
+                                    except Exception as e:
+                                        logger.error(f"Error saving document {tab_widget.document_id}: {e}")
+                                else:
+                                    logger.warning(f"Tab widget has no save_document method: {type(tab_widget).__name__}")
+                    elif hasattr(tab_widget, 'item_id') and hasattr(tab_widget, 'save_item'):
+                        # Learning item editor
+                        try:
+                            tab_widget.save_item()
+                            logger.debug(f"Auto-saved learning item: {tab_widget.item_id}")
+                        except Exception as e:
+                            logger.error(f"Error saving learning item {tab_widget.item_id}: {e}")
+                    
+            logger.debug("Auto-save complete")
+            
+            # Update status
+            if hasattr(self, 'status_label'):
+                self.status_label.setText(f"Auto-saved at {datetime.now().strftime('%H:%M:%S')}")
+        except Exception as e:
+            logger.exception(f"Error during auto-save: {e}")
+    
+    @pyqtSlot(int)
+    def _on_arxiv_paper_imported(self, document_id):
+        """Handle imported paper from ArXiv."""
+        # Open the document
+        self._open_document(document_id)
+        self._load_recent_documents()
+        self._update_status()
+        
+        # Ask user if they want to summarize the paper
+        response = QMessageBox.question(
+            self, 
+            "Summarize Paper",
+            "Would you like to automatically generate a summary of this paper?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if response == QMessageBox.StandardButton.Yes:
+            self._show_document_summary(document_id)
+    
+    def _show_document_summary(self, document_id):
+        """Show document summary dialog."""
+        try:
+            summarize_dialog = SummarizeDialog(self.db_session, document_id, self)
+            summarize_dialog.extractCreated.connect(self._on_summary_extract_created)
+            summarize_dialog.exec()
+        except Exception as e:
+            logger.exception(f"Error showing summary dialog: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error generating summary: {str(e)}"
+            )
+    
+    @pyqtSlot(int)
+    def _on_summary_extract_created(self, extract_id):
+        """Handle extract creation from summary dialog."""
+        # Get the extract object from database
+        extract = self.db_session.query(Extract).get(extract_id)
+        if extract:
+            # Call the existing handler with the extract object
+            self._on_extract_created(extract)
+    
+    @pyqtSlot()
+    def _on_summarize_document(self):
+        """Handler for summarizing the current document."""
+        # Check if we have an active document tab
+        current_tab_idx = self.content_tabs.currentIndex()
+        if current_tab_idx < 0:
+            QMessageBox.information(
+                self, "No Document", 
+                "Please open a document first."
+            )
+            return
+            
+        # Get the widget and check if it's a document
+        widget = self.content_tabs.widget(current_tab_idx)
+        if hasattr(widget, 'document') and widget.document:
+            self._show_document_summary(widget.document.id)
+        else:
+            QMessageBox.information(
+                self, "Not a Document", 
+                "Please select a document tab."
+            )
+    
+    @pyqtSlot(int)
+    def _on_tab_changed(self, index):
+        """Handler for tab change."""
+        if index == -1:
+            return  # No tabs
+        
+        # Get the widget at the current tab
+        widget = self.content_tabs.widget(index)
+        
+        # Update UI based on current tab
+        if hasattr(widget, 'document') and hasattr(widget, 'document_id'):
+            # It's a document view - enable document actions
+            self.action_new_extract.setEnabled(True)
+            self.action_add_bookmark.setEnabled(True)
+            self.action_highlight.setEnabled(True)
+            
+            # Update the queue view with the current document
+            if hasattr(self, 'queue_view'):
+                self.queue_view.set_current_document(widget.document_id)
+        elif hasattr(widget, 'extract') and hasattr(widget, 'extract_id'):
+            # It's an extract view - enable specific actions
+            self.action_new_extract.setEnabled(False)
+            self.action_add_bookmark.setEnabled(False)
+            self.action_highlight.setEnabled(False)
+        else:
+            # Other kind of tab
+            self.action_new_extract.setEnabled(False)
+            self.action_add_bookmark.setEnabled(False)
+            self.action_highlight.setEnabled(False)
     
     def _apply_settings(self):
         """Apply settings to UI."""
@@ -847,7 +1216,7 @@ class MainWindow(QMainWindow):
         show_stats = self.settings_manager.get_setting("general", "startup_show_statistics", False)
         if show_stats:
             self._on_show_statistics()
-    
+        
     @pyqtSlot()
     def _on_import_file(self):
         """Handler for importing a file."""
@@ -1097,7 +1466,7 @@ class MainWindow(QMainWindow):
         current_extract_id = None
         current_item_id = None
         
-        current_widget = self.tab_widget.currentWidget()
+        current_widget = self.content_tabs.currentWidget()
         if isinstance(current_widget, ExtractView):
             current_extract_id = current_widget.extract.id if hasattr(current_widget, 'extract') else None
         elif hasattr(current_widget, 'learning_item') and current_widget.learning_item:
@@ -1280,8 +1649,8 @@ class MainWindow(QMainWindow):
         document_view.extractCreated.connect(self._on_extract_created)
         
         # Add to tab widget
-        tab_index = self.tab_widget.addTab(document_view, document.title)
-        self.tab_widget.setCurrentIndex(tab_index)
+        tab_index = self.content_tabs.addTab(document_view, document.title)
+        self.content_tabs.setCurrentIndex(tab_index)
     
     @pyqtSlot()
     def _on_read_next(self):
@@ -1324,8 +1693,8 @@ class MainWindow(QMainWindow):
         if extract.document:
             tab_title += f" ({extract.document.title})"
             
-        tab_index = self.tab_widget.addTab(extract_view, tab_title)
-        self.tab_widget.setCurrentIndex(tab_index)
+        tab_index = self.content_tabs.addTab(extract_view, tab_title)
+        self.content_tabs.setCurrentIndex(tab_index)
     
     def _open_learning_item(self, item_id):
         """Open a learning item in a new tab."""
@@ -1340,8 +1709,8 @@ class MainWindow(QMainWindow):
         item_editor.itemDeleted.connect(self._on_learning_item_deleted)
         
         # Add to tab widget
-        tab_index = self.tab_widget.addTab(item_editor, f"Item {item_id}")
-        self.tab_widget.setCurrentIndex(tab_index)
+        tab_index = self.content_tabs.addTab(item_editor, f"Item {item_id}")
+        self.content_tabs.setCurrentIndex(tab_index)
     
     @pyqtSlot()
     def _on_new_extract(self):
@@ -1415,8 +1784,8 @@ class MainWindow(QMainWindow):
             item_editor.itemSaved.connect(self._on_learning_item_saved)
             
             # Add to tab widget
-            tab_index = self.tab_widget.addTab(item_editor, "New Learning Item")
-            self.tab_widget.setCurrentIndex(tab_index)
+            tab_index = self.content_tabs.addTab(item_editor, "New Learning Item")
+            self.content_tabs.setCurrentIndex(tab_index)
     
     @pyqtSlot()
     def _on_manage_tags(self):
@@ -1732,7 +2101,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(int)
     def _on_tab_close_requested(self, index):
         """Handle tab close request."""
-        widget = self.tab_widget.widget(index)
+        widget = self.content_tabs.widget(index)
         
         # Check if widget is a document view
         if isinstance(widget, DocumentView):
@@ -1747,7 +2116,7 @@ class MainWindow(QMainWindow):
             self._prompt_document_rating(document_id)
         
         # Remove tab
-        self.tab_widget.removeTab(index)
+        self.content_tabs.removeTab(index)
         widget.deleteLater()
 
     def _prompt_document_rating(self, document_id):
@@ -1841,8 +2210,8 @@ class MainWindow(QMainWindow):
         review_view = ReviewView(items, self.spaced_repetition, self.db_session)
         
         # Add to tab widget
-        tab_index = self.tab_widget.addTab(review_view, "Review Session")
-        self.tab_widget.setCurrentIndex(tab_index)
+        tab_index = self.content_tabs.addTab(review_view, "Review Session")
+        self.content_tabs.setCurrentIndex(tab_index)
     
     @pyqtSlot()
     def _on_browse_extracts(self):
@@ -1898,8 +2267,8 @@ class MainWindow(QMainWindow):
         network_view = NetworkView(self.db_session)
         
         # Add to tab widget
-        tab_index = self.tab_widget.addTab(network_view, "Knowledge Network")
-        self.tab_widget.setCurrentIndex(tab_index)
+        tab_index = self.content_tabs.addTab(network_view, "Knowledge Network")
+        self.content_tabs.setCurrentIndex(tab_index)
     
     @pyqtSlot()
     def _on_backup_restore(self):
@@ -1908,8 +2277,8 @@ class MainWindow(QMainWindow):
         backup_view = BackupView(self.db_session)
         
         # Add to tab widget
-        tab_index = self.tab_widget.addTab(backup_view, "Backup & Restore")
-        self.tab_widget.setCurrentIndex(tab_index)
+        tab_index = self.content_tabs.addTab(backup_view, "Backup & Restore")
+        self.content_tabs.setCurrentIndex(tab_index)
     
     @pyqtSlot()
     def _on_show_settings(self):
@@ -1939,8 +2308,8 @@ class MainWindow(QMainWindow):
         stats_view = StatisticsWidget(self.db_session)
         
         # Add to tab widget
-        tab_index = self.tab_widget.addTab(stats_view, "Statistics")
-        self.tab_widget.setCurrentIndex(tab_index)
+        tab_index = self.content_tabs.addTab(stats_view, "Statistics")
+        self.content_tabs.setCurrentIndex(tab_index)
     
     @pyqtSlot()
     def _on_recent_document_selected(self):
@@ -1979,8 +2348,8 @@ class MainWindow(QMainWindow):
         self._update_status()
         
         # Close tab
-        current_index = self.tab_widget.currentIndex()
-        self.tab_widget.removeTab(current_index)
+        current_index = self.content_tabs.currentIndex()
+        self.content_tabs.removeTab(current_index)
     
     @pyqtSlot()
     def _on_about(self):
@@ -2013,118 +2382,6 @@ class MainWindow(QMainWindow):
         
         QMessageBox.about(self, "About Incrementum", about_text)
     
-    @pyqtSlot()
-    def _on_auto_save(self):
-        """Auto-save handler triggered by timer."""
-        # Save any unsaved changes
-        # This is a placeholder - in a real app, we'd check for unsaved changes
-        # and save them
-        
-        # Update status
-        self.status_label.setText(f"Auto-saved at {datetime.now().strftime('%H:%M:%S')}")
-    
-    def closeEvent(self, event):
-        """Handle window close event."""
-        # Check for unsaved changes
-        # This is a placeholder - in a real app, we'd check for unsaved changes
-        # and prompt the user to save them
-        
-        # Accept the event to close the window
-        event.accept()
-
-    @pyqtSlot(int)
-    def _on_arxiv_paper_imported(self, document_id):
-        """Handle imported paper from ArXiv."""
-        # Open the document
-        self._open_document(document_id)
-        self._load_recent_documents()
-        self._update_status()
-        
-        # Ask user if they want to summarize the paper
-        response = QMessageBox.question(
-            self, 
-            "Summarize Paper",
-            "Would you like to automatically generate a summary of this paper?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if response == QMessageBox.StandardButton.Yes:
-            self._show_document_summary(document_id)
-    
-    def _show_document_summary(self, document_id):
-        """Show document summary dialog."""
-        try:
-            summarize_dialog = SummarizeDialog(self.db_session, document_id, self)
-            summarize_dialog.extractCreated.connect(self._on_summary_extract_created)
-            summarize_dialog.exec()
-        except Exception as e:
-            logger.exception(f"Error showing summary dialog: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"Error generating summary: {str(e)}"
-            )
-    
-    @pyqtSlot(int)
-    def _on_summary_extract_created(self, extract_id):
-        """Handle extract creation from summary dialog."""
-        # Get the extract object from database
-        extract = self.db_session.query(Extract).get(extract_id)
-        if extract:
-            # Call the existing handler with the extract object
-            self._on_extract_created(extract)
-    
-    @pyqtSlot()
-    def _on_summarize_document(self):
-        """Handler for summarizing the current document."""
-        # Check if we have an active document tab
-        current_tab_idx = self.tab_widget.currentIndex()
-        if current_tab_idx < 0:
-            QMessageBox.information(
-                self, "No Document", 
-                "Please open a document first."
-            )
-            return
-            
-        # Get the widget and check if it's a document
-        widget = self.tab_widget.widget(current_tab_idx)
-        if hasattr(widget, 'document') and widget.document:
-            self._show_document_summary(widget.document.id)
-        else:
-            QMessageBox.information(
-                self, "Not a Document", 
-                "Please select a document tab."
-            )
-
-    @pyqtSlot(int)
-    def _on_tab_changed(self, index):
-        """Handler for tab change."""
-        if index == -1:
-            return  # No tabs
-        
-        # Get the widget at the current tab
-        widget = self.tab_widget.widget(index)
-        
-        # Update UI based on current tab
-        if hasattr(widget, 'document') and hasattr(widget, 'document_id'):
-            # It's a document view - enable document actions
-            self.action_new_extract.setEnabled(True)
-            self.action_add_bookmark.setEnabled(True)
-            self.action_highlight.setEnabled(True)
-            
-            # Update the queue view with the current document
-            if hasattr(self, 'queue_view'):
-                self.queue_view.set_current_document(widget.document_id)
-        elif hasattr(widget, 'extract') and hasattr(widget, 'extract_id'):
-            # It's an extract view - enable specific actions
-            self.action_new_extract.setEnabled(False)
-            self.action_add_bookmark.setEnabled(False)
-            self.action_highlight.setEnabled(False)
-        else:
-            # Other kind of tab
-            self.action_new_extract.setEnabled(False)
-            self.action_add_bookmark.setEnabled(False)
-            self.action_highlight.setEnabled(False)
-
     @pyqtSlot()
     def _on_view_queue(self):
         """Handler for viewing the reading queue."""
@@ -2202,8 +2459,8 @@ class MainWindow(QMainWindow):
             browser_view.extractCreated.connect(self._on_extract_created)
             
             # Add to tab widget
-            tab_index = self.tab_widget.addTab(browser_view, "Web Browser")
-            self.tab_widget.setCurrentIndex(tab_index)
+            tab_index = self.content_tabs.addTab(browser_view, "Web Browser")
+            self.content_tabs.setCurrentIndex(tab_index)
             
             # Update status
             self.status_label.setText("Web browser opened")

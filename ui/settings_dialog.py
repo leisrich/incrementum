@@ -1016,3 +1016,40 @@ class SettingsDialog(QDialog):
             
             # Reload settings
             self._load_settings()
+    
+    def _on_browse_theme(self):
+        """Handle theme file browsing."""
+        from PyQt6.QtWidgets import QFileDialog
+        
+        # Get the current theme directory
+        current_dir = os.path.dirname(self.theme_file_path.text()) if self.theme_file_path.text() else ""
+        
+        # Open file dialog
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Theme File",
+            current_dir,
+            "QSS Files (*.qss);;All Files (*.*)"
+        )
+        
+        if file_path:
+            self.theme_file_path.setText(file_path)
+            # Optionally preview the theme
+            self._preview_theme(file_path)
+    
+    def _preview_theme(self, theme_path):
+        """Preview the selected theme."""
+        try:
+            if os.path.exists(theme_path):
+                with open(theme_path, 'r', encoding='utf-8') as f:
+                    style = f.read()
+                self.parent().setStyleSheet(style)
+            else:
+                logger.warning(f"Theme file not found: {theme_path}")
+        except Exception as e:
+            logger.exception(f"Error previewing theme: {e}")
+            QMessageBox.warning(
+                self,
+                "Theme Preview Error",
+                f"Failed to preview theme: {str(e)}"
+            )

@@ -42,6 +42,7 @@ class PDFGraphicsView(QWidget):
         self.text_page = None  # TextPage for the current page
         self.current_page_num = 0
         self.total_pages = 0
+        self.visible_pos = (0, 0)  # Track visible position (top-left corner)
         
         # Set focus policy to receive keyboard events
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -54,6 +55,57 @@ class PDFGraphicsView(QWidget):
         self.is_selecting = False
         self.selection_start = None
         self.selection_end = None
+        
+        # For panning support
+        self.is_panning = False
+        self.pan_start = None
+        
+        # Setup scroll area
+        self.setLayout(QVBoxLayout())
+        self.layout().setContentsMargins(0, 0, 0, 0)
+        
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.layout().addWidget(self.scroll_area)
+        
+        self.content_widget = QWidget()
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area.setWidget(self.content_widget)
+    
+    def get_visible_position(self):
+        """Get the current visible position in the document."""
+        if hasattr(self, 'scroll_area'):
+            # Get scroll position
+            h_scroll = self.scroll_area.horizontalScrollBar().value()
+            v_scroll = self.scroll_area.verticalScrollBar().value()
+            return (h_scroll, v_scroll)
+        return (0, 0)  # Default
+        
+    def set_visible_position(self, position):
+        """Set the visible position in the document."""
+        if not position or not hasattr(self, 'scroll_area'):
+            return
+            
+        try:
+            x, y = position
+            
+            # Get scroll bars
+            h_scroll = self.scroll_area.horizontalScrollBar()
+            v_scroll = self.scroll_area.verticalScrollBar()
+            
+            # Set position with bounds checking
+            if h_scroll.maximum() >= x:
+                h_scroll.setValue(int(x))
+            
+            if v_scroll.maximum() >= y:
+                v_scroll.setValue(int(y))
+                
+            # Store for later reference
+            self.visible_pos = (h_scroll.value(), v_scroll.value())
+            
+        except Exception as e:
+            logger.error(f"Error setting visible position: {e}")
     
     def set_page(self, doc, page_number):
         """Set the current page to display."""
@@ -65,13 +117,58 @@ class PDFGraphicsView(QWidget):
             self.page = doc[page_number]
             self.render_page()
             self.update()
+            
+            # Reset visible position when changing pages
+            self.visible_pos = (0, 0)
+            if hasattr(self, 'scroll_area'):
+                self.scroll_area.horizontalScrollBar().setValue(0)
+                self.scroll_area.verticalScrollBar().setValue(0)
     
     def set_zoom(self, zoom_factor):
         """Set the zoom factor."""
+        # Store current visible center for re-centering after zoom
+        if hasattr(self, 'scroll_area'):
+            h_scroll = self.scroll_area.horizontalScrollBar()
+            v_scroll = self.scroll_area.verticalScrollBar()
+            
+            # Calculate center point of current view
+            viewport_width = self.scroll_area.viewport().width()
+            viewport_height = self.scroll_area.viewport().height()
+            
+            center_x = h_scroll.value() + viewport_width / 2
+            center_y = v_scroll.value() + viewport_height / 2
+            
+            # Calculate relative position (0-1)
+            if self.pixmap:
+                rel_x = center_x / self.pixmap.width()
+                rel_y = center_y / self.pixmap.height()
+            else:
+                rel_x, rel_y = 0.5, 0.5
+        
+        # Apply zoom
+        old_zoom = self.zoom_factor
         self.zoom_factor = zoom_factor
+        
         if self.page:
             self.render_page()
             self.update()
+            
+            # Re-center view after zoom
+            if hasattr(self, 'scroll_area') and self.pixmap:
+                # Calculate new center point
+                new_center_x = rel_x * self.pixmap.width()
+                new_center_y = rel_y * self.pixmap.height()
+                
+                # Calculate new scroll position
+                new_h_scroll = new_center_x - viewport_width / 2
+                new_v_scroll = new_center_y - viewport_height / 2
+                
+                # Set scroll position with bounds checking
+                h_scroll.setValue(max(0, int(new_h_scroll)))
+                v_scroll.setValue(max(0, int(new_v_scroll)))
+                
+                # Update visible position
+                self.visible_pos = (h_scroll.value(), v_scroll.value())
     
     def render_page(self):
         """Render the current page with current zoom level."""
@@ -87,15 +184,47 @@ class PDFGraphicsView(QWidget):
         img = QImage(img_data, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
         self.pixmap = QPixmap.fromImage(img)
         
-        # Update widget size
-        self.setMinimumSize(self.pixmap.size())
-        self.resize(self.pixmap.size())
+        # If we're using a scroll area approach
+        if hasattr(self, 'content_widget') and hasattr(self, 'content_layout'):
+            # Clear current content
+            for i in reversed(range(self.content_layout.count())):
+                item = self.content_layout.itemAt(i)
+                if item.widget():
+                    item.widget().deleteLater()
+            
+            # Create label to display the pixmap
+            pixmap_label = QLabel()
+            pixmap_label.setPixmap(self.pixmap)
+            pixmap_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # Add to layout
+            self.content_layout.addWidget(pixmap_label)
+            
+            # Set fixed size on content widget to ensure scrollbars appear
+            self.content_widget.setFixedSize(self.pixmap.width(), self.pixmap.height())
+        else:
+            # Original approach - direct display
+            # Update widget size
+            self.setMinimumSize(self.pixmap.size())
+            self.resize(self.pixmap.size())
         
         # Generate text page for text extraction
         self.text_page = self.page.get_textpage()
+        
+        # Save the visible position to restore it later if needed
+        if hasattr(self, 'scroll_area'):
+            h_scroll = self.scroll_area.horizontalScrollBar()
+            v_scroll = self.scroll_area.verticalScrollBar()
+            self.visible_pos = (h_scroll.value(), v_scroll.value())
     
     def paintEvent(self, event):
         """Paint the widget."""
+        # If we're using a scroll area approach, don't override paint event
+        if hasattr(self, 'content_widget') and hasattr(self, 'content_layout'):
+            super().paintEvent(event)
+            return
+            
+        # Original direct painting approach for backward compatibility
         if not self.pixmap:
             return
         
@@ -276,23 +405,167 @@ class PDFViewWidget(QWidget):
         
         self.document = document
         self.db_session = db_session
-        self.doc = None
-        self.current_page = 0
-        self.total_pages = 0
+        self.content_text = ""
+        
+        # Create extractor
         self.extractor = ContentExtractor(db_session)
         
-        # Create UI components
+        # Track current page
+        self.current_page = 0
+        self.doc = None
+        self.total_pages = 0
+        
+        # Create UI
         self._create_ui()
         
-        # Load the PDF
+        # Load the PDF document
         self._load_pdf()
         
-        # Load existing extracts and bookmarks
-        self._load_extracts()
-        self._load_bookmarks()
+        # Track view state for position restoration
+        self.saved_state = {
+            "page": 0,
+            "zoom_factor": 1.0,
+            "position": (0, 0)  # x, y coordinates
+        }
         
-        # Restore last position if available
+        # Restore position from document if available
         self._restore_position()
+    
+    def get_view_state(self):
+        """Get the current view state for saving."""
+        state = {
+            "page": self.current_page,
+            "zoom_factor": self.pdf_view.zoom_factor if hasattr(self.pdf_view, 'zoom_factor') else 1.0,
+        }
+        
+        # Get any additional position info
+        if hasattr(self.pdf_view, 'get_visible_position'):
+            state["position"] = self.pdf_view.get_visible_position()
+            
+        return state
+    
+    def set_view_state(self, state):
+        """Restore view state from saved state."""
+        try:
+            # Restore page
+            if "page" in state and state["page"] != self.current_page:
+                if self.doc and 0 <= state["page"] < len(self.doc):
+                    self.current_page = state["page"]
+                    self.page_spin.setValue(self.current_page + 1)
+                    self.pdf_view.set_page(self.doc, self.current_page)
+            
+            # Restore zoom
+            if "zoom_factor" in state and hasattr(self.pdf_view, 'set_zoom'):
+                self.pdf_view.set_zoom(state["zoom_factor"])
+                
+            # Restore position within page if available
+            if "position" in state and hasattr(self.pdf_view, 'set_visible_position'):
+                self.pdf_view.set_visible_position(state["position"])
+                
+        except Exception as e:
+            logger.exception(f"Error restoring PDF view state: {e}")
+            
+    def _save_position(self):
+        """Save the current reading position."""
+        try:
+            # Check if we have a document to save position for
+            if not self.document:
+                return
+                
+            # Get current page
+            page_position = f"page:{self.current_page}"
+            
+            # Get zoom factor if available
+            if hasattr(self.pdf_view, 'zoom_factor'):
+                page_position += f";zoom:{self.pdf_view.zoom_factor}"
+                
+            # Get scroll position if available
+            scroll_pos = None
+            if hasattr(self.pdf_view, 'get_visible_position'):
+                pos = self.pdf_view.get_visible_position()
+                if pos:
+                    page_position += f";pos:{pos[0]},{pos[1]}"
+            
+            # Update the document
+            self.document.position = page_position
+            self.db_session.commit()
+            
+            logger.debug(f"Saved PDF position: {page_position}")
+            
+        except Exception as e:
+            logger.exception(f"Error saving PDF position: {e}")
+    
+    def _restore_position(self):
+        """Restore the last reading position."""
+        try:
+            if not self.document:
+                return
+                
+            # Get stored position string
+            position_str = getattr(self.document, 'position', None)
+            if not position_str:
+                logger.info(f"No stored position found for {self.document.title}")
+                return
+                
+            logger.info(f"Restoring position from: {position_str}")
+            
+            # Parse position string (format: page:1;zoom:1.2;pos:100,200)
+            parts = position_str.split(';')
+            
+            # Process each part
+            for part in parts:
+                if not part:
+                    continue
+                    
+                if ':' not in part:
+                    continue
+                    
+                key, value = part.split(':', 1)
+                
+                if key == 'page':
+                    try:
+                        page = int(value)
+                        if self.doc and 0 <= page < len(self.doc):
+                            self.current_page = page
+                            self.page_spin.setValue(page + 1)
+                            self.pdf_view.set_page(self.doc, page)
+                    except ValueError:
+                        pass
+                        
+                elif key == 'zoom' and hasattr(self.pdf_view, 'set_zoom'):
+                    try:
+                        zoom = float(value)
+                        self.pdf_view.set_zoom(zoom)
+                        # Update the combo box too
+                        self._update_zoom_combo(zoom)
+                    except ValueError:
+                        pass
+                        
+                elif key == 'pos' and hasattr(self.pdf_view, 'set_visible_position'):
+                    try:
+                        x, y = map(float, value.split(','))
+                        self.pdf_view.set_visible_position((x, y))
+                    except (ValueError, TypeError):
+                        pass
+                
+            logger.info(f"Restored PDF position: page {self.current_page} for {self.document.title}")
+                
+        except Exception as e:
+            logger.exception(f"Error restoring PDF position: {e}")
+            
+    def _update_zoom_combo(self, zoom_factor):
+        """Update the zoom combo box to match the current zoom factor."""
+        if hasattr(self, 'zoom_combo'):
+            # Find the closest match in the combo box
+            zoom_percent = int(zoom_factor * 100)
+            index = self.zoom_combo.findText(f"{zoom_percent}%")
+            if index >= 0:
+                self.zoom_combo.setCurrentIndex(index)
+            else:
+                # Add a custom zoom level if it doesn't exist
+                self.zoom_combo.addItem(f"{zoom_percent}%")
+                index = self.zoom_combo.findText(f"{zoom_percent}%")
+                self.zoom_combo.setCurrentIndex(index)
     
     def _create_ui(self):
         """Create the UI layout."""
@@ -650,43 +923,6 @@ class PDFViewWidget(QWidget):
             self.page_spin.setValue(self.current_page + 1)
             self.pdf_view.set_page(self.doc, self.current_page)
 
-    def _save_position(self):
-        """Save the current page position to the document."""
-        try:
-            if not hasattr(self, 'document') or not self.document:
-                return
-            
-            # Save current page number as position
-            self.document.position = self.current_page
-            self.db_session.commit()
-            logger.info(f"Saved PDF position: page {self.current_page} for {self.document.title}")
-        except Exception as e:
-            logger.exception(f"Error saving PDF position: {e}")
-    
-    def _restore_position(self):
-        """Restore the last reading position (page number)."""
-        try:
-            if not hasattr(self, 'document') or not self.document:
-                return
-            
-            # Get stored position (page number)
-            position = getattr(self.document, 'position', None)
-            if position is None or position < 0:
-                return
-            
-            # Make sure position is a valid page number
-            page_number = min(int(position), self.total_pages - 1)
-            page_number = max(0, page_number)  # Ensure it's not negative
-            
-            # Set current page and update display
-            self.current_page = page_number
-            self.page_spin.setValue(page_number + 1)  # +1 for display (1-based)
-            self.pdf_view.set_page(self.doc, page_number)
-            
-            logger.info(f"Restored PDF position: page {page_number} for {self.document.title}")
-        except Exception as e:
-            logger.exception(f"Error restoring PDF position: {e}")
-            
     def closeEvent(self, event):
         """Handle widget close event to save position."""
         self._save_position()
