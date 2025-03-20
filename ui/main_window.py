@@ -9,14 +9,16 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy import func
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QSplitter, QTabWidget, QToolBar, QStatusBar,
-    QFileDialog, QMessageBox, QMenu, QTreeView, QListView,
-    QLabel, QPushButton, QComboBox, QLineEdit,
-    QDockWidget, QInputDialog, QSizePolicy, QDialog
+    QMainWindow, QTabWidget, QToolBar, QToolButton,
+    QStatusBar, QMenuBar, QMenu, QLabel, QPushButton,
+    QVBoxLayout, QHBoxLayout, QWidget, QDialog,
+    QMessageBox, QFileDialog, QApplication,
+    QDockWidget, QScrollArea, QSplitter, QTreeView,
+    QListView, QSizePolicy, QStyle, QComboBox,
+    QLineEdit, QCompleter, QDialogButtonBox, QFrame
 )
 from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread, QByteArray
-from PyQt6.QtGui import QIcon, QAction, QKeySequence, QPixmap
+from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QAction
 
 from core.knowledge_base.models import init_database, Document, Category, Extract, LearningItem, Tag
 from core.document_processor.processor import DocumentProcessor
@@ -27,6 +29,7 @@ from core.knowledge_base.tag_manager import TagManager
 from core.knowledge_base.export_manager import ExportManager
 from core.knowledge_network.network_builder import KnowledgeNetworkBuilder
 from core.utils.settings_manager import SettingsManager
+from core.utils.theme_manager import ThemeManager
 from core.spaced_repetition.queue_manager import QueueManager
 
 from .document_view import DocumentView
@@ -116,6 +119,7 @@ class MainWindow(QMainWindow):
         self.export_manager = ExportManager(self.db_session)
         self.network_builder = KnowledgeNetworkBuilder(self.db_session)
         self.settings_manager = SettingsManager()
+        self.theme_manager = ThemeManager(self.settings_manager)
         self.queue_manager = FSRSAlgorithm(self.db_session)
         
         # Set window properties
@@ -1208,8 +1212,14 @@ class MainWindow(QMainWindow):
         self.action_toggle_category_panel.setChecked(show_category_panel)
         
         # Apply theme settings
-        theme = self.settings_manager.get_setting("ui", "theme", "default")
-        # Additional theme application code would go here
+        if not hasattr(self, 'theme_manager'):
+            self.theme_manager = ThemeManager(self.settings_manager)
+        
+        # Apply the theme
+        app = QApplication.instance()
+        if app:
+            self.theme_manager.apply_theme(app)
+            logging.getLogger(__name__).info(f"Applied theme settings, current theme: {self.theme_manager.current_theme}")
     
     def _check_startup_statistics(self):
         """Check if statistics should be shown on startup."""

@@ -9,12 +9,14 @@ from PyQt6.QtWidgets import (
     QPushButton, QTabWidget, QWidget, QFormLayout,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
     QComboBox, QColorDialog, QFileDialog, QGroupBox,
-    QMessageBox, QDialogButtonBox
+    QMessageBox, QDialogButtonBox, QInputDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QSettings
 from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtWidgets import QApplication
 
 from core.utils.settings_manager import SettingsManager
+from core.utils.theme_manager import ThemeManager
 
 logger = logging.getLogger(__name__)
 
@@ -125,31 +127,51 @@ class SettingsDialog(QDialog):
         
         # UI theme group
         theme_group = QGroupBox("UI Theme")
-        theme_layout = QVBoxLayout(theme_group)
+        theme_layout = QFormLayout(theme_group)
         
-        self.dark_mode_checkbox = QCheckBox("Use dark mode")
-        dark_mode = self.settings_manager.get_setting("ui", "dark_mode", False)
-        self.dark_mode_checkbox.setChecked(dark_mode)
-        theme_layout.addWidget(self.dark_mode_checkbox)
+        # Get theme options from theme manager
+        if not hasattr(self, 'theme_manager'):
+            self.theme_manager = ThemeManager(self.settings_manager)
         
-        self.custom_theme_checkbox = QCheckBox("Use custom theme")
-        custom_theme = self.settings_manager.get_setting("ui", "custom_theme", False)
-        self.custom_theme_checkbox.setChecked(custom_theme)
-        theme_layout.addWidget(self.custom_theme_checkbox)
+        # Theme selector
+        self.theme_combo = QComboBox()
         
+        # Add built-in themes and get available custom themes
+        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.addItem("Dark", "dark")
+        self.theme_combo.addItem("System", "system")
+        
+        # Load available custom themes
+        custom_themes = self.theme_manager.get_available_themes()
+        if custom_themes:
+            self.theme_combo.insertSeparator(self.theme_combo.count())
+            for theme_name in custom_themes:
+                if theme_name not in ["light", "dark", "system"]:
+                    self.theme_combo.addItem(f"Custom: {theme_name}", theme_name)
+        
+        # Set current theme
+        current_theme = self.settings_manager.get_setting("ui", "theme", "light")
+        index = self.theme_combo.findData(current_theme)
+        if index >= 0:
+            self.theme_combo.setCurrentIndex(index)
+        
+        theme_layout.addRow("Theme:", self.theme_combo)
+        
+        # Custom theme file
+        custom_theme_layout = QHBoxLayout()
         self.theme_file_path = QLineEdit()
         theme_file = self.settings_manager.get_setting("ui", "theme_file", "")
         self.theme_file_path.setText(theme_file)
-        self.theme_file_path.setEnabled(custom_theme)
-        theme_layout.addWidget(self.theme_file_path)
+        custom_theme_layout.addWidget(self.theme_file_path)
         
         self.theme_browse_button = QPushButton("Browse...")
         self.theme_browse_button.clicked.connect(self._on_browse_theme)
-        self.theme_browse_button.setEnabled(custom_theme)
-        theme_layout.addWidget(self.theme_browse_button)
+        custom_theme_layout.addWidget(self.theme_browse_button)
         
-        self.custom_theme_checkbox.toggled.connect(self.theme_file_path.setEnabled)
-        self.custom_theme_checkbox.toggled.connect(self.theme_browse_button.setEnabled)
+        theme_layout.addRow("Custom theme file:", custom_theme_layout)
+        
+        # Connect theme combo change to update UI
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         
         layout.addWidget(theme_group)
         
@@ -175,29 +197,31 @@ class SettingsDialog(QDialog):
         layout_group = QGroupBox("Layout Settings")
         layout_layout = QFormLayout(layout_group)
         
-        # Theme
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["Light", "Dark", "System"])
-        layout_layout.addRow("Theme:", self.theme_combo)
-        
         # Font family
         self.font_family = QComboBox()
         self.font_family.addItems(["Arial", "Times New Roman", "Courier New", "Verdana", "System"])
+        current_font = self.settings_manager.get_setting("ui", "font_family", "System")
+        index = self.font_family.findText(current_font)
+        if index >= 0:
+            self.font_family.setCurrentIndex(index)
         layout_layout.addRow("Font family:", self.font_family)
         
         # Font size
         self.font_size = QSpinBox()
         self.font_size.setRange(8, 24)
+        self.font_size.setValue(self.settings_manager.get_setting("ui", "font_size", 10))
         layout_layout.addRow("Font size:", self.font_size)
         
         # Show category panel
         self.show_category_panel = QCheckBox()
+        self.show_category_panel.setChecked(self.settings_manager.get_setting("ui", "show_category_panel", True))
         layout_layout.addRow("Show category panel:", self.show_category_panel)
         
         # Default split ratio
         self.default_split_ratio = QDoubleSpinBox()
         self.default_split_ratio.setRange(0.1, 0.5)
         self.default_split_ratio.setSingleStep(0.05)
+        self.default_split_ratio.setValue(self.settings_manager.get_setting("ui", "default_split_ratio", 0.3))
         layout_layout.addRow("Default split ratio:", self.default_split_ratio)
         
         layout.addWidget(layout_group)
@@ -819,7 +843,9 @@ class SettingsDialog(QDialog):
             self.settings_manager.set_setting("general", "startup_show_statistics", self.startup_show_statistics.isChecked())
             
             # UI settings
-            self.settings_manager.set_setting("ui", "theme", self.theme_combo.currentText().lower())
+            selected_theme = self.theme_combo.currentData()
+            self.settings_manager.set_setting("ui", "theme", selected_theme)
+            self.settings_manager.set_setting("ui", "theme_file", self.theme_file_path.text())
             self.settings_manager.set_setting("ui", "font_family", self.font_family.currentText())
             self.settings_manager.set_setting("ui", "font_size", self.font_size.value())
             self.settings_manager.set_setting("ui", "show_category_panel", self.show_category_panel.isChecked())
@@ -1018,38 +1044,142 @@ class SettingsDialog(QDialog):
             self._load_settings()
     
     def _on_browse_theme(self):
-        """Handle theme file browsing."""
-        from PyQt6.QtWidgets import QFileDialog
-        
-        # Get the current theme directory
-        current_dir = os.path.dirname(self.theme_file_path.text()) if self.theme_file_path.text() else ""
-        
-        # Open file dialog
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Theme File",
-            current_dir,
-            "QSS Files (*.qss);;All Files (*.*)"
-        )
-        
-        if file_path:
-            self.theme_file_path.setText(file_path)
-            # Optionally preview the theme
-            self._preview_theme(file_path)
-    
+        """Browse for a custom theme file."""
+        try:
+            # Create theme manager if needed
+            if not hasattr(self, 'theme_manager'):
+                self.theme_manager = ThemeManager(self.settings_manager)
+            
+            # Ask what type of theme file to create/browse
+            theme_type, ok = QInputDialog.getItem(
+                self, "Theme File Type", 
+                "Select theme file type:",
+                ["JSON Color Theme", "QSS Style Sheet", "Create New Theme Template"], 
+                0, False
+            )
+            
+            if not ok:
+                return
+                
+            if "Create New" in theme_type:
+                # Create a new theme template
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self, "Save Theme Template", "", "JSON Files (*.json)"
+                )
+                
+                if file_path:
+                    if not file_path.lower().endswith('.json'):
+                        file_path += '.json'
+                        
+                    # Create template
+                    if self.theme_manager.create_theme_template(file_path):
+                        self.theme_file_path.setText(file_path)
+                        QMessageBox.information(
+                            self, "Theme Template Created", 
+                            f"A new theme template has been created at {file_path}.\n\n"
+                            "You can edit this file with a text editor to customize your theme."
+                        )
+                
+            else:
+                # Set file filter based on selection
+                file_filter = "JSON Files (*.json)" if "JSON" in theme_type else "Style Sheets (*.qss)"
+                
+                # Browse for existing theme file
+                file_path, _ = QFileDialog.getOpenFileName(
+                    self, "Select Theme File", "", file_filter
+                )
+                
+                if file_path:
+                    self.theme_file_path.setText(file_path)
+                    
+                    # Show a preview of the theme
+                    preview_ok = self._preview_theme(file_path)
+                    
+                    if preview_ok:
+                        QMessageBox.information(
+                            self, "Theme Preview", 
+                            "Theme preview applied. Click OK to continue customizing settings.\n\n"
+                            "The theme will be fully applied when you click Apply or OK."
+                        )
+                        
+        except Exception as e:
+            logger.exception(f"Error browsing for theme: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred while browsing for theme: {str(e)}"
+            )
+            
     def _preview_theme(self, theme_path):
         """Preview the selected theme."""
         try:
-            if os.path.exists(theme_path):
-                with open(theme_path, 'r', encoding='utf-8') as f:
-                    style = f.read()
-                self.parent().setStyleSheet(style)
-            else:
-                logger.warning(f"Theme file not found: {theme_path}")
+            # Get application instance
+            app = QApplication.instance()
+            if not app:
+                return False
+                
+            # Get current palette for backup
+            self._original_palette = app.palette()
+            self._original_stylesheet = app.styleSheet()
+            
+            # Apply theme temporarily
+            self.theme_manager.apply_theme(app, custom_theme_path=theme_path)
+            
+            # Schedule restoration of original theme when dialog closes
+            self.finished.connect(self._restore_original_theme)
+            
+            return True
+            
         except Exception as e:
             logger.exception(f"Error previewing theme: {e}")
-            QMessageBox.warning(
-                self,
-                "Theme Preview Error",
-                f"Failed to preview theme: {str(e)}"
-            )
+            return False
+            
+    def _restore_original_theme(self):
+        """Restore the original theme after preview."""
+        try:
+            # Get application instance
+            app = QApplication.instance()
+            if not app or not hasattr(self, '_original_palette'):
+                return
+                
+            # Restore original palette and stylesheet
+            app.setPalette(self._original_palette)
+            app.setStyleSheet(self._original_stylesheet)
+            
+        except Exception as e:
+            logger.exception(f"Error restoring original theme: {e}")
+
+    def _on_theme_changed(self, index):
+        """Handle theme selection changes."""
+        try:
+            # Get the selected theme data
+            selected_theme = self.theme_combo.itemData(index)
+            
+            # Update file path field visibility based on theme selection
+            is_custom = selected_theme not in ["light", "dark", "system"]
+            
+            # If it's a custom theme, show details of the theme file
+            if is_custom:
+                # Get path to custom theme
+                theme_path = self.theme_manager.get_theme_path(selected_theme)
+                if theme_path and os.path.exists(theme_path):
+                    self.theme_file_path.setText(theme_path)
+                    
+            # Preview the theme if exists
+            theme_path = self.theme_file_path.text() if is_custom else None
+            if is_custom and theme_path:
+                self._preview_theme(theme_path)
+            else:
+                # Apply built-in theme preview
+                app = QApplication.instance()
+                if app:
+                    # Backup original theme
+                    if not hasattr(self, '_original_palette'):
+                        self._original_palette = app.palette()
+                        self._original_stylesheet = app.styleSheet()
+                    
+                    # Apply preview of selected theme
+                    self.theme_manager.apply_theme(app, theme_name=selected_theme)
+                    self.finished.connect(self._restore_original_theme)
+                    
+        except Exception as e:
+            logger.exception(f"Error changing theme: {e}")
