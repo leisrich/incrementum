@@ -53,39 +53,44 @@ class SettingsDialog(QDialog):
         self._create_document_tab()
         self._create_learning_tab()
         self._create_algorithm_tab()
+        self._create_rss_tab()
         self._create_api_tab()
         self._create_backup_tab()
         self._create_advanced_tab()
         
         main_layout.addWidget(self.tab_widget)
         
-        # Add buttons
+        # Buttons
         button_layout = QHBoxLayout()
         
-        # Import/Export buttons
-        import_button = QPushButton("Import Settings")
-        import_button.clicked.connect(self._on_import_settings)
-        button_layout.addWidget(import_button)
+        # Reset button
+        self.reset_button = QPushButton("Reset to Defaults")
+        self.reset_button.clicked.connect(self._on_reset)
+        button_layout.addWidget(self.reset_button)
         
-        export_button = QPushButton("Export Settings")
-        export_button.clicked.connect(self._on_export_settings)
-        button_layout.addWidget(export_button)
+        # Import/Export buttons
+        self.import_button = QPushButton("Import Settings")
+        self.import_button.clicked.connect(self._on_import_settings)
+        button_layout.addWidget(self.import_button)
+        
+        self.export_button = QPushButton("Export Settings")
+        self.export_button.clicked.connect(self._on_export_settings)
+        button_layout.addWidget(self.export_button)
         
         button_layout.addStretch()
         
-        # Dialog buttons
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | 
-            QDialogButtonBox.StandardButton.Cancel | 
-            QDialogButtonBox.StandardButton.Apply |
-            QDialogButtonBox.StandardButton.Reset
-        )
-        button_box.accepted.connect(self._on_accept)
-        button_box.rejected.connect(self.reject)
-        button_box.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._on_apply)
-        button_box.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(self._on_reset)
+        # Standard buttons
+        self.apply_button = QPushButton("Apply")
+        self.apply_button.clicked.connect(self._on_apply)
+        button_layout.addWidget(self.apply_button)
         
-        button_layout.addWidget(button_box)
+        self.ok_button = QPushButton("OK")
+        self.ok_button.clicked.connect(self._on_accept)
+        button_layout.addWidget(self.ok_button)
+        
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_button)
         
         main_layout.addLayout(button_layout)
     
@@ -386,6 +391,64 @@ class SettingsDialog(QDialog):
         # Add tab
         self.tab_widget.addTab(tab, "Algorithm")
     
+    def _create_rss_tab(self):
+        """Create RSS settings tab."""
+        rss_tab = QWidget()
+        layout = QVBoxLayout(rss_tab)
+        
+        # Add RSS settings
+        settings_group = QGroupBox("RSS Feed Settings")
+        settings_layout = QFormLayout(settings_group)
+        
+        # Default check frequency
+        self.default_check_frequency = QSpinBox()
+        self.default_check_frequency.setRange(5, 1440)  # 5 minutes to 24 hours
+        self.default_check_frequency.setValue(60)
+        self.default_check_frequency.setSuffix(" minutes")
+        settings_layout.addRow("Default check frequency:", self.default_check_frequency)
+        
+        # Check interval
+        self.check_interval = QSpinBox()
+        self.check_interval.setRange(1, 60)  # 1 to 60 minutes
+        self.check_interval.setValue(15)
+        self.check_interval.setSuffix(" minutes")
+        settings_layout.addRow("Application check interval:", self.check_interval)
+        
+        # Default priority
+        self.default_priority = QSpinBox()
+        self.default_priority.setRange(1, 100)
+        self.default_priority.setValue(50)
+        settings_layout.addRow("Default item priority:", self.default_priority)
+        
+        # Default auto-import
+        self.default_auto_import = QCheckBox()
+        self.default_auto_import.setChecked(True)
+        settings_layout.addRow("Auto-import new items by default:", self.default_auto_import)
+        
+        # Default max items to keep
+        self.default_max_items = QSpinBox()
+        self.default_max_items.setRange(0, 1000)
+        self.default_max_items.setValue(50)
+        self.default_max_items.setSpecialValueText("Keep all")  # For value 0
+        settings_layout.addRow("Default max items to keep:", self.default_max_items)
+        
+        layout.addWidget(settings_group)
+        
+        # Manage button
+        manage_layout = QHBoxLayout()
+        manage_layout.addStretch()
+        
+        self.manage_feeds_button = QPushButton("Manage RSS Feeds")
+        self.manage_feeds_button.clicked.connect(self._on_manage_feeds)
+        manage_layout.addWidget(self.manage_feeds_button)
+        
+        layout.addLayout(manage_layout)
+        
+        # Add stretch to push settings to the top
+        layout.addStretch()
+        
+        self.tab_widget.addTab(rss_tab, "RSS Feeds")
+    
     def _create_api_tab(self):
         """Create the API settings tab."""
         tab = QWidget()
@@ -651,56 +714,49 @@ class SettingsDialog(QDialog):
             )
     
     def _load_settings(self):
-        """Load settings from settings manager."""
-        # General settings
-        self.auto_save_interval.setValue(
-            self.settings_manager.get_setting("general", "auto_save_interval", 5)
+        """Load settings into UI elements."""
+        # Get current settings
+        
+        # General tab
+        self.theme_combo.setCurrentIndex(
+            self.theme_combo.findText(
+                self.settings_manager.get_setting("ui", "theme", "Light")
+            )
         )
-        self.max_recent_documents.setValue(
-            self.settings_manager.get_setting("general", "max_recent_documents", 10)
-        )
+        
         self.startup_show_statistics.setChecked(
             self.settings_manager.get_setting("general", "startup_show_statistics", False)
         )
         
-        # UI settings
-        theme = self.settings_manager.get_setting("ui", "theme", "light")
-        self.theme_combo.setCurrentText(theme.capitalize())
+        self.auto_save_interval.setValue(
+            self.settings_manager.get_setting("general", "auto_save_interval", 5)
+        )
         
-        font_family = self.settings_manager.get_setting("ui", "font_family", "Arial")
-        if font_family in ["Arial", "Times New Roman", "Courier New", "Verdana", "System"]:
-            self.font_family.setCurrentText(font_family)
-        else:
-            self.font_family.setCurrentText("System")
+        self.max_recent_documents.setValue(
+            self.settings_manager.get_setting("general", "max_recent_documents", 10)
+        )
+        
+        self.show_category_panel.setChecked(
+            self.settings_manager.get_setting("ui", "show_category_panel", True)
+        )
         
         self.font_size.setValue(
             self.settings_manager.get_setting("ui", "font_size", 12)
         )
-        self.show_category_panel.setChecked(
-            self.settings_manager.get_setting("ui", "show_category_panel", True)
-        )
-        self.default_split_ratio.setValue(
-            self.settings_manager.get_setting("ui", "default_split_ratio", 0.25)
-        )
         
-        # Web browser settings
-        self.web_browser_checkbox.setChecked(
-            self.settings_manager.get_setting("ui", "web_browser_enabled", True)
-        )
-        self.auto_save_web_checkbox.setChecked(
-            self.settings_manager.get_setting("ui", "auto_save_web", True)
-        )
-        
-        # Document settings
+        # Document tab
         self.default_document_directory.setText(
             self.settings_manager.get_setting("document", "default_document_directory", "")
         )
+        
         self.auto_suggest_tags.setChecked(
             self.settings_manager.get_setting("document", "auto_suggest_tags", True)
         )
+        
         self.auto_extract_concepts.setChecked(
             self.settings_manager.get_setting("document", "auto_extract_concepts", False)
         )
+        
         self.ocr_enabled.setChecked(
             self.settings_manager.get_setting("document", "ocr_enabled", True)
         )
@@ -709,33 +765,28 @@ class SettingsDialog(QDialog):
         self.highlight_color.setText(highlight_color)
         self.highlight_color.setStyleSheet(f"background-color: {highlight_color}")
         
-        # Learning settings
+        # Learning tab
         self.daily_new_items_limit.setValue(
             self.settings_manager.get_setting("learning", "daily_new_items_limit", 20)
         )
+        
         self.daily_review_limit.setValue(
             self.settings_manager.get_setting("learning", "daily_review_limit", 50)
         )
+        
         self.target_retention.setValue(
             self.settings_manager.get_setting("learning", "target_retention", 0.9)
         )
-        self.allow_overdue_items.setChecked(
-            self.settings_manager.get_setting("learning", "allow_overdue_items", True)
-        )
-        self.prioritize_older_items.setChecked(
-            self.settings_manager.get_setting("learning", "prioritize_older_items", True)
-        )
-        self.load_balance_reviews.setChecked(
-            self.settings_manager.get_setting("learning", "load_balance_reviews", True)
-        )
         
-        # Algorithm settings
+        # Algorithm tab
         self.minimum_interval.setValue(
             self.settings_manager.get_setting("algorithm", "minimum_interval", 1)
         )
+        
         self.maximum_interval.setValue(
-            self.settings_manager.get_setting("algorithm", "maximum_interval", 3650)
+            self.settings_manager.get_setting("algorithm", "maximum_interval", 365)
         )
+        
         self.default_easiness.setValue(
             self.settings_manager.get_setting("algorithm", "default_easiness", 2.5)
         )
@@ -752,36 +803,28 @@ class SettingsDialog(QDialog):
             self.settings_manager.get_setting("algorithm", "interval_modifier", 1.0)
         )
         
-        # Backup settings
-        self.auto_backup_enabled.setChecked(
-            self.settings_manager.get_setting("backup", "auto_backup_enabled", True)
-        )
-        self.auto_backup_interval.setValue(
-            self.settings_manager.get_setting("backup", "auto_backup_interval", 7)
-        )
-        self.auto_backup_count.setValue(
-            self.settings_manager.get_setting("backup", "auto_backup_count", 5)
-        )
-        self.include_files_in_backup.setChecked(
-            self.settings_manager.get_setting("backup", "include_files_in_backup", True)
+        # RSS tab
+        self.default_check_frequency.setValue(
+            self.settings_manager.get_setting("rss", "default_check_frequency", 60)
         )
         
-        # Advanced settings
-        self.enable_debug_logging.setChecked(
-            self.settings_manager.get_setting("advanced", "enable_debug_logging", False)
-        )
-        self.max_threads.setValue(
-            self.settings_manager.get_setting("advanced", "max_threads", 4)
+        self.check_interval.setValue(
+            self.settings_manager.get_setting("rss", "check_interval_minutes", 15)
         )
         
-        sqlite_pragma = self.settings_manager.get_setting("advanced", "sqlite_pragma", {})
-        journal_mode = sqlite_pragma.get("journal_mode", "WAL").upper()
-        self.sqlite_journal_mode.setCurrentText(journal_mode)
+        self.default_priority.setValue(
+            self.settings_manager.get_setting("rss", "default_priority", 50)
+        )
         
-        synchronous = sqlite_pragma.get("synchronous", "NORMAL").upper()
-        self.sqlite_synchronous.setCurrentText(synchronous)
+        self.default_auto_import.setChecked(
+            self.settings_manager.get_setting("rss", "default_auto_import", True)
+        )
         
-        # API settings
+        self.default_max_items.setValue(
+            self.settings_manager.get_setting("rss", "default_max_items", 50)
+        )
+        
+        # API tab
         self.jina_api_key.setText(
             self.settings_manager.get_setting("api", "jina_api_key", "")
         )
@@ -829,51 +872,79 @@ class SettingsDialog(QDialog):
             self.default_llm_service.setCurrentIndex(index)
     
     def _save_settings(self) -> bool:
-        """
-        Save settings to settings manager.
-        
-        Returns:
-            True if successful, False otherwise
-        """
+        """Save settings from UI elements to settings manager."""
         try:
-            # General settings
-            self.settings_manager.set_setting("general", "auto_save_interval", self.auto_save_interval.value())
-            self.settings_manager.set_setting("general", "max_recent_documents", self.max_recent_documents.value())
-            self.settings_manager.set_setting("general", "default_category_id", self.default_category.currentData())
-            self.settings_manager.set_setting("general", "startup_show_statistics", self.startup_show_statistics.isChecked())
+            # General tab
+            self.settings_manager.set_setting(
+                "ui", "theme", self.theme_combo.currentText()
+            )
             
-            # UI settings
-            selected_theme = self.theme_combo.currentData()
-            self.settings_manager.set_setting("ui", "theme", selected_theme)
-            self.settings_manager.set_setting("ui", "theme_file", self.theme_file_path.text())
-            self.settings_manager.set_setting("ui", "font_family", self.font_family.currentText())
-            self.settings_manager.set_setting("ui", "font_size", self.font_size.value())
-            self.settings_manager.set_setting("ui", "show_category_panel", self.show_category_panel.isChecked())
-            self.settings_manager.set_setting("ui", "default_split_ratio", self.default_split_ratio.value())
+            self.settings_manager.set_setting(
+                "general", "startup_show_statistics", self.startup_show_statistics.isChecked()
+            )
             
-            # Web browser settings
-            self.settings_manager.set_setting("ui", "web_browser_enabled", self.web_browser_checkbox.isChecked())
-            self.settings_manager.set_setting("ui", "auto_save_web", self.auto_save_web_checkbox.isChecked())
+            self.settings_manager.set_setting(
+                "general", "auto_save_interval", self.auto_save_interval.value()
+            )
             
-            # Document settings
-            self.settings_manager.set_setting("document", "default_document_directory", self.default_document_directory.text())
-            self.settings_manager.set_setting("document", "auto_suggest_tags", self.auto_suggest_tags.isChecked())
-            self.settings_manager.set_setting("document", "auto_extract_concepts", self.auto_extract_concepts.isChecked())
-            self.settings_manager.set_setting("document", "ocr_enabled", self.ocr_enabled.isChecked())
-            self.settings_manager.set_setting("document", "highlight_color", self.highlight_color.text())
+            self.settings_manager.set_setting(
+                "general", "max_recent_documents", self.max_recent_documents.value()
+            )
             
-            # Learning settings
-            self.settings_manager.set_setting("learning", "daily_new_items_limit", self.daily_new_items_limit.value())
-            self.settings_manager.set_setting("learning", "daily_review_limit", self.daily_review_limit.value())
-            self.settings_manager.set_setting("learning", "target_retention", self.target_retention.value())
-            self.settings_manager.set_setting("learning", "allow_overdue_items", self.allow_overdue_items.isChecked())
-            self.settings_manager.set_setting("learning", "prioritize_older_items", self.prioritize_older_items.isChecked())
-            self.settings_manager.set_setting("learning", "load_balance_reviews", self.load_balance_reviews.isChecked())
+            self.settings_manager.set_setting(
+                "ui", "show_category_panel", self.show_category_panel.isChecked()
+            )
             
-            # Algorithm settings
-            self.settings_manager.set_setting("algorithm", "minimum_interval", self.minimum_interval.value())
-            self.settings_manager.set_setting("algorithm", "maximum_interval", self.maximum_interval.value())
-            self.settings_manager.set_setting("algorithm", "default_easiness", self.default_easiness.value())
+            self.settings_manager.set_setting(
+                "ui", "font_size", self.font_size.value()
+            )
+            
+            # Document tab
+            self.settings_manager.set_setting(
+                "document", "default_document_directory", self.default_document_directory.text()
+            )
+            
+            self.settings_manager.set_setting(
+                "document", "auto_suggest_tags", self.auto_suggest_tags.isChecked()
+            )
+            
+            self.settings_manager.set_setting(
+                "document", "auto_extract_concepts", self.auto_extract_concepts.isChecked()
+            )
+            
+            self.settings_manager.set_setting(
+                "document", "ocr_enabled", self.ocr_enabled.isChecked()
+            )
+            
+            self.settings_manager.set_setting(
+                "document", "highlight_color", self.highlight_color.text()
+            )
+            
+            # Learning tab
+            self.settings_manager.set_setting(
+                "learning", "daily_new_items_limit", self.daily_new_items_limit.value()
+            )
+            
+            self.settings_manager.set_setting(
+                "learning", "daily_review_limit", self.daily_review_limit.value()
+            )
+            
+            self.settings_manager.set_setting(
+                "learning", "target_retention", self.target_retention.value()
+            )
+            
+            # Algorithm tab
+            self.settings_manager.set_setting(
+                "algorithm", "minimum_interval", self.minimum_interval.value()
+            )
+            
+            self.settings_manager.set_setting(
+                "algorithm", "maximum_interval", self.maximum_interval.value()
+            )
+            
+            self.settings_manager.set_setting(
+                "algorithm", "default_easiness", self.default_easiness.value()
+            )
             
             easiness_modifier = {
                 "grade0": self.easiness_grade0.value(),
@@ -885,25 +956,32 @@ class SettingsDialog(QDialog):
             }
             self.settings_manager.set_setting("algorithm", "easiness_modifier", easiness_modifier)
             
-            self.settings_manager.set_setting("algorithm", "interval_modifier", self.interval_modifier.value())
+            self.settings_manager.set_setting(
+                "algorithm", "interval_modifier", self.interval_modifier.value()
+            )
             
-            # Backup settings
-            self.settings_manager.set_setting("backup", "auto_backup_enabled", self.auto_backup_enabled.isChecked())
-            self.settings_manager.set_setting("backup", "auto_backup_interval", self.auto_backup_interval.value())
-            self.settings_manager.set_setting("backup", "auto_backup_count", self.auto_backup_count.value())
-            self.settings_manager.set_setting("backup", "include_files_in_backup", self.include_files_in_backup.isChecked())
+            # RSS tab
+            self.settings_manager.set_setting(
+                "rss", "default_check_frequency", self.default_check_frequency.value()
+            )
             
-            # Advanced settings
-            self.settings_manager.set_setting("advanced", "enable_debug_logging", self.enable_debug_logging.isChecked())
-            self.settings_manager.set_setting("advanced", "max_threads", self.max_threads.value())
+            self.settings_manager.set_setting(
+                "rss", "check_interval_minutes", self.check_interval.value()
+            )
             
-            sqlite_pragma = {
-                "journal_mode": self.sqlite_journal_mode.currentText(),
-                "synchronous": self.sqlite_synchronous.currentText()
-            }
-            self.settings_manager.set_setting("advanced", "sqlite_pragma", sqlite_pragma)
+            self.settings_manager.set_setting(
+                "rss", "default_priority", self.default_priority.value()
+            )
             
-            # API settings
+            self.settings_manager.set_setting(
+                "rss", "default_auto_import", self.default_auto_import.isChecked()
+            )
+            
+            self.settings_manager.set_setting(
+                "rss", "default_max_items", self.default_max_items.value()
+            )
+            
+            # API tab
             self.settings_manager.set_setting("api", "jina_api_key", self.jina_api_key.text())
             self.settings_manager.set_setting("api", "openai_api_key", self.openai_api_key.text())
             self.settings_manager.set_setting("api", "openai_model", self.openai_model.currentText())
@@ -1183,3 +1261,23 @@ class SettingsDialog(QDialog):
                     
         except Exception as e:
             logger.exception(f"Error changing theme: {e}")
+
+    def _on_manage_feeds(self):
+        """Open the RSS feed management dialog."""
+        from ui.dialogs.rss_feed_dialog import RSSFeedDialog
+        from core.utils.rss_feed_manager import RSSFeedManager
+        
+        # Make sure we save any settings changes first
+        self._save_settings()
+        
+        # Create RSS feed manager
+        from core.knowledge_base.models import init_database
+        db_session = init_database()
+        rss_manager = RSSFeedManager(db_session, self.settings_manager)
+        
+        # Create and show dialog
+        dialog = RSSFeedDialog(db_session, rss_manager, self)
+        dialog.exec()
+        
+        # Refresh settings in case any were changed
+        self._load_settings()

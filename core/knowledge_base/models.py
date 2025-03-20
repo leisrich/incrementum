@@ -23,6 +23,13 @@ extract_tag_association = Table(
     Column('tag_id', Integer, ForeignKey('tags.id'))
 )
 
+# RSS Feed - Document association
+rss_feed_document_association = Table(
+    'rss_feed_document', Base.metadata,
+    Column('rss_feed_id', Integer, ForeignKey('rss_feeds.id')),
+    Column('document_id', Integer, ForeignKey('documents.id'))
+)
+
 class Category(Base):
     """Hierarchical category for organizing knowledge."""
     __tablename__ = 'categories'
@@ -142,6 +149,49 @@ class ReviewLog(Base):
     
     # Relationships
     learning_item = relationship("LearningItem", back_populates="review_history")
+
+class RSSFeed(Base):
+    """RSS Feed source for auto-importing documents."""
+    __tablename__ = 'rss_feeds'
+
+    id = Column(Integer, primary_key=True)
+    title = Column(String(255), nullable=False)
+    url = Column(String(1024), nullable=False, unique=True)
+    category_id = Column(Integer, ForeignKey('categories.id'))
+    last_checked = Column(DateTime, nullable=True)
+    check_frequency = Column(Integer, default=60)  # In minutes
+    auto_import = Column(Boolean, default=True)  # Auto import new items
+    enabled = Column(Boolean, default=True)  # Feed enabled/disabled
+    created_date = Column(DateTime, default=datetime.utcnow)
+    max_items_to_keep = Column(Integer, default=50)  # Max number of items to keep
+    
+    # Relationships
+    category = relationship("Category", backref="rss_feeds")
+    documents = relationship("Document", secondary=rss_feed_document_association)
+    
+    def __repr__(self):
+        return f"<RSSFeed '{self.title}' ({self.url})>"
+
+class RSSFeedEntry(Base):
+    """Keeps track of RSS feed entries that have been processed."""
+    __tablename__ = 'rss_feed_entries'
+    
+    id = Column(Integer, primary_key=True)
+    feed_id = Column(Integer, ForeignKey('rss_feeds.id'), nullable=False)
+    entry_id = Column(String(1024), nullable=False)  # RSS entry ID or GUID
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=True)
+    title = Column(String(512))
+    publish_date = Column(DateTime, nullable=True)
+    processed_date = Column(DateTime, default=datetime.utcnow)
+    processed = Column(Boolean, default=False)
+    link_url = Column(String(1024), nullable=True)  # Actual URL to the content
+    
+    # Relationships
+    feed = relationship("RSSFeed", backref="entries")
+    document = relationship("Document", backref="rss_entry")
+    
+    def __repr__(self):
+        return f"<RSSFeedEntry '{self.title}' ({self.entry_id})>"
 
 # Database initialization
 def init_database():

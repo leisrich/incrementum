@@ -757,14 +757,63 @@ window.addEventListener('load', function() {
     def _load_html(self):
         """Load and display an HTML document."""
         try:
+            # Log file info
+            logger.info(f"Loading HTML document from {self.document.file_path}")
+            file_size = os.path.getsize(self.document.file_path) if os.path.exists(self.document.file_path) else 0
+            logger.info(f"HTML file size: {file_size} bytes")
+            
+            # Check if file exists and is not empty
+            if not os.path.exists(self.document.file_path):
+                logger.error(f"HTML file does not exist: {self.document.file_path}")
+                label = QLabel(f"HTML file not found: {os.path.basename(self.document.file_path)}")
+                self.content_layout.addWidget(label)
+                return
+                
+            if file_size == 0:
+                logger.error(f"HTML file is empty: {self.document.file_path}")
+                label = QLabel("The HTML file is empty. No content to display.")
+                self.content_layout.addWidget(label)
+                return
+            
             # Read HTML file
-            with open(self.document.file_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
+            try:
+                with open(self.document.file_path, 'r', encoding='utf-8') as f:
+                    html_content = f.read()
+            except UnicodeDecodeError:
+                # Try with a different encoding if UTF-8 fails
+                logger.warning(f"UTF-8 decoding failed, trying with ISO-8859-1")
+                with open(self.document.file_path, 'r', encoding='ISO-8859-1') as f:
+                    html_content = f.read()
+                    
+            # Log content preview for debugging
+            content_preview = html_content[:200] + "..." if len(html_content) > 200 else html_content
+            logger.debug(f"HTML content preview: {content_preview}")
+            
+            if not html_content.strip():
+                logger.error("HTML content is empty after reading")
+                label = QLabel("The HTML file contains no content.")
+                self.content_layout.addWidget(label)
+                return
             
             # Parse with BeautifulSoup to extract text
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Check if there's any meaningful content
+            body_content = soup.body.get_text().strip() if soup.body else ""
             self.content_text = soup.get_text()
+            
+            if not body_content:
+                logger.warning("HTML document contains no visible text content")
+                
+                # Try to display the raw HTML instead
+                text_edit = QTextEdit()
+                text_edit.setReadOnly(True)
+                text_edit.setPlainText(html_content)
+                self.content_layout.addWidget(text_edit)
+                self.content_edit = text_edit
+                logger.info("Displaying raw HTML content instead")
+                return
             
             # Set up base URL for loading resources
             base_url = QUrl.fromLocalFile(os.path.dirname(self.document.file_path) + os.path.sep)
@@ -792,6 +841,8 @@ window.addEventListener('load', function() {
             
             # Set up position tracking similar to EPUB
             setup_epub_webview(self.document, webview, self.db_session)
+            
+            logger.info("HTML document loaded successfully")
             
         except Exception as e:
             logger.exception(f"Error loading HTML document: {e}")

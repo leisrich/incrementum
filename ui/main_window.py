@@ -30,6 +30,7 @@ from core.knowledge_base.export_manager import ExportManager
 from core.knowledge_network.network_builder import KnowledgeNetworkBuilder
 from core.utils.settings_manager import SettingsManager
 from core.utils.theme_manager import ThemeManager
+from core.utils.rss_feed_manager import RSSFeedManager
 from core.spaced_repetition.queue_manager import QueueManager
 
 from .document_view import DocumentView
@@ -54,6 +55,7 @@ from core.document_processor.summarizer import SummarizeDialog
 from .queue_view import QueueView
 from ui.dialogs.url_import_dialog import URLImportDialog
 from ui.dialogs.content_processor_dialog import ContentProcessorDialog
+from ui.dialogs.rss_feed_dialog import RSSFeedDialog
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,7 @@ class MainWindow(QMainWindow):
         self.settings_manager = SettingsManager()
         self.theme_manager = ThemeManager(self.settings_manager)
         self.queue_manager = FSRSAlgorithm(self.db_session)
+        self.rss_manager = RSSFeedManager(self.db_session, self.settings_manager)
         
         # Set window properties
         self.setWindowTitle("Incrementum - Incremental Learning System")
@@ -156,6 +159,9 @@ class MainWindow(QMainWindow):
         
         # Show startup statistics if configured
         self._check_startup_statistics()
+        
+        # Start RSS feed updater if enabled
+        self._start_rss_updater()
         
         # Initialization is complete
         self._initialization_complete = True
@@ -311,6 +317,14 @@ class MainWindow(QMainWindow):
         logger.info("Application closing, saving session state...")
         
         try:
+            # Stop RSS feed updater
+            if hasattr(self, 'rss_manager'):
+                try:
+                    self.rss_manager.stop_feed_update_timer()
+                    logger.info("Stopped RSS feed updater")
+                except Exception as e:
+                    logger.error(f"Error stopping RSS feed updater: {e}")
+            
             # Save the current layout
             layout_data = self.saveState().toBase64().data().decode()
             self.settings_manager.set_setting("ui", "dock_layout", layout_data)
@@ -521,6 +535,70 @@ class MainWindow(QMainWindow):
         self.action_web_browser.setShortcut(QKeySequence("Ctrl+B"))
         self.action_web_browser.triggered.connect(self._on_open_web_browser)
 
+        # Tools menu actions
+        self.action_tag_manager = QAction("Tag Manager", self)
+        self.action_tag_manager.triggered.connect(self._on_manage_tags)
+        
+        self.action_batch_processor = QAction("Batch Processor", self)
+        self.action_batch_processor.triggered.connect(self._on_manage_tags)
+        
+        self.action_review_manager = QAction("Review Manager", self)
+        self.action_review_manager.triggered.connect(self._on_manage_tags)
+        
+        self.action_backup = QAction("Backup", self)
+        self.action_backup.triggered.connect(self._on_backup_restore)
+        
+        # Add RSS feed manager action
+        self.action_rss_feeds = QAction("Manage RSS Feeds", self)
+        self.action_rss_feeds.triggered.connect(self._on_manage_rss_feeds)
+        
+    def _start_rss_updater(self):
+        """Start the RSS feed update timer if enabled."""
+        try:
+            # Check if RSS feeds are enabled
+            rss_enabled = self.settings_manager.get_setting("rss", "enabled", True)
+            
+            if rss_enabled:
+                # Start the RSS feed updater
+                self.rss_manager.start_feed_update_timer()
+                logger.info("Started RSS feed updater")
+        except Exception as e:
+            logger.error(f"Error starting RSS feed updater: {e}")
+    
+    @pyqtSlot()
+    def _on_manage_rss_feeds(self):
+        """Open the RSS feed management dialog."""
+        try:
+            dialog = RSSFeedDialog(self.db_session, self.rss_manager, self)
+            dialog.feedsUpdated.connect(self._on_feeds_updated)
+            dialog.exec()
+            
+        except Exception as e:
+            logger.exception(f"Error opening RSS feed manager: {e}")
+            QMessageBox.critical(
+                self, "Error",
+                f"Error opening RSS feed manager: {str(e)}"
+            )
+    
+    @pyqtSlot()
+    def _on_feeds_updated(self):
+        """Handle updates to RSS feeds."""
+        # Refresh any views that might display RSS content
+        self._update_queue_widget()
+        
+        # If queue view is open, refresh it
+        if hasattr(self, 'queue_view'):
+            self.queue_view._load_queue_data()
+    
+    def _update_queue_widget(self):
+        """Update the queue widget with current data."""
+        # This will be called when RSS feeds are updated
+        if hasattr(self, 'queue_view'):
+            try:
+                self.queue_view._load_queue_data()
+            except Exception as e:
+                logger.error(f"Error updating queue widget after RSS update: {e}")
+    
     @pyqtSlot()
     def _on_save(self):
         """Save the current item."""
@@ -703,19 +781,29 @@ class MainWindow(QMainWindow):
         learning_menu.addAction(self.action_browse_learning_items)
         
         # Tools menu
-        tools_menu = self.menu_bar.addMenu("&Tools")
-        tools_menu.addAction(self.action_start_review)
-        tools_menu.addAction(self.action_view_queue)
-        tools_menu.addAction(self.action_prev_document)
-        tools_menu.addAction(self.action_read_next)
-        tools_menu.addSeparator()
-        tools_menu.addAction(self.action_search)
-        tools_menu.addAction(self.action_view_network)
-        tools_menu.addSeparator()
-        tools_menu.addAction(self.action_backup_restore)
-        tools_menu.addAction(self.action_settings)
-        tools_menu.addAction(self.action_statistics)
-        tools_menu.addAction(self.action_summarize_document)
+        self.tools_menu = self.menu_bar.addMenu("&Tools")
+        self.tools_menu.addAction(self.action_start_review)
+        self.tools_menu.addAction(self.action_view_queue)
+        self.tools_menu.addAction(self.action_prev_document)
+        self.tools_menu.addAction(self.action_read_next)
+        self.tools_menu.addSeparator()
+        self.tools_menu.addAction(self.action_search)
+        self.tools_menu.addAction(self.action_view_network)
+        self.tools_menu.addSeparator()
+        self.tools_menu.addAction(self.action_backup_restore)
+        self.tools_menu.addAction(self.action_settings)
+        self.tools_menu.addAction(self.action_statistics)
+        self.tools_menu.addAction(self.action_summarize_document)
+        
+        # NOW ADD THE RSS FEEDS ACTION TO THE TOOLS MENU
+        self.tools_menu.addSeparator()
+        self.tools_menu.addAction(self.action_rss_feeds)
+        
+        # NOW ADD THE ADDITIONAL TOOL ACTIONS THAT WERE ORIGINALLY IN _create_actions
+        self.tools_menu.addAction(self.action_tag_manager)
+        self.tools_menu.addAction(self.action_batch_processor)
+        self.tools_menu.addAction(self.action_review_manager)
+        self.tools_menu.addAction(self.action_backup)
         
         # Help menu
         help_menu = self.menu_bar.addMenu("&Help")
