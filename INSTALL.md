@@ -313,7 +313,6 @@ If you encounter issues with installation or setup:
 1. Check the troubleshooting section of this guide
 2. Review the full documentation
 3. Check the GitHub repository issues section
-4. Join the community forum for support
 
 For bug reports or feature requests, please visit the GitHub repository.
 
