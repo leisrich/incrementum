@@ -49,6 +49,17 @@ class ShortcutManager:
     NEXT_DOCUMENT = QKeySequence("Alt+Right")
     PREV_DOCUMENT = QKeySequence("Alt+Left")
     
+    # Simple Queue Navigation (easier to use)
+    QUEUE_NEXT = QKeySequence("N")
+    QUEUE_PREV = QKeySequence("P")
+    
+    # Queue Rating Shortcuts (direct access)
+    QUEUE_RATE_1 = QKeySequence("1")  # Hard/Forgot
+    QUEUE_RATE_2 = QKeySequence("2")  # Difficult
+    QUEUE_RATE_3 = QKeySequence("3")  # Good
+    QUEUE_RATE_4 = QKeySequence("4")  # Easy
+    QUEUE_RATE_5 = QKeySequence("5")  # Very Easy
+    
     # Navigation
     NEXT_TAB = QKeySequence("Ctrl+Tab")
     PREV_TAB = QKeySequence("Ctrl+Shift+Tab")
@@ -58,6 +69,7 @@ class ShortcutManager:
     TOGGLE_CATEGORY_PANEL = QKeySequence("F3")
     TOGGLE_SEARCH_PANEL = QKeySequence("F4")
     TOGGLE_STATS_PANEL = QKeySequence("F5")
+    TOGGLE_QUEUE_PANEL = QKeySequence("F6")
     
     # File Operations
     SAVE = QKeySequence("Ctrl+S")
@@ -103,7 +115,14 @@ class ShortcutManager:
             ],
             "Queue Navigation": [
                 {"key": "Alt+Right", "description": "Next document in queue"},
-                {"key": "Alt+Left", "description": "Previous document in queue"}
+                {"key": "Alt+Left", "description": "Previous document in queue"},
+                {"key": "N", "description": "Next document in queue (quick key)"},
+                {"key": "P", "description": "Previous document in queue (quick key)"},
+                {"key": "1", "description": "Rate document as Hard/Forgot"},
+                {"key": "2", "description": "Rate document as Difficult"},
+                {"key": "3", "description": "Rate document as Good"},
+                {"key": "4", "description": "Rate document as Easy"},
+                {"key": "5", "description": "Rate document as Very Easy"}
             ],
             "Navigation": [
                 {"key": "Ctrl+Tab", "description": "Next tab"},
@@ -111,7 +130,8 @@ class ShortcutManager:
                 {"key": "Ctrl+W", "description": "Close current tab"},
                 {"key": "F3", "description": "Toggle category panel"},
                 {"key": "F4", "description": "Toggle search panel"},
-                {"key": "F5", "description": "Toggle statistics panel"}
+                {"key": "F5", "description": "Toggle statistics panel"},
+                {"key": "F6", "description": "Toggle queue panel"}
             ],
             "File Operations": [
                 {"key": "Ctrl+O", "description": "Import file"},

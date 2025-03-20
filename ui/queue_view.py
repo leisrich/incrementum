@@ -11,11 +11,12 @@ from PyQt6.QtWidgets import (
     QMessageBox, QMenu, QCheckBox, QTabWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex
-from PyQt6.QtGui import QIcon, QAction, QColor, QBrush
+from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut
 
 from core.knowledge_base.models import Document, Category
 from core.spaced_repetition import FSRSAlgorithm
 from core.utils.settings_manager import SettingsManager
+from core.utils.shortcuts import ShortcutManager
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,9 @@ class QueueView(QWidget):
         
         # Create UI
         self._create_ui()
+        
+        # Set up keyboard shortcuts
+        self._setup_shortcuts()
         
         # Load initial data
         self._load_queue_data()
@@ -59,6 +63,71 @@ class QueueView(QWidget):
         }
         
         return params
+    
+    def _setup_shortcuts(self):
+        """Set up keyboard shortcuts for queue operations."""
+        # Navigation shortcuts
+        self.shortcut_next = QShortcut(ShortcutManager.QUEUE_NEXT, self)
+        self.shortcut_next.activated.connect(self._on_read_next)
+        
+        self.shortcut_prev = QShortcut(ShortcutManager.QUEUE_PREV, self)
+        self.shortcut_prev.activated.connect(self._on_read_prev)
+        
+        # Rating shortcuts
+        self.shortcut_rate_1 = QShortcut(ShortcutManager.QUEUE_RATE_1, self)
+        self.shortcut_rate_1.activated.connect(lambda: self._rate_current_document(1))
+        
+        self.shortcut_rate_2 = QShortcut(ShortcutManager.QUEUE_RATE_2, self)
+        self.shortcut_rate_2.activated.connect(lambda: self._rate_current_document(2))
+        
+        self.shortcut_rate_3 = QShortcut(ShortcutManager.QUEUE_RATE_3, self)
+        self.shortcut_rate_3.activated.connect(lambda: self._rate_current_document(3))
+        
+        self.shortcut_rate_4 = QShortcut(ShortcutManager.QUEUE_RATE_4, self)
+        self.shortcut_rate_4.activated.connect(lambda: self._rate_current_document(4))
+        
+        self.shortcut_rate_5 = QShortcut(ShortcutManager.QUEUE_RATE_5, self)
+        self.shortcut_rate_5.activated.connect(lambda: self._rate_current_document(5))
+    
+    def _rate_current_document(self, rating: int):
+        """Rate the currently selected document."""
+        doc_id = self._get_current_document_id()
+        if doc_id:
+            try:
+                self._on_rate_document(doc_id, rating)
+            except Exception as e:
+                logger.exception(f"Error rating document: {e}")
+                QMessageBox.warning(
+                    self, "Error", 
+                    f"Error rating document: {str(e)}"
+                )
+        else:
+            # Optionally provide feedback that no document is currently selected
+            self.refresh_button.setFocus()  # Set focus to a UI element to indicate that the shortcut was received
+            
+    def keyPressEvent(self, event):
+        """Handle keyboard events for queue navigation and rating."""
+        key = event.key()
+        
+        # Check for digit keys 1-5 for ratings (alternative to shortcuts)
+        if Qt.Key.Key_1 <= key <= Qt.Key.Key_5:
+            rating = key - Qt.Key.Key_0  # Convert key code to number (1-5)
+            self._rate_current_document(rating)
+            event.accept()
+            return
+            
+        # Check for N/P keys for navigation (alternative to shortcuts)
+        elif key == Qt.Key.Key_N:
+            self._on_read_next()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_P:
+            self._on_read_prev()
+            event.accept()
+            return
+            
+        # Pass event to parent for default handling
+        super().keyPressEvent(event)
     
     def _create_ui(self):
         """Create the UI layout."""
@@ -101,17 +170,22 @@ class QueueView(QWidget):
         # Add navigation buttons in a horizontal layout
         nav_buttons_layout = QHBoxLayout()
         
-        self.prev_button = QPushButton("Previous Document")
+        self.prev_button = QPushButton("Previous Document (P)")
         self.prev_button.clicked.connect(self._on_read_prev)
-        self.prev_button.setToolTip("Open the previous document in the queue")
+        self.prev_button.setToolTip("Open the previous document in the queue (Shortcut: P)")
         nav_buttons_layout.addWidget(self.prev_button)
         
-        self.read_next_button = QPushButton("Next Document")
+        self.read_next_button = QPushButton("Next Document (N)")
         self.read_next_button.clicked.connect(self._on_read_next)
-        self.read_next_button.setToolTip("Open the next document in the queue")
+        self.read_next_button.setToolTip("Open the next document in the queue (Shortcut: N)")
         nav_buttons_layout.addWidget(self.read_next_button)
         
         buttons_layout.addLayout(nav_buttons_layout)
+        
+        # Add keyboard shortcuts hint
+        shortcut_label = QLabel("Rating shortcuts: 1=Hard, 2=Difficult, 3=Good, 4=Easy, 5=Very Easy")
+        shortcut_label.setStyleSheet("color: #666; font-style: italic;")
+        buttons_layout.addWidget(shortcut_label)
         
         controls_layout.addLayout(buttons_layout)
         
@@ -708,6 +782,12 @@ class QueueView(QWidget):
         for label, rating in ratings:
             rate_action = rate_menu.addAction(label)
             rate_action.triggered.connect(lambda checked, r=rating: self._on_rate_document(doc_id, r))
+            
+        menu.addSeparator()
+        
+        # Delete action
+        delete_action = menu.addAction("Delete Document")
+        delete_action.triggered.connect(lambda: self._on_delete_document(doc_id))
         
         # Show menu
         menu.exec(self.queue_table.viewport().mapToGlobal(pos))
@@ -785,3 +865,41 @@ class QueueView(QWidget):
         
         # Reload queue data with new parameters
         self._load_queue_data()
+
+    def _on_delete_document(self, doc_id: int):
+        """Handle document deletion."""
+        try:
+            # Get document title for confirmation message
+            document = self.db_session.query(Document).get(doc_id)
+            if not document:
+                QMessageBox.warning(self, "Error", "Document not found.")
+                return
+                
+            # Show confirmation dialog
+            reply = QMessageBox.question(
+                self, 
+                "Confirm Deletion",
+                f"Are you sure you want to delete the document '{document.title}'?\n\nThis action cannot be undone.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # Delete document
+                self.db_session.delete(document)
+                self.db_session.commit()
+                
+                # Show success message
+                QMessageBox.information(self, "Success", f"Document '{document.title}' was deleted successfully.")
+                
+                # Refresh the queue
+                self._load_queue_data()
+                
+        except Exception as e:
+            logger.exception(f"Error deleting document: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error deleting document: {str(e)}"
+            )
+            # Rollback in case of error
+            self.db_session.rollback()

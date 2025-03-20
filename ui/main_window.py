@@ -101,6 +101,9 @@ class DockablePDFView(QDockWidget):
 class MainWindow(QMainWindow):
     """Main application window with multi-pane interface."""
     
+    # Define signals
+    document_changed = pyqtSignal(int)
+    
     def __init__(self):
         super().__init__()
         
@@ -428,6 +431,7 @@ class MainWindow(QMainWindow):
         self.action_toggle_queue_panel.setCheckable(True)
         self.action_toggle_queue_panel.setChecked(False)
         self.action_toggle_queue_panel.triggered.connect(self._on_toggle_queue_panel)
+        self.action_toggle_queue_panel.setShortcut(ShortcutManager.TOGGLE_QUEUE_PANEL)
         
         # Queue and document navigation
         self.action_read_next = QAction("Read Next in Queue", self)
@@ -875,6 +879,8 @@ class MainWindow(QMainWindow):
         # Create queue widget
         self.queue_view = QueueView(self.db_session, self.settings_manager)
         self.queue_view.documentSelected.connect(self._open_document)
+        # Connect document changed signal to update queue view
+        self.document_changed.connect(self.queue_view.set_current_document)
         
         # Set as dock widget content
         self.queue_dock.setWidget(self.queue_view)
@@ -1192,6 +1198,10 @@ class MainWindow(QMainWindow):
             # Update the queue view with the current document
             if hasattr(self, 'queue_view'):
                 self.queue_view.set_current_document(widget.document_id)
+                
+            # Emit signal indicating document changed
+            self.document_changed.emit(widget.document_id)
+            
         elif hasattr(widget, 'extract') and hasattr(widget, 'extract_id'):
             # It's an extract view - enable specific actions
             self.action_new_extract.setEnabled(False)
@@ -2489,3 +2499,16 @@ class MainWindow(QMainWindow):
                 self, "Web Browser Error", 
                 f"Error opening web browser: {str(e)}"
             )
+
+    def get_current_document_id(self):
+        """
+        Get the ID of the currently active document.
+        
+        Returns:
+            int or None: The ID of the current document, or None if no document is open.
+        """
+        if self.mdi_area.activeSubWindow():
+            widget = self.mdi_area.activeSubWindow().widget()
+            if hasattr(widget, 'document_id'):
+                return widget.document_id
+        return None
