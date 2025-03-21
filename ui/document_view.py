@@ -1090,31 +1090,51 @@ window.addEventListener('load', function() {
                                 
                                 # Set initial sizes (70% video, 30% transcript)
                                 self.content_splitter.setSizes([700, 300])
+                                
+                                # Connect transcript seek signals
+                                self.transcript_view.seek_to_time.connect(self._on_seek_youtube_position)
                             else:
                                 # No transcript, show message
                                 no_transcript_widget = QWidget()
                                 no_transcript_layout = QVBoxLayout(no_transcript_widget)
+                                no_transcript_layout.setContentsMargins(10, 10, 10, 10)  # Smaller margins
+                                no_transcript_layout.setSpacing(5)  # Reduce spacing between widgets
                                 
-                                no_transcript_label = QLabel(
-                                    "No transcript is available for this video.\n\n"
-                                    "Possible reasons:\n"
-                                    "• Transcripts are disabled by the video creator\n"
-                                    "• The video does not have any captions\n"
-                                    "• The video is age-restricted or private\n\n"
-                                    "Try reimporting or using a different video."
-                                )
-                                no_transcript_label.setWordWrap(True)
-                                no_transcript_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                                no_transcript_label.setStyleSheet("background-color: #f0f0f0; padding: 20px; border-radius: 5px;")
+                                # Create a compact message layout
+                                message_widget = QWidget()
+                                message_layout = QHBoxLayout(message_widget)
+                                message_layout.setContentsMargins(5, 5, 5, 5)
                                 
+                                # Create the reimport button
                                 reimport_button = QPushButton("Reimport Video with Transcript")
                                 reimport_button.clicked.connect(self._on_reimport_youtube)
+                                reimport_button.setMinimumWidth(200)
+                                reimport_button.setMaximumWidth(250)
                                 
-                                no_transcript_layout.addWidget(reimport_button)
-                                no_transcript_layout.addWidget(no_transcript_label)
+                                # Create the info label with more compact text
+                                no_transcript_label = QLabel(
+                                    "No transcript available. Possible reasons: "
+                                    "• Disabled by creator • No captions "
+                                    "• Age-restricted video • Private content"
+                                )
+                                no_transcript_label.setWordWrap(True)
+                                no_transcript_label.setStyleSheet("color: #555; font-size: 11px; background-color: #f7f7f7; padding: 8px; border-radius: 3px;")
+                                
+                                # Add widgets to message layout
+                                message_layout.addWidget(reimport_button)
+                                message_layout.addWidget(no_transcript_label, 1)  # Give label stretch priority
+                                
+                                # Add message widget to main layout
+                                no_transcript_layout.addWidget(message_widget)
+                                
+                                # Add a spacer to push content to the top
+                                no_transcript_layout.addStretch(1)
                                 
                                 # Add to splitter
                                 self.content_splitter.addWidget(no_transcript_widget)
+                                
+                                # Set initial sizes (85% video, 15% message)
+                                self.content_splitter.setSizes([850, 150])
                     except Exception as e:
                         logger.warning(f"Could not load transcript metadata: {e}")
                 
