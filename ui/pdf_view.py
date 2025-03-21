@@ -43,13 +43,14 @@ class PDFGraphicsView(QWidget):
         self.current_page_num = 0
         self.total_pages = 0
         self.visible_pos = (0, 0)  # Track visible position (top-left corner)
+        self.pixmap_label = None  # Store reference to the pixmap label
         
         # Set focus policy to receive keyboard events
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         
-        # Set minimum size
-        self.setMinimumSize(600, 800)
+        # Set minimum size - increase for better viewing experience
+        self.setMinimumSize(800, 1000)
         
         # Initialize mouse tracking variables
         self.is_selecting = False
@@ -69,9 +70,13 @@ class PDFGraphicsView(QWidget):
         self.layout().addWidget(self.scroll_area)
         
         self.content_widget = QWidget()
+        self.content_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # Pass mouse events through
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_area.setWidget(self.content_widget)
+        
+        # Install event filters to ensure we capture all mouse events
+        self.scroll_area.viewport().installEventFilter(self)
     
     def get_visible_position(self):
         """Get the current visible position in the document."""
@@ -193,12 +198,12 @@ class PDFGraphicsView(QWidget):
                     item.widget().deleteLater()
             
             # Create label to display the pixmap
-            pixmap_label = QLabel()
-            pixmap_label.setPixmap(self.pixmap)
-            pixmap_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.pixmap_label = QLabel()
+            self.pixmap_label.setPixmap(self.pixmap)
+            self.pixmap_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
             # Add to layout
-            self.content_layout.addWidget(pixmap_label)
+            self.content_layout.addWidget(self.pixmap_label)
             
             # Set fixed size on content widget to ensure scrollbars appear
             self.content_widget.setFixedSize(self.pixmap.width(), self.pixmap.height())
@@ -219,112 +224,138 @@ class PDFGraphicsView(QWidget):
     
     def paintEvent(self, event):
         """Paint the widget."""
-        # If we're using a scroll area approach, don't override paint event
+        super().paintEvent(event)
+
+        # If we're using a scroll area approach, we need to paint on top of it
         if hasattr(self, 'content_widget') and hasattr(self, 'content_layout'):
-            super().paintEvent(event)
-            return
-            
-        # Original direct painting approach for backward compatibility
-        if not self.pixmap:
-            return
-        
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self.pixmap)
-        
-        # Draw saved highlights for current page
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(255, 255, 0, 80)))  # Yellow with transparency
-        
-        # Get highlights for current page
-        if self.current_page_num in self.highlights:
-            for highlight in self.highlights[self.current_page_num]:
+            if not self.current_highlights and self.current_page_num not in self.highlights:
+                return  # Nothing to paint
+
+            painter = QPainter(self)
+
+            # Draw current selection
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(0, 120, 215, 80)))  # Blue with transparency
+
+            for highlight in self.current_highlights:
                 painter.drawRect(highlight)
-        
-        # Draw current selection
-        painter.setBrush(QBrush(QColor(0, 120, 215, 80)))  # Blue with transparency
-        
-        for highlight in self.current_highlights:
-            painter.drawRect(highlight)
-    
-    def mousePressEvent(self, event):
-        """Handle mouse press events."""
-        if event.button() == Qt.MouseButton.LeftButton:
+
+            # Draw saved highlights for current page
+            painter.setBrush(QBrush(QColor(255, 255, 0, 80)))  # Yellow with transparency
+
+            # Get highlights for current page
+            if self.current_page_num in self.highlights:
+                for highlight in self.highlights[self.current_page_num]:
+                    painter.drawRect(highlight)
+       
+    def eventFilter(self, watched, event):
+        """Filter events to capture mouse events on the viewport."""
+        if watched != self.scroll_area.viewport():
+            return super().eventFilter(watched, event)
+
+        # Handle mouse press
+        if event.type() == event.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            # Start selection
             self.is_selecting = True
             self.selection_start = event.position()
             self.selection_end = event.position()
             self.current_highlights = []
             self.selected_text = ""
             self.update()
-    
-    def mouseMoveEvent(self, event):
-        """Handle mouse move events."""
-        if self.is_selecting:
+            return True
+
+        # Handle mouse move during selection
+        elif event.type() == event.Type.MouseMove and self.is_selecting:
+            # Update selection end point
             self.selection_end = event.position()
             self._update_selection()
             self.update()
-    
-    def mouseReleaseEvent(self, event):
-        """Handle mouse release events."""
-        if event.button() == Qt.MouseButton.LeftButton and self.is_selecting:
+            # Don't consume the event so scrolling still works
+            return False
+
+        # Handle mouse release
+        elif event.type() == event.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and self.is_selecting:
+            # Complete selection
+            self.selection_end = event.position()
             self.is_selecting = False
-            self.selection_end = event.position()
             self._update_selection()
             self.update()
-            
-            # Emit signal with selected text
-            if self.selected_text:
-                self.selectionChanged.emit(self.selected_text)
-    
+            return True
+
+        # Let other events pass through
+        return super().eventFilter(watched, event)
+
     def _update_selection(self):
         """Update selection based on current mouse positions."""
         if not self.page or not self.text_page:
             return
-        
-        # Convert screen coordinates to page coordinates
-        p1 = QPointF(self.selection_start.x(), self.selection_start.y())
-        p2 = QPointF(self.selection_end.x(), self.selection_end.y())
-        
-        # Create rectangle from points
-        rect = QRectF(p1, p2).normalized()
-        
-        # Scale back to original page coordinates
-        page_rect = QRectF(
-            rect.x() / self.zoom_factor,
-            rect.y() / self.zoom_factor,
-            rect.width() / self.zoom_factor,
-            rect.height() / self.zoom_factor
-        )
-        
-        # Extract text from this region
-        fitz_rect = fitz.Rect(
-            page_rect.x(), page_rect.y(), 
-            page_rect.x() + page_rect.width(), 
-            page_rect.y() + page_rect.height()
-        )
-        
-        self.selected_text = self.page.get_text("text", clip=fitz_rect)
-        
-        # Get text spans in this region for more accurate highlighting
-        spans = self.page.get_text("dict", clip=fitz_rect)["blocks"]
-        
-        # Clear current highlights
-        self.current_highlights = []
-        
-        # Create highlight rectangles
-        for block in spans:
-            if block["type"] == 0:  # Text block
-                for line in block["lines"]:
-                    for span in line["spans"]:
-                        span_rect = fitz.Rect(span["bbox"])
-                        # Convert back to screen coordinates
-                        screen_rect = QRectF(
-                            span_rect.x0 * self.zoom_factor,
-                            span_rect.y0 * self.zoom_factor,
-                            (span_rect.x1 - span_rect.x0) * self.zoom_factor,
-                            (span_rect.y1 - span_rect.y0) * self.zoom_factor
-                        )
-                        self.current_highlights.append(screen_rect)
 
+        try:
+            # Get scroll position
+            h_scroll = self.scroll_area.horizontalScrollBar().value()
+            v_scroll = self.scroll_area.verticalScrollBar().value()
+
+            # Convert screen coordinates to PDF coordinates, accounting for scroll
+            start_x = (self.selection_start.x() + h_scroll) / self.zoom_factor
+            start_y = (self.selection_start.y() + v_scroll) / self.zoom_factor
+            end_x = (self.selection_end.x() + h_scroll) / self.zoom_factor
+            end_y = (self.selection_end.y() + v_scroll) / self.zoom_factor
+
+            # Create Fitz rectangle for text extraction
+            fitz_rect = fitz.Rect(
+                min(start_x, end_x),
+                min(start_y, end_y),
+                max(start_x, end_x),
+                max(start_y, end_y)
+            )
+
+            # Extract text from this region
+            self.selected_text = self.page.get_text("text", clip=fitz_rect)
+
+            # Clear current highlights
+            self.current_highlights = []
+
+            # Get text spans for more precise highlighting
+            try:
+                spans = self.page.get_text("dict", clip=fitz_rect)["blocks"]
+
+                # Create highlight rectangles for each text span
+                for block in spans:
+                    if "type" in block and block["type"] == 0:  # Text block
+                        for line in block.get("lines", []):
+                            for span in line.get("spans", []):
+                                if "bbox" in span:
+                                    span_rect = fitz.Rect(span["bbox"])
+
+                                    # Convert to screen coordinates for highlighting
+                                    screen_rect = QRectF(
+                                        span_rect.x0 * self.zoom_factor - h_scroll,
+                                        span_rect.y0 * self.zoom_factor - v_scroll,
+                                        (span_rect.x1 - span_rect.x0) * self.zoom_factor,
+                                        (span_rect.y1 - span_rect.y0) * self.zoom_factor
+                                    )
+
+                                    self.current_highlights.append(screen_rect)
+            except Exception as e:
+                # Fallback to simple rectangular highlight if span extraction fails
+                logger.warning(f"Detailed highlighting failed, using rectangle: {e}")
+                simple_rect = QRectF(
+                    min(self.selection_start.x(), self.selection_end.x()),
+                    min(self.selection_start.y(), self.selection_end.y()),
+                    abs(self.selection_end.x() - self.selection_start.x()),
+                    abs(self.selection_end.y() - self.selection_start.y())
+                )
+                self.current_highlights.append(simple_rect)
+
+            # Log selection for debugging
+            logger.debug(f"Selected text: '{self.selected_text}'")
+
+            # Emit signal if text was selected
+            if self.selected_text:
+                self.selectionChanged.emit(self.selected_text)
+
+        except Exception as e:
+            logger.exception(f"Error in _update_selection: {e}")
     def add_highlight(self, text=None):
         """Add current selection to permanent highlights."""
         # Initialize page highlights if not exists
@@ -421,10 +452,13 @@ class PDFViewWidget(QWidget):
         # Load the PDF document
         self._load_pdf()
         
+        # Load existing extracts
+        self._load_extracts()
+        
         # Track view state for position restoration
         self.saved_state = {
             "page": 0,
-            "zoom_factor": 1.0,
+            "zoom_factor": 1.5,  # Increased default zoom
             "position": (0, 0)  # x, y coordinates
         }
         
@@ -603,7 +637,7 @@ class PDFViewWidget(QWidget):
         
         self.zoom_combo = QComboBox()
         self.zoom_combo.addItems(["50%", "75%", "100%", "125%", "150%", "200%", "300%"])
-        self.zoom_combo.setCurrentText("100%")
+        self.zoom_combo.setCurrentText("150%")  # Set default zoom to 150%
         self.zoom_combo.currentTextChanged.connect(self._on_zoom_changed)
         toolbar.addWidget(self.zoom_combo)
         
@@ -871,35 +905,53 @@ class PDFViewWidget(QWidget):
         """Create an extract from selected text."""
         selected_text = self.pdf_view.selected_text
         if not selected_text:
+            logger.warning("No text selected for extract creation")
+            QMessageBox.warning(self, "No Selection", "Please select text before creating an extract.")
             return
-        
-        # Highlight in PDF view
-        self.pdf_view.add_highlight()
-        
-        # Get position info
-        position = f"page:{self.current_page+1}"
-        
-        # Create extract
-        extract = self.extractor.create_extract(
-            document_id=self.document.id,
-            content=selected_text,
-            context=f"Page {self.current_page+1}",
-            position=position,
-            priority=50  # Default priority
-        )
-        
-        if extract:
-            # Reload extracts
-            self._load_extracts()
-            
-            # Emit signal
-            self.extractCreated.emit(extract.id)
-        else:
-            QMessageBox.warning(
-                self, "Extract Creation Failed", 
-                "Failed to create extract"
+
+        # Log the selected text for debugging
+        logger.info(f"Creating extract with text: '{selected_text[:50]}...'")
+
+        try:
+            # Highlight in PDF view
+            self.pdf_view.add_highlight()
+
+            # Get position info
+            position = f"page:{self.current_page+1}"
+
+            # Create extract
+            extract = self.extractor.create_extract(
+                document_id=self.document.id,
+                content=selected_text,
+                context=f"Page {self.current_page+1}",
+                position=position,
+                priority=50  # Default priority
             )
-    
+
+            if extract:
+                # Reload extracts
+                self._load_extracts()
+
+                # Emit signal
+                self.extractCreated.emit(extract.id)
+
+                # Show success message
+                QMessageBox.information(
+                    self, "Extract Created",
+                    f"Extract successfully created from page {self.current_page+1}."
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Extract Creation Failed",
+                    "Failed to create extract. See logs for details."
+                )
+        except Exception as e:
+            logger.exception(f"Error creating extract: {e}")
+            QMessageBox.critical(
+                self, "Error",
+                f"An error occurred while creating the extract: {str(e)}"
+            )
+   
     @pyqtSlot()
     def _on_add_bookmark(self):
         """Add a bookmark for the current page."""

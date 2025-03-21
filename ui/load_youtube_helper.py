@@ -861,6 +861,7 @@ def create_youtube_player_html(document, video_id, target_position):
     
     return html
 
+
 def add_debugging_tools(webview):
     """Add debugging tools to help troubleshoot WebChannel issues."""
     # JavaScript for debugging WebChannel communication

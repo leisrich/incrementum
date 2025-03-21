@@ -6,10 +6,10 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
     QPushButton, QLabel, QSplitter, QMessageBox,
-    QListWidget, QListWidgetItem, QMenu, QScrollBar
+    QListWidget, QListWidgetItem, QMenu, QScrollBar, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint
-from PyQt6.QtGui import QAction, QTextCursor, QFont
+from PyQt6.QtGui import QAction, QTextCursor, QFont, QTextOption
 
 from core.knowledge_base.models import Extract
 
@@ -37,38 +37,38 @@ class YouTubeTranscriptView(QWidget):
             self._load_transcript_from_file()
     
     def _create_ui(self):
-        """Create the UI components."""
-        main_layout = QVBoxLayout(self)
-        
-        # Header section
-        header_layout = QHBoxLayout()
-        
-        self.title_label = QLabel("Transcript")
-        self.title_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        header_layout.addWidget(self.title_label)
-        
-        header_layout.addStretch()
-        
-        self.create_extract_btn = QPushButton("Create Extract from Selection")
-        self.create_extract_btn.setEnabled(False)
-        self.create_extract_btn.clicked.connect(self._on_create_extract)
-        header_layout.addWidget(self.create_extract_btn)
-        
-        main_layout.addLayout(header_layout)
-        
-        # Transcript display
-        self.transcript_edit = QTextEdit()
-        self.transcript_edit.setReadOnly(True)
-        self.transcript_edit.setPlaceholderText("No transcript available for this video.")
-        self.transcript_edit.selectionChanged.connect(self._on_selection_changed)
-        self.transcript_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.transcript_edit.customContextMenuRequested.connect(self._on_context_menu)
-        
-        main_layout.addWidget(self.transcript_edit)
-        
-        # Status label
-        self.status_label = QLabel("Ready")
-        main_layout.addWidget(self.status_label)
+            """Create the UI components."""
+            main_layout = QVBoxLayout(self)
+            
+            # Header section
+            header_layout = QHBoxLayout()
+            
+            self.title_label = QLabel("Transcript")
+            self.title_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+            header_layout.addWidget(self.title_label)
+            
+            header_layout.addStretch()
+            
+            self.create_extract_btn = QPushButton("Create Extract from Selection")
+            self.create_extract_btn.setEnabled(False)
+            self.create_extract_btn.clicked.connect(self._on_create_extract)
+            header_layout.addWidget(self.create_extract_btn)
+            
+            main_layout.addLayout(header_layout)
+            
+            # Transcript display
+            self.transcript_edit = QTextEdit()
+            self.transcript_edit.setReadOnly(True)
+            self.transcript_edit.setPlaceholderText("No transcript available for this video.")
+            self.transcript_edit.selectionChanged.connect(self._on_selection_changed)
+            self.transcript_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.transcript_edit.customContextMenuRequested.connect(self._on_context_menu)
+            
+            main_layout.addWidget(self.transcript_edit)
+            
+            # Status label
+            self.status_label = QLabel("Ready")
+            main_layout.addWidget(self.status_label)
     
     def _load_transcript_from_file(self):
         """Load transcript from the metadata file."""
@@ -87,9 +87,9 @@ class YouTubeTranscriptView(QWidget):
                 self.status_label.setText("No transcript available for this video")
                 return
             
-            # Set transcript text
+            # Set transcript text with optimized formatting
             self.transcript_text = transcript
-            self.transcript_edit.setText(transcript)
+            self._format_transcript_text(transcript)
             
             # Update UI
             self.title_label.setText(f"Transcript: {metadata.get('title', 'YouTube Video')}")
@@ -98,6 +98,25 @@ class YouTubeTranscriptView(QWidget):
         except Exception as e:
             logger.exception(f"Error loading transcript: {e}")
             self.status_label.setText(f"Error loading transcript: {str(e)}")
+    
+    def _format_transcript_text(self, raw_transcript):
+        """Format the transcript text for better readability and horizontal space usage."""
+        try:
+            # Process the transcript text to optimize for width if needed
+            # For example, we could combine short lines or reformat the text
+            
+            # For now, simply set the text directly but with optimized document width
+            self.transcript_edit.document().setTextWidth(self.transcript_edit.viewport().width())
+            self.transcript_edit.setText(raw_transcript)
+            
+            # Apply a custom document width to the QTextDocument
+            doc = self.transcript_edit.document()
+            doc.setDefaultTextOption(QTextOption(Qt.AlignmentFlag.AlignLeft))
+            
+        except Exception as e:
+            logger.exception(f"Error formatting transcript: {e}")
+            # Fallback to basic text setting
+            self.transcript_edit.setText(raw_transcript)
     
     def set_document_id(self, document_id):
         """Set the document ID for extract creation."""

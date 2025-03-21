@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
-    QTabWidget, QLineEdit
+    QTabWidget, QLineEdit, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray
 try:
@@ -123,8 +123,12 @@ class DocumentView(QWidget):
         self.extract_view.extractSelected.connect(self._on_extract_selected)
         splitter.addWidget(self.extract_view)
         
-        # Set initial sizes
-        splitter.setSizes([700, 300])
+        # Set initial sizes - give almost all space to the PDF content (95/5 split)
+        splitter.setSizes([950, 50])
+        
+        # Make sure the split ratio is maintained when resizing
+        splitter.setStretchFactor(0, 19)  # Content gets 19x the stretch of extracts
+        splitter.setStretchFactor(1, 1)   # Extracts get 1x stretch factor
         
         layout.addWidget(splitter)
         
@@ -899,80 +903,6 @@ window.addEventListener('load', function() {
             label = QLabel(f"Error loading DOCX document: {str(e)}")
             self.content_layout.addWidget(label)
 
-    def _update_youtube_position(self):
-        """Update and save the current YouTube position."""
-        if not hasattr(self, 'web_view') or not self.web_view:
-            return
-            
-        # Use JavaScript to get the current position
-        self.web_view.page().runJavaScript(
-            "getCurrentPosition();",
-            self._handle_position_update
-        )
-        
-    def _handle_position_update(self, position):
-        """Handle position update from JavaScript."""
-        if position is None or not isinstance(position, (int, float)):
-            return
-            
-        # Update position label
-        if hasattr(self, 'position_label'):
-            self.position_label.setText(f"Position: {int(position)}s")
-        
-        # Update the document position in the database
-        if hasattr(self, 'document') and self.document:
-            try:
-                if position > 0:  # Don't save if at the beginning
-                    self.document.position = int(position)
-                    self.db_session.commit()
-                    logger.debug(f"Saved YouTube position: {position}")
-            except Exception as e:
-                logger.error(f"Error saving YouTube position: {e}")
-                
-    def _on_save_youtube_position(self):
-        """Manually save the current YouTube position."""
-        if hasattr(self, 'youtube_callback') and self.youtube_callback:
-            try:
-                self.youtube_callback.savePosition()
-                if hasattr(self, 'youtube_status'):
-                    self.youtube_status.setText(f"Position saved: {self.youtube_callback.current_position}s")
-            except Exception as e:
-                logger.error(f"Error manually saving position: {e}")
-        else:
-            self._update_youtube_position()  # Fallback
-        
-    def _on_seek_youtube_position(self):
-        """Handle seeking to a specific position in a YouTube video."""
-        if not hasattr(self, 'web_view') or not self.web_view or not hasattr(self, 'seek_time_input'):
-            return
-            
-        try:
-            # Get position from input
-            time_text = self.seek_time_input.text()
-            position = int(time_text)
-            
-            # Use JavaScript to seek
-            seek_script = f"seekToTime({position});"
-            self.web_view.page().runJavaScript(seek_script)
-            
-            # Update backend
-            if hasattr(self, 'youtube_callback') and self.youtube_callback:
-                self.youtube_callback.current_position = position
-                self.youtube_callback.onTimeUpdate(position)
-                
-            # Update label
-            if hasattr(self, 'position_label'):
-                self.position_label.setText(f"Position: {position}s")
-                
-            # Update status
-            if hasattr(self, 'youtube_status'):
-                self.youtube_status.setText(f"Seeking to position: {position}s")
-                
-        except (ValueError, TypeError) as e:
-            logger.error(f"Invalid position value: {e}")
-            if hasattr(self, 'youtube_status'):
-                self.youtube_status.setText(f"Invalid position: {e}")
-
     def _load_youtube(self):
         """Load YouTube video content."""
         try:
@@ -1161,7 +1091,15 @@ window.addEventListener('load', function() {
             error_widget.setWordWrap(True)
             self.content_layout.addWidget(error_widget)
             return False
-            
+    
+    def _center_widget(self, widget):
+        """Helper method to center a widget horizontally."""
+        hbox = QHBoxLayout()
+        hbox.addStretch(1)
+        hbox.addWidget(widget)
+        hbox.addStretch(1)
+        return hbox
+
     def _clear_content_layout(self):
         """Clear all widgets from the content layout."""
         if hasattr(self, 'content_layout'):
@@ -1650,6 +1588,73 @@ window.addEventListener('load', function() {
         except Exception as e:
             logger.exception(f"Error saving document: {e}")
             return False
+
+    def _update_youtube_position(self):
+        """Update and save the current YouTube position."""
+        if not hasattr(self, 'web_view') or not self.web_view:
+            return
+            
+        # Use JavaScript to get the current position
+        self.web_view.page().runJavaScript(
+            "getCurrentPosition();",
+            self._handle_position_update
+        )
+        
+    def _handle_position_update(self, position):
+        """Handle position update from JavaScript."""
+        if position is None or not isinstance(position, (int, float)):
+            return
+            
+        # Update position label
+        if hasattr(self, 'position_label'):
+            self.position_label.setText(f"Position: {int(position)}s")
+        
+        # Update the document position in the database
+        if hasattr(self, 'document') and self.document:
+            try:
+                if position > 0:  # Don't save if at the beginning
+                    self.document.position = int(position)
+                    self.db_session.commit()
+                    logger.debug(f"Saved YouTube position: {position}")
+            except Exception as e:
+                logger.error(f"Error saving YouTube position: {e}")
+                
+    def _on_save_youtube_position(self):
+        """Manually save the current YouTube position."""
+        if hasattr(self, 'youtube_callback') and self.youtube_callback:
+            try:
+                self.youtube_callback.savePosition()
+                logger.debug(f"Position saved: {self.youtube_callback.current_position}s")
+            except Exception as e:
+                logger.error(f"Error manually saving position: {e}")
+        else:
+            self._update_youtube_position()  # Fallback
+        
+    def _on_seek_youtube_position(self):
+        """Handle seeking to a specific position in a YouTube video."""
+        if not hasattr(self, 'web_view') or not self.web_view or not hasattr(self, 'seek_time_input'):
+            return
+            
+        try:
+            # Get position from input
+            time_text = self.seek_time_input.text()
+            position = int(time_text)
+            
+            # Use JavaScript to seek
+            seek_script = f"seekToTime({position});"
+            self.web_view.page().runJavaScript(seek_script)
+            
+            # Update backend
+            if hasattr(self, 'youtube_callback') and self.youtube_callback:
+                self.youtube_callback.current_position = position
+                self.youtube_callback.onTimeUpdate(position)
+                
+            # Update label
+            if hasattr(self, 'position_label'):
+                self.position_label.setText(f"Position: {position}s")
+                
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid position value: {e}")
 
     # Import necessary module to avoid error
     from datetime import datetime
