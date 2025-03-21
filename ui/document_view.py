@@ -6,14 +6,19 @@ import logging
 from typing import Optional, List, Dict
 from datetime import datetime
 import json
+import time
+import tempfile
+from io import BytesIO
+from pathlib import Path
+import base64
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
-    QTabWidget
+    QTabWidget, QLineEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtWebEngineCore import QWebEngineSettings
@@ -27,7 +32,7 @@ from core.knowledge_base.models import Document, Extract
 from core.content_extractor.extractor import ContentExtractor
 from .document_extracts_view import DocumentExtractsView
 from .load_epub_helper import setup_epub_webview
-from .load_youtube_helper import setup_youtube_webview
+from .load_youtube_helper import setup_youtube_webview, extract_video_id_from_document
 from .youtube_transcript_view import YouTubeTranscriptView
 
 logger = logging.getLogger(__name__)
@@ -508,65 +513,77 @@ window.addEventListener('load', function() {
         
         return html_content
     
+    def keep_alive(self, obj):
+        """Keep a reference to an object to prevent garbage collection."""
+        if not hasattr(self, '_kept_references'):
+            self._kept_references = []
+        self._kept_references.append(obj)
+        
     def load_document(self, document_id):
-        """Load and display a document."""
+        """Load a document for viewing.
+        
+        Args:
+            document_id (int): ID of the document to load.
+        """
         try:
-            # Clear previous content
-            for i in reversed(range(self.content_layout.count())):
-                item = self.content_layout.itemAt(i)
-                if item.widget():
-                    item.widget().deleteLater()
+            # Keep any existing references alive
+            if hasattr(self, 'webview'):
+                self.keep_alive(self.webview)
+            if hasattr(self, 'youtube_callback'):
+                self.keep_alive(self.youtube_callback)
+                
+            # Clear the document area
+            self._clear_content_layout()
             
-            # Load document from database
-            self.document = self.db_session.query(Document).get(document_id)
-            if not self.document:
-                logger.error(f"Document not found: {document_id}")
-                return
-            
-            # Update document last accessed time
-            self.document.last_accessed = datetime.utcnow()
-            self.db_session.commit()
-            
-            # Load document extracts
-            self.extract_view.load_extracts_for_document(document_id)
-            
-            # Special case: check if a jina_web document is actually a YouTube video
-            if self.document.content_type == 'jina_web' and hasattr(self.document, 'source_url'):
-                source_url = self.document.source_url
-                if source_url and ('youtube.com' in source_url or 'youtu.be' in source_url):
-                    logger.info(f"Detected YouTube URL in jina_web document: {self.document.id}, updating content type")
-                    self.document.content_type = 'youtube'
-                    self.db_session.commit()
-            
-            # Display based on content type
-            if self.document.content_type == 'pdf':
-                self._load_pdf()
-            elif self.document.content_type == 'epub':
-                self._load_epub()
-            elif self.document.content_type == 'txt':
-                self._load_text()
-            elif self.document.content_type == 'html' or self.document.content_type == 'htm':
-                self._load_html()
-            elif self.document.content_type == 'docx':
-                self._load_docx()
-            elif self.document.content_type == 'youtube':
-                self._load_youtube()
-            elif self.document.content_type == 'jina_web':
-                # Try to load as HTML for jina_web documents
-                self._load_html()
-            else:
-                # Unsupported format
-                label = QLabel(f"Unsupported document type: {self.document.content_type}")
-                self.content_layout.addWidget(label)
-                logger.warning(f"Unsupported document type: {self.document.content_type}")
-            
-            # Remember document ID
+            # Get the document
             self.document_id = document_id
+            self.document = self.db_session.query(Document).filter_by(id=document_id).first()
             
+            if not self.document:
+                raise ValueError(f"Document not found: {document_id}")
+            
+            # Update extracts view
+            if hasattr(self, 'extract_view') and self.extract_view:
+                self.extract_view.load_extracts_for_document(document_id)
+            
+            # Load the document content based on its type
+            doc_type = self.document.content_type.lower() if hasattr(self.document, 'content_type') and self.document.content_type else "text"
+            
+            logger.debug(f"Loading document: {self.document.title} (Type: {doc_type})")
+            
+            # Handle different document types
+            if doc_type == "youtube":
+                self._load_youtube()
+            elif doc_type == "epub":
+                self._load_epub()
+            elif doc_type == "pdf":
+                self._load_pdf()
+            elif doc_type == "html" or doc_type == "htm":
+                self._load_html()
+            elif doc_type == "txt":
+                self._load_text()
+            else:
+                # Default to text view
+                self._load_text()
+            
+            # Set window title to document title
+            if hasattr(self, 'setWindowTitle') and callable(self.setWindowTitle):
+                self.setWindowTitle(self.document.title)
+                
+            return True
         except Exception as e:
-            logger.exception(f"Error loading document: {e}")
-            label = QLabel(f"Error loading document: {str(e)}")
-            self.content_layout.addWidget(label)
+            logger.exception(f"Error loading document {document_id}: {e}")
+            
+            # Show error in view
+            error_widget = QLabel(f"Error loading document: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            
+            self._clear_content_layout()
+            if hasattr(self, 'content_layout'):
+                self.content_layout.addWidget(error_widget)
+                
+            return False
     
     def _load_pdf(self):
         """Load and display a PDF document."""
@@ -881,186 +898,261 @@ window.addEventListener('load', function() {
             logger.exception(f"Error loading DOCX document: {e}")
             label = QLabel(f"Error loading DOCX document: {str(e)}")
             self.content_layout.addWidget(label)
+
+    def _update_youtube_position(self):
+        """Update and save the current YouTube position."""
+        if not hasattr(self, 'web_view') or not self.web_view:
+            return
             
-    def _load_youtube(self):
-        """Load and display a YouTube video."""
+        # Use JavaScript to get the current position
+        self.web_view.page().runJavaScript(
+            "getCurrentPosition();",
+            self._handle_position_update
+        )
+        
+    def _handle_position_update(self, position):
+        """Handle position update from JavaScript."""
+        if position is None or not isinstance(position, (int, float)):
+            return
+            
+        # Update position label
+        if hasattr(self, 'position_label'):
+            self.position_label.setText(f"Position: {int(position)}s")
+        
+        # Update the document position in the database
+        if hasattr(self, 'document') and self.document:
+            try:
+                if position > 0:  # Don't save if at the beginning
+                    self.document.position = int(position)
+                    self.db_session.commit()
+                    logger.debug(f"Saved YouTube position: {position}")
+            except Exception as e:
+                logger.error(f"Error saving YouTube position: {e}")
+                
+    def _on_save_youtube_position(self):
+        """Manually save the current YouTube position."""
+        if hasattr(self, 'youtube_callback') and self.youtube_callback:
+            try:
+                self.youtube_callback.savePosition()
+                if hasattr(self, 'youtube_status'):
+                    self.youtube_status.setText(f"Position saved: {self.youtube_callback.current_position}s")
+            except Exception as e:
+                logger.error(f"Error manually saving position: {e}")
+        else:
+            self._update_youtube_position()  # Fallback
+        
+    def _on_seek_youtube_position(self):
+        """Handle seeking to a specific position in a YouTube video."""
+        if not hasattr(self, 'web_view') or not self.web_view or not hasattr(self, 'seek_time_input'):
+            return
+            
         try:
+            # Get position from input
+            time_text = self.seek_time_input.text()
+            position = int(time_text)
+            
+            # Use JavaScript to seek
+            seek_script = f"seekToTime({position});"
+            self.web_view.page().runJavaScript(seek_script)
+            
+            # Update backend
+            if hasattr(self, 'youtube_callback') and self.youtube_callback:
+                self.youtube_callback.current_position = position
+                self.youtube_callback.onTimeUpdate(position)
+                
+            # Update label
+            if hasattr(self, 'position_label'):
+                self.position_label.setText(f"Position: {position}s")
+                
+            # Update status
+            if hasattr(self, 'youtube_status'):
+                self.youtube_status.setText(f"Seeking to position: {position}s")
+                
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid position value: {e}")
+            if hasattr(self, 'youtube_status'):
+                self.youtube_status.setText(f"Invalid position: {e}")
+
+    def _load_youtube(self):
+        """Load YouTube video content."""
+        try:
+            # Import required widgets here to ensure they're in scope
+            from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit, QSplitter, QSizePolicy
+            from PyQt6.QtWebEngineWidgets import QWebEngineView
+            from PyQt6.QtCore import Qt
+            
             if not HAS_WEBENGINE:
                 raise ImportError("YouTube videos require QWebEngineView which is not available")
+                
+            # Clear any existing content from the layout
+            self._clear_content_layout()
             
-            if not self.document.file_path or not os.path.isfile(self.document.file_path):
-                raise FileNotFoundError(f"YouTube metadata file not found: {self.document.file_path}")
-
-            # Read metadata from file
-            with open(self.document.file_path, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
+            # Get video ID
+            video_id = extract_video_id_from_document(self.document)
             
-            video_id = metadata.get('video_id')
             if not video_id:
-                raise ValueError("No video ID found in metadata")
-
-            # Set window title
-            title = metadata.get('title', 'YouTube Video')
-            
-            # Create the web view for the YouTube player
-            self.web_view = QWebEngineView()
-            
-            # Configure settings
-            self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-            self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
-            self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
+                logger.error("Could not extract YouTube video ID")
+                raise ValueError("Could not extract YouTube video ID from document")
             
             # Create a splitter to hold both the video and transcript
             self.content_splitter = QSplitter(Qt.Orientation.Vertical)
+            self.content_splitter.setChildrenCollapsible(False)  # Prevent sections from being fully collapsed
             
-            # Add web view (YouTube player) to the splitter
-            self.content_splitter.addWidget(self.web_view)
+            # Create a container for the video
+            video_container = QWidget()
+            video_layout = QVBoxLayout(video_container)
+            video_layout.setContentsMargins(0, 0, 0, 0)
+            video_layout.setSpacing(5)
             
-            # Add to layout
-            self.content_layout.addWidget(self.content_splitter)
+            # Create a WebView and make it expand to fill available space
+            self.webview = QWebEngineView()
+            self.webview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)  # Allow expansion
+            video_layout.addWidget(self.webview, stretch=1)  # Add stretch to prioritize video
             
-            # Load HTML for YouTube player
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <style>
-                    body {{ margin: 0; padding: 0; overflow: hidden; }}
-                    #player {{ width: 100%; height: 100vh; }}
-                </style>
-            </head>
-            <body>
-                <div id="player"></div>
+            # Get the target position (if available)
+            target_position = 0
+            if hasattr(self.document, 'position') and self.document.position:
+                target_position = self.document.position
                 
-                <script>
-                    // YouTube API
-                    var tag = document.createElement('script');
-                    tag.src = "https://www.youtube.com/iframe_api";
-                    var firstScriptTag = document.getElementsByTagName('script')[0];
-                    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-                    
-                    var player;
-                    function onYouTubeIframeAPIReady() {{
-                        player = new YT.Player('player', {{
-                            videoId: '{video_id}',
-                            playerVars: {{
-                                'autoplay': 0,
-                                'rel': 0,
-                                'cc_load_policy': 1,
-                                'modestbranding': 1
-                            }},
-                            events: {{
-                                'onReady': onPlayerReady,
-                                'onStateChange': onPlayerStateChange
-                            }}
-                        }});
-                    }}
-                    
-                    function onPlayerReady(event) {{
-                        console.log('Player ready');
-                    }}
-                    
-                    function onPlayerStateChange(event) {{
-                        console.log('Player state changed');
-                        // 0=ended, 1=playing, 2=paused, 3=buffering, 5=video cued
-                        if (event.data === 0) {{
-                            console.log('Video ended');
-                        }}
-                    }}
-
-                    // Function to get player state
-                    function getPlayerState() {{
-                        if (typeof player !== 'undefined' && player) {{
-                            return {{
-                                currentTime: player.getCurrentTime(),
-                                playerState: player.getPlayerState()
-                            }};
-                        }}
-                        return null;
-                    }}
-                </script>
-            </body>
-            </html>
-            """
+            # Add controls widget with more compact layout
+            controls_widget = QWidget()
+            timestamp_layout = QHBoxLayout(controls_widget)
+            timestamp_layout.setContentsMargins(5, 2, 5, 2)
+            timestamp_layout.setSpacing(2)
             
-            # Load the HTML content
-            self.web_view.setHtml(html_content, QUrl(f"https://www.youtube.com/watch?v={video_id}"))
+            # Add position label
+            self.position_label = QLabel(f"Position: {target_position}s")
+            timestamp_layout.addWidget(self.position_label)
             
-            # Check for transcript in metadata
-            if 'transcript' in metadata and metadata['transcript']:
-                # Create transcript view
-                self.transcript_view = YouTubeTranscriptView(
-                    self.db_session,
-                    document_id=self.document_id,
-                    metadata_file=self.document.file_path
-                )
+            # Add spacer between position and seek controls
+            timestamp_layout.addStretch(1)
+            
+            # Add seek label
+            timestamp_label = QLabel("Seek to:")
+            timestamp_layout.addWidget(timestamp_label)
+            
+            # Add input field for timestamp
+            self.seek_time_input = QLineEdit()
+            self.seek_time_input.setPlaceholderText("Enter time in seconds or MM:SS")
+            self.seek_time_input.setText(str(target_position))
+            timestamp_layout.addWidget(self.seek_time_input)
+            
+            # Add seek button
+            seek_button = QPushButton("Seek")
+            seek_button.clicked.connect(self._on_seek_youtube_position)
+            timestamp_layout.addWidget(seek_button)
+            
+            # Add a save button for manual saving of position
+            save_button = QPushButton("Save Position")
+            save_button.clicked.connect(self._on_save_youtube_position)
+            timestamp_layout.addWidget(save_button)
+            
+            # Add controls to video container (no stretch, keep it compact)
+            video_layout.addWidget(controls_widget)
+            
+            # Add video container to the splitter
+            self.content_splitter.addWidget(video_container)
+            
+            # Set up the webview with the YouTube player
+            success, callback = setup_youtube_webview(
+                self.webview, 
+                self.document, 
+                video_id, 
+                target_position,
+                self.db_session
+            )
+            
+            if success and callback:
+                # Store references for later use
+                self.youtube_callback = callback
+                self.web_view = self.webview
+            
                 
-                # Connect extract created signal
-                self.transcript_view.extractCreated.connect(self.extractCreated)
+                # Check for transcript in metadata
+                if hasattr(self.document, 'file_path') and self.document.file_path and os.path.exists(self.document.file_path):
+                    try:
+                        with open(self.document.file_path, 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+                            if 'transcript' in metadata and metadata['transcript']:
+                                # Create transcript view
+                                self.transcript_view = YouTubeTranscriptView(
+                                    self.db_session,
+                                    document_id=self.document_id,
+                                    metadata_file=self.document.file_path
+                                )
+                                self.transcript_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                                
+                                # Connect extract created signal
+                                self.transcript_view.extractCreated.connect(self.extractCreated)
+                                
+                                # Add to splitter
+                                self.content_splitter.addWidget(self.transcript_view)
+                                
+                                # Set initial sizes (70% video, 30% transcript)
+                                self.content_splitter.setSizes([700, 300])
+                            else:
+                                # No transcript, show message
+                                no_transcript_widget = QWidget()
+                                no_transcript_layout = QVBoxLayout(no_transcript_widget)
+                                
+                                no_transcript_label = QLabel(
+                                    "No transcript is available for this video.\n\n"
+                                    "Possible reasons:\n"
+                                    "• Transcripts are disabled by the video creator\n"
+                                    "• The video does not have any captions\n"
+                                    "• The video is age-restricted or private\n\n"
+                                    "Try reimporting or using a different video."
+                                )
+                                no_transcript_label.setWordWrap(True)
+                                no_transcript_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                                no_transcript_label.setStyleSheet("background-color: #f0f0f0; padding: 20px; border-radius: 5px;")
+                                
+                                reimport_button = QPushButton("Reimport Video with Transcript")
+                                reimport_button.clicked.connect(self._on_reimport_youtube)
+                                
+                                no_transcript_layout.addWidget(reimport_button)
+                                no_transcript_layout.addWidget(no_transcript_label)
+                                
+                                # Add to splitter
+                                self.content_splitter.addWidget(no_transcript_widget)
+                    except Exception as e:
+                        logger.warning(f"Could not load transcript metadata: {e}")
                 
-                # Add to splitter
-                self.content_splitter.addWidget(self.transcript_view)
+                # Add the splitter to the main layout and make it expand
+                self.content_layout.addWidget(self.content_splitter, stretch=1)
                 
-                # Set size ratios (60% video, 40% transcript)
-                self.content_splitter.setSizes([600, 400])
-                
-                logger.info(f"Loaded YouTube video with transcript: {video_id}")
+                logger.info(f"Loaded YouTube video: {video_id}")
+                return True
             else:
-                logger.info(f"Loaded YouTube video without transcript: {video_id}, metadata keys: {list(metadata.keys())}")
+                error_msg = f"Failed to set up YouTube player for video {video_id}"
+                self.youtube_status.setText(error_msg)
+                self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
+                logger.error(error_msg)
                 
-                # Create a label explaining that no transcript is available
-                no_transcript_label = QLabel(
-                    "No transcript is available for this video.\n\n"
-                    "Possible reasons:\n"
-                    "• Transcripts are disabled by the video creator\n"
-                    "• The video does not have any captions\n"
-                    "• The video is age-restricted or private\n\n"
-                    "Try reimporting or using a different video."
-                )
-                no_transcript_label.setWordWrap(True)
-                no_transcript_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                no_transcript_label.setStyleSheet("background-color: #f0f0f0; padding: 20px; border-radius: 5px;")
+                # Add the container to the main layout anyway to show the error
+                self.content_layout.addWidget(self.content_splitter, stretch=1)
+                return False
                 
-                # Create a button to reimport the video with transcript
-                reimport_container = QWidget()
-                reimport_layout = QVBoxLayout(reimport_container)
-                
-                reimport_button = QPushButton("Reimport Video with Transcript")
-                reimport_button.clicked.connect(self._on_reimport_youtube)
-                reimport_layout.addWidget(reimport_button)
-                reimport_layout.addWidget(no_transcript_label)
-                
-                # Add to splitter
-                self.content_splitter.addWidget(reimport_container)
-            
-            # Save original source URL if available
-            self.source_url = metadata.get('source_url', '')
-            
-            # Add a callback to handle JavaScript messages
-            self.youtube_callback = None
-            
-            # Setup position tracking if supported
-            if hasattr(setup_youtube_webview, '__call__'):
-                try:
-                    logger.debug(f"Setting up YouTube position tracking for {self.document_id}")
-                    self.youtube_callback = setup_youtube_webview(
-                        self.web_view,
-                        self.document_id,
-                        self.db_session
-                    )
-                except Exception as e:
-                    logger.exception(f"Error setting up YouTube position tracking: {e}")
-            
         except Exception as e:
-            logger.exception(f"Error loading YouTube video: {e}")
+            logger.exception(f"Error loading YouTube content: {e}")
+            from PyQt6.QtWidgets import QLabel
             error_widget = QLabel(f"Error loading YouTube video: {str(e)}")
-            error_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            error_widget.setWordWrap(True)
             error_widget.setStyleSheet("color: red; padding: 20px;")
+            error_widget.setWordWrap(True)
             self.content_layout.addWidget(error_widget)
-    
+            return False
+            
+    def _clear_content_layout(self):
+        """Clear all widgets from the content layout."""
+        if hasattr(self, 'content_layout'):
+            # Remove all widgets from the layout
+            while self.content_layout.count():
+                item = self.content_layout.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.setParent(None)
+                    widget.deleteLater()
+
     def _handle_webview_selection(self, selected_text):
         """Handle text selection from web view."""
         if selected_text and selected_text.strip():
@@ -1351,9 +1443,20 @@ window.addEventListener('load', function() {
             logger.exception(f"Error restoring view state: {e}")
     
     def closeEvent(self, event):
-        """Handle close event to save document position."""
-        self._save_position()
-        self._save_view_state()
+        try:
+            # Force save YouTube position if applicable
+            if (hasattr(self, 'document') and self.document and 
+                self.document.content_type == 'youtube' and 
+                hasattr(self, 'youtube_callback') and self.youtube_callback):
+                
+                logger.info(f"Saving YouTube position on close: {self.youtube_callback.current_position}")
+                self.youtube_callback.savePosition()
+                
+            self._save_position()
+            self._save_view_state()
+            self.db_session.commit()  # Ensure changes are committed
+        except Exception as e:
+            logger.exception(f"Error in closeEvent: {e}")
         super().closeEvent(event)
     
     def _save_position(self):
@@ -1425,74 +1528,82 @@ window.addEventListener('load', function() {
             logger.exception(f"Error restoring document position: {e}")
 
     def _on_reimport_youtube(self):
-        """Reimport the current YouTube video to try getting transcript."""
-        if not hasattr(self, 'document') or not self.document:
-            return
-        
+        """Reimport the YouTube video with transcript."""
         try:
-            # Get the source URL
-            source_url = self.document.source_url
-            if not source_url:
-                QMessageBox.warning(
-                    self, "Reimport Error", 
-                    "Cannot reimport video: No source URL available."
-                )
-                return
+            from PyQt6.QtWidgets import QMessageBox
             
-            # Show a message about what's happening
-            QMessageBox.information(
-                self, "Reimporting Video", 
-                "The video will be reimported to attempt to get a transcript. "
-                "This may take a moment. The page will reload when complete."
+            # Show confirmation dialog
+            reply = QMessageBox.question(
+                self, 
+                "Reimport YouTube Video",
+                "This will reimport the YouTube video and attempt to fetch the transcript again. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
             )
             
-            # Use the YouTube handler to reimport
-            from core.document_processor.handlers.youtube_handler import YouTubeHandler
-            
-            # Create a new handler instance
-            youtube_handler = YouTubeHandler()
-            
-            # Download from URL and get metadata
-            file_path, metadata = youtube_handler.download_from_url(source_url)
-            
-            if not file_path:
-                QMessageBox.warning(
-                    self, "Reimport Error", 
-                    "Failed to reimport the video. Please try again later."
-                )
-                return
-            
-            # Check if transcript was found
-            if 'transcript' not in metadata or not metadata['transcript']:
-                QMessageBox.warning(
-                    self, "No Transcript Available", 
-                    "No transcript could be found for this video.\n\n"
-                    "Possible reasons:\n"
-                    "• Transcripts are disabled by the video creator\n"
-                    "• The video does not have any captions\n"
-                    "• The video is age-restricted or private\n\n"
-                    "Try a different video or manually create extracts."
-                )
-                return
-            
-            # Update the document with the new file path
-            self.document.file_path = file_path
-            self.db_session.commit()
-            
-            # Reload the document
-            self.load_document(self.document_id)
-            
-            QMessageBox.information(
-                self, "Success", 
-                "The video has been reimported successfully with its transcript."
-            )
-            
+            if reply == QMessageBox.StandardButton.Yes:
+                # Check if we have a source URL or video ID
+                if hasattr(self.document, 'source_url') and self.document.source_url:
+                    source_url = self.document.source_url
+                    
+                    # Import the document processor in the handler to avoid circular imports
+                    from core.document_processor.handlers.youtube_handler import YouTubeHandler
+                    handler = YouTubeHandler()
+                    
+                    # Extract video ID from source URL
+                    video_id = handler._extract_video_id(source_url)
+                    
+                    if video_id:
+                        # Show importing message
+                        self.youtube_status.setText(f"Reimporting video {video_id} with transcript...")
+                        self.youtube_status.setStyleSheet("color: #000; background-color: #ffd; padding: 5px; border-radius: 3px;")
+                        
+                        # Process in a background thread to avoid UI freezing
+                        from PyQt6.QtCore import QThread, pyqtSignal
+                        
+                        class ImportThread(QThread):
+                            importFinished = pyqtSignal(bool, str)
+                            
+                            def __init__(self, handler, url, parent=None):
+                                super().__init__(parent)
+                                self.handler = handler
+                                self.url = url
+                                
+                            def run(self):
+                                try:
+                                    # Reimport with force_transcript=True
+                                    success = self.handler.process_url(self.url, force_transcript=True)
+                                    self.importFinished.emit(success, "")
+                                except Exception as e:
+                                    self.importFinished.emit(False, str(e))
+                        
+                        # Create and start the thread
+                        self.import_thread = ImportThread(handler, source_url, self)
+                        self.import_thread.importFinished.connect(self._on_reimport_finished)
+                        self.import_thread.start()
+                    else:
+                        self.youtube_status.setText("Could not extract video ID from URL")
+                        self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
+                else:
+                    self.youtube_status.setText("No source URL available for reimport")
+                    self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
         except Exception as e:
-            logger.exception(f"Error reimporting YouTube video: {e}")
-            QMessageBox.warning(
-                self, "Reimport Error", 
-                f"Failed to reimport the video: {str(e)}"
-            )
+            logger.exception(f"Error starting YouTube reimport: {e}")
+            self.youtube_status.setText(f"Error: {str(e)}")
+            self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
+            
+    def _on_reimport_finished(self, success, error_msg):
+        """Handle completion of YouTube reimport."""
+        if success:
+            self.youtube_status.setText("Video reimported successfully. Reloading...")
+            self.youtube_status.setStyleSheet("color: green; background-color: #efe; padding: 5px; border-radius: 3px;")
+            
+            # Reload the document after a short delay
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(1500, lambda: self.load_document(self.document_id))
+        else:
+            self.youtube_status.setText(f"Reimport failed: {error_msg}")
+            self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
 
     def save_document(self):
         """Save the current document state to the database."""
