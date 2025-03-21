@@ -15,7 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
-from core.knowledge_base.models import RSSFeed, RSSFeedEntry, Document, Category
+from core.knowledge_base.models import RSSFeed, RSSFeedEntry, Document, Category, rss_feed_document_association
 from core.utils.settings_manager import SettingsManager
 
 logger = logging.getLogger(__name__)
