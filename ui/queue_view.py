@@ -8,12 +8,12 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QComboBox, QFormLayout, QSpinBox, QSplitter,
-    QMessageBox, QMenu, QCheckBox, QTabWidget
+    QMessageBox, QMenu, QCheckBox, QTabWidget, QTreeWidget, QTreeWidgetItem
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex
 from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut
 
-from core.knowledge_base.models import Document, Category
+from core.knowledge_base.models import Document, Category, Extract
 from core.spaced_repetition import FSRSAlgorithm
 from core.utils.settings_manager import SettingsManager
 from core.utils.shortcuts import ShortcutManager
@@ -226,18 +226,18 @@ class QueueView(QWidget):
         queue_layout = QVBoxLayout(queue_tab)
         
         # Queue table
-        self.queue_table = QTableWidget()
+        self.queue_table = QTreeWidget()
         self.queue_table.setColumnCount(6)
-        self.queue_table.setHorizontalHeaderLabels(["Title", "Category", "Priority", "Reading Count", "Last Read", "Next Due"])
-        self.queue_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.queue_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.queue_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.queue_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.queue_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.queue_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self.queue_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.queue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.queue_table.doubleClicked.connect(self._on_document_selected)
+        self.queue_table.setHeaderLabels(["Title", "Category", "Priority", "Reading Count", "Last Read", "Next Due"])
+        self.queue_table.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.queue_table.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.queue_table.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.queue_table.header().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.queue_table.header().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.queue_table.header().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.queue_table.setSelectionBehavior(QTreeWidget.SelectionBehavior.SelectRows)
+        self.queue_table.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
+        self.queue_table.itemDoubleClicked.connect(lambda item, column: self._on_tree_item_selected(item, column))
         self.queue_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.queue_table.customContextMenuRequested.connect(self._on_queue_context_menu)
         
@@ -294,9 +294,9 @@ class QueueView(QWidget):
             self._populate_calendar_view(doc_by_date)
             
             # If there are documents in the queue, select the first one
-            if self.queue_table.rowCount() > 0:
-                self.queue_table.selectRow(0)
-                first_doc_id = self.queue_table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+            if self.queue_table.topLevelItemCount() > 0:
+                self.queue_table.topLevelItem(0).setSelected(True)
+                first_doc_id = self.queue_table.topLevelItem(0).text(0)
                 self.set_current_document(first_doc_id)
             
         except Exception as e:
@@ -406,7 +406,7 @@ class QueueView(QWidget):
     
     def _populate_queue_table(self, doc_by_date: Dict[str, List[Document]]):
         """Populate the queue table with documents."""
-        self.queue_table.setRowCount(0)  # Clear table
+        self.queue_table.clear()
         
         row = 0
         
@@ -448,55 +448,70 @@ class QueueView(QWidget):
             self._update_navigation_buttons()
             
             # If there are documents in the queue, select the first row by default
-            if self.queue_table.rowCount() > 0:
-                self.queue_table.selectRow(0)
+            if self.queue_table.topLevelItemCount() > 0:
+                self.queue_table.topLevelItem(0).setSelected(True)
                 
         except Exception as e:
             logger.exception(f"Error ensuring queue order: {e}")
     
     def _add_document_to_queue(self, doc: Document, row: int, background_color=None):
         """Add a document to the queue table."""
-        self.queue_table.insertRow(row)
-        
-        # Title
-        title_item = QTableWidgetItem(doc.title)
-        title_item.setData(Qt.ItemDataRole.UserRole, doc.id)
+        item = QTreeWidgetItem()
+        item.setText(0, doc.title)
+        item.setText(1, doc.category.name if doc.category else "Uncategorized")
+        item.setText(2, str(doc.priority))
+        item.setText(3, str(doc.reading_count or 0))
+        item.setText(4, doc.last_reading_date.strftime("%Y-%m-%d") if doc.last_reading_date else "Never")
+        item.setText(5, doc.next_reading_date.strftime("%Y-%m-%d") if doc.next_reading_date else "New")
+        # Store document ID as data
+        item.setData(0, Qt.ItemDataRole.UserRole, doc.id)
         if background_color:
-            title_item.setBackground(QBrush(background_color))
-        self.queue_table.setItem(row, 0, title_item)
+            item.setBackground(0, QBrush(background_color))
+            item.setBackground(1, QBrush(background_color))
+            item.setBackground(2, QBrush(background_color))
+            item.setBackground(3, QBrush(background_color))
+            item.setBackground(4, QBrush(background_color))
+            item.setBackground(5, QBrush(background_color))
         
-        # Category
-        category_name = doc.category.name if doc.category else "Uncategorized"
-        category_item = QTableWidgetItem(category_name)
-        if background_color:
-            category_item.setBackground(QBrush(background_color))
-        self.queue_table.setItem(row, 1, category_item)
+        # Add extracts as child items
+        self._add_extracts_to_document(doc, item)
         
-        # Priority
-        priority_item = QTableWidgetItem(str(doc.priority))
-        if background_color:
-            priority_item.setBackground(QBrush(background_color))
-        self.queue_table.setItem(row, 2, priority_item)
+        self.queue_table.insertTopLevelItem(row, item)
+    
+    def _add_extracts_to_document(self, doc: Document, parent_item: QTreeWidgetItem):
+        """Add extracts as child items under the document."""
+        # Get extracts for this document
+        extracts = self.db_session.query(Extract).filter(Extract.document_id == doc.id).all()
         
-        # Reading count
-        count_item = QTableWidgetItem(str(doc.reading_count or 0))
-        if background_color:
-            count_item.setBackground(QBrush(background_color))
-        self.queue_table.setItem(row, 3, count_item)
-        
-        # Last read
-        last_read = doc.last_reading_date.strftime("%Y-%m-%d") if doc.last_reading_date else "Never"
-        last_read_item = QTableWidgetItem(last_read)
-        if background_color:
-            last_read_item.setBackground(QBrush(background_color))
-        self.queue_table.setItem(row, 4, last_read_item)
-        
-        # Next due
-        next_due = doc.next_reading_date.strftime("%Y-%m-%d") if doc.next_reading_date else "New"
-        next_due_item = QTableWidgetItem(next_due)
-        if background_color:
-            next_due_item.setBackground(QBrush(background_color))
-        self.queue_table.setItem(row, 5, next_due_item)
+        for extract in extracts:
+            extract_item = QTreeWidgetItem(parent_item)
+            # Use a shorter preview of the content for the title column
+            content_preview = extract.content[:80] + "..." if len(extract.content) > 80 else extract.content
+            extract_item.setText(0, content_preview)
+            
+            # Set other columns
+            extract_item.setText(1, "") # No category for extracts
+            extract_item.setText(2, str(extract.priority) if extract.priority else "")
+            extract_item.setText(3, "") # No reading count for extracts
+            extract_item.setText(4, extract.last_reviewed.strftime("%Y-%m-%d") if extract.last_reviewed else "")
+            extract_item.setText(5, "") # No next due for extracts
+            
+            # Store extract ID as data with a different role to distinguish from document IDs
+            extract_item.setData(0, Qt.ItemDataRole.UserRole, extract.id)
+            extract_item.setData(0, Qt.ItemDataRole.UserRole+1, "extract") # Type marker
+            
+            # Use a different background color for extract items
+            extract_item.setBackground(0, QBrush(QColor(240, 240, 240)))
+            
+            # Add any child extracts if this is a hierarchical extract
+            if extract.children:
+                for child_extract in extract.children:
+                    child_item = QTreeWidgetItem(extract_item)
+                    child_content_preview = child_extract.content[:80] + "..." if len(child_extract.content) > 80 else child_extract.content
+                    child_item.setText(0, child_content_preview)
+                    child_item.setData(0, Qt.ItemDataRole.UserRole, child_extract.id)
+                    child_item.setData(0, Qt.ItemDataRole.UserRole+1, "extract")
+                    child_item.setBackground(0, QBrush(QColor(245, 245, 245)))
     
     def _populate_calendar_view(self, doc_by_date: Dict[str, List[Document]]):
         """Populate the calendar view with documents grouped by date."""
@@ -513,39 +528,17 @@ class QueueView(QWidget):
             overdue_group = QGroupBox("Overdue Documents")
             overdue_layout = QVBoxLayout(overdue_group)
             
-            overdue_table = QTableWidget()
+            overdue_table = QTreeWidget()
             overdue_table.setColumnCount(4)
-            overdue_table.setHorizontalHeaderLabels(["Title", "Category", "Priority", "Due Date"])
-            overdue_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            overdue_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            overdue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            overdue_table.doubleClicked.connect(self._on_document_selected)
+            overdue_table.setHeaderLabels(["Title", "Category", "Priority", "Due Date"])
+            overdue_table.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            overdue_table.setSelectionBehavior(QTreeWidget.SelectionBehavior.SelectRows)
+            overdue_table.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
+            overdue_table.itemDoubleClicked.connect(lambda item, column: self._on_tree_item_selected(item, column))
             
             for i, doc in enumerate(doc_by_date["Overdue"]):
-                overdue_table.insertRow(i)
-                
-                # Title
-                title_item = QTableWidgetItem(doc.title)
-                title_item.setData(Qt.ItemDataRole.UserRole, doc.id)
-                title_item.setBackground(QBrush(QColor(255, 200, 200)))  # light red
-                overdue_table.setItem(i, 0, title_item)
-                
-                # Category
-                category_name = doc.category.name if doc.category else "Uncategorized"
-                category_item = QTableWidgetItem(category_name)
-                category_item.setBackground(QBrush(QColor(255, 200, 200)))
-                overdue_table.setItem(i, 1, category_item)
-                
-                # Priority
-                priority_item = QTableWidgetItem(str(doc.priority))
-                priority_item.setBackground(QBrush(QColor(255, 200, 200)))
-                overdue_table.setItem(i, 2, priority_item)
-                
-                # Due Date
-                due_date = doc.next_reading_date.strftime("%Y-%m-%d") if doc.next_reading_date else "New"
-                due_item = QTableWidgetItem(due_date)
-                due_item.setBackground(QBrush(QColor(255, 200, 200)))
-                overdue_table.setItem(i, 3, due_item)
+                overdue_table.insertTopLevelItem(i, QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority), doc.next_reading_date.strftime("%Y-%m-%d") if doc.next_reading_date else "New"]))
+                overdue_table.topLevelItem(i).setBackground(0, QBrush(QColor(255, 200, 200)))
             
             overdue_layout.addWidget(overdue_table)
             self.queue_tabs.widget(1).layout().addWidget(overdue_group)
@@ -557,28 +550,16 @@ class QueueView(QWidget):
                 date_group = QGroupBox(f"Due on {date_str}")
                 date_layout = QVBoxLayout(date_group)
                 
-                date_table = QTableWidget()
+                date_table = QTreeWidget()
                 date_table.setColumnCount(3)
-                date_table.setHorizontalHeaderLabels(["Title", "Category", "Priority"])
-                date_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-                date_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-                date_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-                date_table.doubleClicked.connect(self._on_document_selected)
+                date_table.setHeaderLabels(["Title", "Category", "Priority"])
+                date_table.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+                date_table.setSelectionBehavior(QTreeWidget.SelectionBehavior.SelectRows)
+                date_table.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
+                date_table.itemDoubleClicked.connect(lambda item, column: self._on_tree_item_selected(item, column))
                 
                 for i, doc in enumerate(docs):
-                    date_table.insertRow(i)
-                    
-                    # Title
-                    title_item = QTableWidgetItem(doc.title)
-                    title_item.setData(Qt.ItemDataRole.UserRole, doc.id)
-                    date_table.setItem(i, 0, title_item)
-                    
-                    # Category
-                    category_name = doc.category.name if doc.category else "Uncategorized"
-                    date_table.setItem(i, 1, QTableWidgetItem(category_name))
-                    
-                    # Priority
-                    date_table.setItem(i, 2, QTableWidgetItem(str(doc.priority)))
+                    date_table.insertTopLevelItem(i, QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority)]))
                 
                 date_layout.addWidget(date_table)
                 self.queue_tabs.widget(1).layout().addWidget(date_group)
@@ -589,33 +570,16 @@ class QueueView(QWidget):
             new_group = QGroupBox("New Documents")
             new_layout = QVBoxLayout(new_group)
             
-            new_table = QTableWidget()
+            new_table = QTreeWidget()
             new_table.setColumnCount(3)
-            new_table.setHorizontalHeaderLabels(["Title", "Category", "Priority"])
-            new_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            new_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            new_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            new_table.doubleClicked.connect(self._on_document_selected)
+            new_table.setHeaderLabels(["Title", "Category", "Priority"])
+            new_table.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            new_table.setSelectionBehavior(QTreeWidget.SelectionBehavior.SelectRows)
+            new_table.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
+            new_table.itemDoubleClicked.connect(lambda item, column: self._on_tree_item_selected(item, column))
             
             for i, doc in enumerate(doc_by_date["New"]):
-                new_table.insertRow(i)
-                
-                # Title
-                title_item = QTableWidgetItem(doc.title)
-                title_item.setData(Qt.ItemDataRole.UserRole, doc.id)
-                title_item.setBackground(QBrush(QColor(200, 220, 255)))  # light blue
-                new_table.setItem(i, 0, title_item)
-                
-                # Category
-                category_name = doc.category.name if doc.category else "Uncategorized"
-                category_item = QTableWidgetItem(category_name)
-                category_item.setBackground(QBrush(QColor(200, 220, 255)))
-                new_table.setItem(i, 1, category_item)
-                
-                # Priority
-                priority_item = QTableWidgetItem(str(doc.priority))
-                priority_item.setBackground(QBrush(QColor(200, 220, 255)))
-                new_table.setItem(i, 2, priority_item)
+                new_table.insertTopLevelItem(i, QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority)]))
             
             new_layout.addWidget(new_table)
             self.queue_tabs.widget(1).layout().addWidget(new_group)
@@ -633,174 +597,238 @@ class QueueView(QWidget):
     
     @pyqtSlot()
     def _on_read_next(self):
-        """Open the next document for reading."""
+        """Navigate to the next document in the queue."""
         try:
-            # If there are no documents in the queue table, use the FSRS algorithm
-            if self.queue_table.rowCount() == 0:
-                next_docs = self.fsrs.get_next_documents(count=1)
-                
-                if not next_docs:
-                    QMessageBox.information(
-                        self, "No Documents", 
-                        "There are no documents in the queue."
-                    )
-                    return
-                
-                # Get the document
-                doc = next_docs[0]
-                
-                # Emit signal to open the document
-                self.documentSelected.emit(doc.id)
-                
-                # Update UI to reflect selection
-                self.set_current_document(doc.id)
-                return
-            
-            # If there are documents in the queue table, use the queue order
-            current_row = -1
+            # Get the current document ID
             current_doc_id = self._get_current_document_id()
+            current_row = -1
             
             if current_doc_id:
                 # Find the current document in the queue table
-                for row in range(self.queue_table.rowCount()):
-                    doc_id = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-                    if doc_id == current_doc_id:
+                for row in range(self.queue_table.topLevelItemCount()):
+                    item = self.queue_table.topLevelItem(row)
+                    if item.data(0, Qt.ItemDataRole.UserRole) == current_doc_id:
                         current_row = row
                         break
             
+            # If the current document isn't found, start from the beginning
+            if current_row == -1:
+                # If there are no documents in the queue table, use the FSRS algorithm
+                if self.queue_table.topLevelItemCount() == 0:
+                    next_docs = self.fsrs.get_next_documents(count=1)
+                    
+                    if next_docs:
+                        # Load the first document
+                        self.documentSelected.emit(next_docs[0].id)
+                        return
+                    else:
+                        # No documents available
+                        QMessageBox.information(
+                            self, "No Documents", 
+                            "There are no documents in the queue."
+                        )
+                        return
+                current_row = 0
+            
             # Move to the next document in the queue
             next_row = current_row + 1
-            if next_row >= self.queue_table.rowCount():
+            if next_row >= self.queue_table.topLevelItemCount():
                 next_row = 0  # Wrap around to the beginning
             
-            next_doc_id = self.queue_table.item(next_row, 0).data(Qt.ItemDataRole.UserRole)
+            next_doc_id = self.queue_table.topLevelItem(next_row).data(0, Qt.ItemDataRole.UserRole)
             self.documentSelected.emit(next_doc_id)
             self.set_current_document(next_doc_id)
             
-            # Update UI to reflect selection
-            self.queue_table.selectRow(next_row)
-            
         except Exception as e:
-            logger.exception(f"Error getting next document: {e}")
+            logger.exception(f"Error navigating to next document: {e}")
             QMessageBox.warning(
                 self, "Error", 
-                f"Error opening next document: {str(e)}"
+                f"Error navigating to next document: {str(e)}"
             )
     
     @pyqtSlot()
     def _on_read_prev(self):
-        """Handle previous document button click."""
-        # Find current document in the queue
-        current_row = -1
-        current_doc_id = self._get_current_document_id()
-        
-        if current_doc_id:
-            # Try to find the document in the queue table
-            for row in range(self.queue_table.rowCount()):
-                doc_id = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-                if doc_id == current_doc_id:
-                    current_row = row
-                    break
+        """Navigate to the previous document in the queue."""
+        try:
+            # Get the current document ID
+            current_doc_id = self._get_current_document_id()
+            current_row = -1
+            
+            if current_doc_id:
+                # Try to find the document in the queue table
+                for row in range(self.queue_table.topLevelItemCount()):
+                    item = self.queue_table.topLevelItem(row)
+                    if item.data(0, Qt.ItemDataRole.UserRole) == current_doc_id:
+                        current_row = row
+                        break
             
             # If found, get the previous document
             if current_row > 0:
-                prev_doc_id = self.queue_table.item(current_row - 1, 0).data(Qt.ItemDataRole.UserRole)
+                prev_row = current_row - 1
+                prev_doc_id = self.queue_table.topLevelItem(prev_row).data(0, Qt.ItemDataRole.UserRole)
                 self.documentSelected.emit(prev_doc_id)
+                self.set_current_document(prev_doc_id)
                 return
-        
-        # If no current document or it's the first one, get the last document in the queue
-        if self.queue_table.rowCount() > 0:
-            last_row = self.queue_table.rowCount() - 1
-            last_doc_id = self.queue_table.item(last_row, 0).data(Qt.ItemDataRole.UserRole)
-            self.documentSelected.emit(last_doc_id)
-        else:
-            QMessageBox.information(
-                self, "No Documents", 
-                "There are no documents in the queue matching your filters."
+            
+            # If no current document or it's the first one, get the last document in the queue
+            if self.queue_table.topLevelItemCount() > 0:
+                last_row = self.queue_table.topLevelItemCount() - 1
+                last_doc_id = self.queue_table.topLevelItem(last_row).data(0, Qt.ItemDataRole.UserRole)
+                self.documentSelected.emit(last_doc_id)
+                self.set_current_document(last_doc_id)
+            else:
+                QMessageBox.information(
+                    self, "No Documents", 
+                    "There are no documents in the queue."
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error navigating to previous document: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error navigating to previous document: {str(e)}"
             )
     
     def _get_current_document_id(self):
-        """Get the ID of the currently open document."""
-        # This method will be connected to the main window to get the current document ID
-        return getattr(self, '_current_document_id', None)
+        """Get the ID of the currently selected document."""
+        selected_items = self.queue_table.selectedItems()
+        if not selected_items:
+            return None
+        
+        item = selected_items[0]
+        # Check if this is an extract
+        item_type = item.data(0, Qt.ItemDataRole.UserRole+1)
+        if item_type == "extract":
+            # Get the parent document
+            parent = item.parent()
+            if parent:
+                return parent.data(0, Qt.ItemDataRole.UserRole)
+            return None
+        
+        # This is a document
+        return item.data(0, Qt.ItemDataRole.UserRole)
     
     def set_current_document(self, doc_id):
-        """Set the current document ID for navigation purposes."""
+        """Set the current document."""
         self._current_document_id = doc_id
         
-        # Update button states based on queue position
+        # Find and select the document in the tree
+        for i in range(self.queue_table.topLevelItemCount()):
+            item = self.queue_table.topLevelItem(i)
+            if item.data(0, Qt.ItemDataRole.UserRole) == doc_id:
+                # Select this item
+                self.queue_table.clearSelection()
+                item.setSelected(True)
+                self.queue_table.scrollToItem(item)
+                break
+                
+        # Update navigation buttons
         self._update_navigation_buttons()
     
     def _update_navigation_buttons(self):
         """Update the enabled state of navigation buttons."""
-        has_docs = self.queue_table.rowCount() > 0
+        has_docs = self.queue_table.topLevelItemCount() > 0
         
         self.read_next_button.setEnabled(has_docs)
         self.prev_button.setEnabled(has_docs)
     
     @pyqtSlot(QPoint)
     def _on_queue_context_menu(self, pos):
-        """Show context menu for queue table."""
-        index = self.queue_table.indexAt(pos)
-        if not index.isValid():
+        """Show context menu for queue items."""
+        # Get the item at the click position
+        item = self.queue_table.itemAt(pos)
+        if not item:
             return
         
-        # Get document ID
-        row = index.row()
-        doc_id = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        # Get item type and ID
+        item_type = item.data(0, Qt.ItemDataRole.UserRole+1)
+        item_id = item.data(0, Qt.ItemDataRole.UserRole)
         
+        if not item_id:
+            return
+            
         # Create menu
         menu = QMenu(self)
         
-        # Add actions
-        open_action = menu.addAction("Open Document")
-        open_action.triggered.connect(lambda: self.documentSelected.emit(doc_id))
-        
-        menu.addSeparator()
-        
-        # Priority submenu
-        priority_menu = menu.addMenu("Set Priority")
-        
-        priorities = [1, 25, 50, 75, 100]
-        for p in priorities:
-            priority_action = priority_menu.addAction(f"{p}")
-            priority_action.triggered.connect(lambda checked, p=p: self._on_set_priority(doc_id, p))
-        
-        menu.addSeparator()
-        
-        # Rating actions - these will reschedule the document
-        rate_menu = menu.addMenu("Rate Document")
-        
-        ratings = [
-            ("Hard/Forgot (1)", 1),
-            ("Difficult (2)", 2),
-            ("Good (3)", 3),
-            ("Easy (4)", 4),
-            ("Very Easy (5)", 5)
-        ]
-        
-        for label, rating in ratings:
-            rate_action = rate_menu.addAction(label)
-            rate_action.triggered.connect(lambda checked, r=rating: self._on_rate_document(doc_id, r))
+        if item_type == "extract":
+            # Context menu for extracts
+            open_doc_action = menu.addAction("Open Document")
+            open_doc_action.triggered.connect(lambda: self._handle_extract_selected(item_id))
             
-        menu.addSeparator()
-        
-        # Delete action
-        delete_action = menu.addAction("Delete Document")
-        delete_action.triggered.connect(lambda: self._on_delete_document(doc_id))
+            view_extract_action = menu.addAction("View Extract")
+            view_extract_action.triggered.connect(lambda: self._view_extract(item_id))
+            
+            menu.addSeparator()
+            
+            # Priority submenu
+            priority_menu = menu.addMenu("Set Priority")
+            
+            for priority in [25, 50, 75, 100]:
+                priority_action = priority_menu.addAction(f"{priority}")
+                priority_action.triggered.connect(
+                    lambda checked, p=priority, i=item_id: self._on_set_extract_priority(i, p)
+                )
+                
+        else:
+            # Context menu for documents
+            open_action = menu.addAction("Open Document")
+            open_action.triggered.connect(lambda: self.documentSelected.emit(item_id))
+            
+            menu.addSeparator()
+            
+            # Priority submenu
+            priority_menu = menu.addMenu("Set Priority")
+            
+            for priority in [25, 50, 75, 100]:
+                priority_action = priority_menu.addAction(f"{priority}")
+                priority_action.triggered.connect(
+                    lambda checked, p=priority, i=item_id: self._on_set_priority(i, p)
+                )
+            
+            # Rating submenu for documents only
+            rating_menu = menu.addMenu("Rate")
+            
+            for rating in range(1, 6):
+                rating_action = rating_menu.addAction(f"{rating} - {self._get_rating_label(rating)}")
+                rating_action.triggered.connect(
+                    lambda checked, r=rating, i=item_id: self._on_rate_document(i, r)
+                )
+            
+            menu.addSeparator()
+            
+            delete_action = menu.addAction("Delete")
+            delete_action.triggered.connect(lambda: self._on_delete_document(item_id))
         
         # Show menu
         menu.exec(self.queue_table.viewport().mapToGlobal(pos))
     
     @pyqtSlot(QModelIndex)
-    def _on_document_selected(self, index):
-        """Handle document selection from tables."""
-        # This works for both the main queue table and date tables
-        item = self.sender().item(index.row(), 0)
-        if item:
-            doc_id = item.data(Qt.ItemDataRole.UserRole)
-            if doc_id:
-                self.documentSelected.emit(doc_id)
+    def _on_tree_item_selected(self, item, column):
+        """Handle item selection from tree."""
+        # Check if this is an extract or a document
+        item_type = item.data(0, Qt.ItemDataRole.UserRole+1)
+        item_id = item.data(0, Qt.ItemDataRole.UserRole)
+        
+        if item_type == "extract":
+            # This is an extract - handle extract selection
+            self._handle_extract_selected(item_id)
+        else:
+            # This is a document - emit the signal
+            self.documentSelected.emit(item_id)
+    
+    def _handle_extract_selected(self, extract_id):
+        """Handle extract selection."""
+        # Get the extract
+        extract = self.db_session.query(Extract).filter(Extract.id == extract_id).first()
+        if extract:
+            # First, open the document that contains this extract
+            self.documentSelected.emit(extract.document_id)
+            
+            # Here you could add code to scroll to the extract position in the document
+            # This would depend on how your document viewer handles focusing on extracts
+            
+            # You could also emit a new signal specifically for extract selection
+            # which would be connected to a handler in the main application
     
     def _on_set_priority(self, doc_id: int, priority: int):
         """Handle setting document priority."""
@@ -903,3 +931,42 @@ class QueueView(QWidget):
             )
             # Rollback in case of error
             self.db_session.rollback()
+
+    def _view_extract(self, extract_id):
+        """View an extract in detail."""
+        # This could open a dialog showing the full extract content
+        extract = self.db_session.query(Extract).filter(Extract.id == extract_id).first()
+        if extract:
+            # Display a simple message box for now
+            QMessageBox.information(
+                self, 
+                "Extract",
+                f"<b>Content:</b><br>{extract.content}<br><br>"
+                f"<b>Context:</b><br>{extract.context or 'No context'}"
+            )
+    
+    def _on_set_extract_priority(self, extract_id, priority):
+        """Set priority for an extract."""
+        try:
+            extract = self.db_session.query(Extract).filter(Extract.id == extract_id).first()
+            if extract:
+                extract.priority = priority
+                self.db_session.commit()
+                self._on_refresh()  # Refresh the display
+        except Exception as e:
+            logger.exception(f"Error setting extract priority: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error setting extract priority: {str(e)}"
+            )
+            
+    def _get_rating_label(self, rating):
+        """Get a text label for a numerical rating."""
+        labels = {
+            1: "Hard",
+            2: "Difficult",
+            3: "Good",
+            4: "Easy",
+            5: "Very Easy"
+        }
+        return labels.get(rating, "Unknown")
