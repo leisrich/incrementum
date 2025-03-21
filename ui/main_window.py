@@ -1239,11 +1239,9 @@ class MainWindow(QMainWindow):
     @pyqtSlot(int)
     def _on_summary_extract_created(self, extract_id):
         """Handle extract creation from summary dialog."""
-        # Get the extract object from database
-        extract = self.db_session.query(Extract).get(extract_id)
-        if extract:
-            # Call the existing handler with the extract object
-            self._on_extract_created(extract)
+        # Just pass on the extract ID to the existing handler
+        # Don't load the Extract object and pass that
+        self._on_extract_created(extract_id)
     
     @pyqtSlot()
     def _on_summarize_document(self):
@@ -1282,6 +1280,7 @@ class MainWindow(QMainWindow):
             self.action_new_extract.setEnabled(True)
             self.action_add_bookmark.setEnabled(True)
             self.action_highlight.setEnabled(True)
+            self.action_summarize_document.setEnabled(True)
             
             # Update the queue view with the current document
             if hasattr(self, 'queue_view'):
@@ -1295,11 +1294,13 @@ class MainWindow(QMainWindow):
             self.action_new_extract.setEnabled(False)
             self.action_add_bookmark.setEnabled(False)
             self.action_highlight.setEnabled(False)
+            self.action_summarize_document.setEnabled(False)
         else:
             # Other kind of tab
             self.action_new_extract.setEnabled(False)
             self.action_add_bookmark.setEnabled(False)
             self.action_highlight.setEnabled(False)
+            self.action_summarize_document.setEnabled(False)
     
     def _apply_settings(self):
         """Apply settings to UI."""

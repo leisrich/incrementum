@@ -51,6 +51,27 @@ class SettingsManager:
             "load_balance_reviews": True
         },
         
+        # AI Settings for summarization and extraction
+        "ai": {
+            "provider": "openai",  # Default provider
+            "use_ai_for_summarization": True,
+            "use_ai_for_concept_extraction": False
+        },
+        
+        # API keys and configuration
+        "api": {
+            "openai_api_key": "",
+            "openai_model": "gpt-3.5-turbo",
+            "anthropic_api_key": "",
+            "anthropic_model": "claude-3-haiku-20240307",
+            "google_api_key": "",
+            "google_model": "gemini-pro",
+            "openrouter_api_key": "",
+            "openrouter_model": "openai/gpt-3.5-turbo",
+            "ollama_host": "http://localhost:11434",
+            "ollama_model": "llama3"
+        },
+        
         # Spaced repetition algorithm settings
         "algorithm": {
             "minimum_interval": 1,  # days

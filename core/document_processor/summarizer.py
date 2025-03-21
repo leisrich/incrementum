@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # core/document_processor/summarizer.py
 
 import os
@@ -5,20 +6,24 @@ import logging
 import tempfile
 import json
 import re
+import time
+import threading
 from typing import Dict, Any, List, Tuple, Optional
 import math
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QComboBox, QTextEdit, QGroupBox,
     QRadioButton, QButtonGroup, QCheckBox, QSpinBox,
     QTabWidget, QMessageBox, QProgressBar, QApplication,
-    QWidget, QInputDialog, QLineEdit, QFormLayout
+    QWidget, QInputDialog, QLineEdit, QFormLayout,
+    QSplitter, QSlider, QPlainTextEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QThread, QObject
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 
 from core.knowledge_base.models import Document, Extract
 from core.document_processor.handlers.pdf_handler import PDFHandler
@@ -28,47 +33,37 @@ from core.content_extractor.nlp_extractor import NLPExtractor
 
 logger = logging.getLogger(__name__)
 
-# Dictionary of AI provider information
+# Define AI providers
 AI_PROVIDERS = {
     "openai": {
         "name": "OpenAI",
-        "endpoint": "https://api.openai.com/v1/chat/completions",
-        "default_model": "gpt-3.5-turbo",
-        "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"],
-        "max_tokens": 4096,
-        "setting_key": "openai_api_key"
+        "setting_key": "openai_api_key",
+        "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o"],
+        "endpoint": "https://api.openai.com/v1/chat/completions"
     },
     "anthropic": {
-        "name": "Anthropic Claude",
-        "endpoint": "https://api.anthropic.com/v1/messages",
-        "default_model": "claude-3-haiku-20240307",
-        "models": ["claude-3-haiku-20240307", "claude-3-sonnet-20240229", "claude-3-opus-20240229"],
-        "max_tokens": 4096,
-        "setting_key": "anthropic_api_key"
+        "name": "Anthropic",
+        "setting_key": "anthropic_api_key",
+        "models": ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"],
+        "endpoint": "https://api.anthropic.com/v1/messages"
+    },
+    "google": {
+        "name": "Google",
+        "setting_key": "google_api_key",
+        "models": ["gemini-pro", "gemini-ultra"],
+        "endpoint": "https://generativelanguage.googleapis.com/v1"
     },
     "openrouter": {
         "name": "OpenRouter",
-        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
-        "default_model": "openai/gpt-3.5-turbo",
-        "models": ["openai/gpt-3.5-turbo", "anthropic/claude-3-haiku", "anthropic/claude-3-sonnet", "google/gemini-pro"],
-        "max_tokens": 4096,
-        "setting_key": "openrouter_api_key"
-    },
-    "google": {
-        "name": "Google Gemini",
-        "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
-        "default_model": "gemini-pro",
-        "models": ["gemini-pro"],
-        "max_tokens": 4096,
-        "setting_key": "google_api_key"
+        "setting_key": "openrouter_api_key",
+        "models": ["openai/gpt-3.5-turbo", "anthropic/claude-3-opus", "google/gemini-pro", "meta/llama-3-70b"],
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions"
     },
     "ollama": {
         "name": "Ollama",
-        "endpoint": "http://localhost:11434/api/chat",
-        "default_model": "llama3",
-        "models": ["llama3", "llama2", "mistral", "codellama", "phi", "gemma:2b", "gemma:7b", "mixtral", "orca-mini"],
-        "max_tokens": 4096,
-        "setting_key": "ollama_host"
+        "setting_key": "ollama_host",
+        "models": ["llama3", "mistral", "mixtral", "phi3", "wizard"],
+        "endpoint": "/api/chat"
     }
 }
 
@@ -353,6 +348,7 @@ class DocumentSummarizer:
     def _ai_summarize_chunk(self, content: str, level: str) -> str:
         """Summarize a chunk of text using AI."""
         if not self.api_config or not self.api_config.get('api_key'):
+            logger.warning("No API configuration available. Falling back to rule-based summarization.")
             return self._rule_based_summarize_chunk(content, level)
         
         try:
@@ -369,26 +365,46 @@ class DocumentSummarizer:
             
             provider = self.api_config.get('provider', 'openai')
             api_key = self.api_config.get('api_key')
-            model = self.api_config.get('model', AI_PROVIDERS[provider]['default_model'])
+            model = self.api_config.get('model', 'gpt-3.5-turbo')
+            
+            if not api_key:
+                logger.warning(f"No API key provided for {provider}. Falling back to rule-based summarization.")
+                return self._rule_based_summarize_chunk(content, level)
+            
+            logger.info(f"Using {provider} with model {model} for summarization")
             
             # Handle different providers
+            summary = None
             if provider == 'openai':
-                return self._openai_summarize(content, instruction, api_key, model, max_tokens)
+                summary = self._openai_summarize(content, instruction, api_key, model, max_tokens)
             elif provider == 'anthropic':
-                return self._anthropic_summarize(content, instruction, api_key, model, max_tokens)
+                summary = self._anthropic_summarize(content, instruction, api_key, model, max_tokens)
             elif provider == 'openrouter':
-                return self._openrouter_summarize(content, instruction, api_key, model, max_tokens)
+                summary = self._openrouter_summarize(content, instruction, api_key, model, max_tokens)
             elif provider == 'google':
-                return self._google_summarize(content, instruction, api_key, model, max_tokens)
+                summary = self._google_summarize(content, instruction, api_key, model, max_tokens)
             elif provider == 'ollama':
-                return self._ollama_summarize(content, instruction, api_key, model, max_tokens)
+                summary = self._ollama_summarize(content, instruction, api_key, model, max_tokens)
             else:
                 logger.error(f"Unknown AI provider: {provider}")
-                return self._rule_based_summarize_chunk(content, level)
+                return f"Error: Unknown AI provider '{provider}'"
+            
+            # Check for errors
+            if summary is None:
+                logger.error(f"API call to {provider} failed to return a summary")
+                return f"Error: Failed to get summary from {provider}"
+            
+            # Check if the summary starts with "Error:"
+            if isinstance(summary, str) and summary.startswith("Error:"):
+                logger.error(f"API error: {summary}")
+                return summary
+                
+            return summary
                 
         except Exception as e:
-            logger.exception(f"Error in AI summarization: {e}")
-            return self._rule_based_summarize_chunk(content, level)
+            error_msg = f"Error in AI summarization: {str(e)}"
+            logger.exception(error_msg)
+            return f"Error: {error_msg}"
     
     def _openai_summarize(self, content, instruction, api_key, model, max_tokens):
         """Summarize text using OpenAI's API."""
@@ -520,7 +536,10 @@ class DocumentSummarizer:
         }
         
         try:
-            endpoint = f"{AI_PROVIDERS['google']['endpoint']}?key={api_key}"
+            # Construct the proper endpoint for the correct model
+            endpoint = f"{AI_PROVIDERS['google']['endpoint']}/models/{model}:generateContent?key={api_key}"
+            logger.info(f"Using Google endpoint: {endpoint.split('?')[0]}")
+            
             response = requests.post(
                 endpoint,
                 headers=headers,
@@ -530,14 +549,20 @@ class DocumentSummarizer:
             
             if response.status_code == 200:
                 result = response.json()
-                summary = result["candidates"][0]["content"]["parts"][0]["text"]
-                return summary
+                if "candidates" in result and len(result["candidates"]) > 0:
+                    summary = result["candidates"][0]["content"]["parts"][0]["text"]
+                    return summary
+                else:
+                    logger.error(f"Unexpected Google API response format: {result}")
+                    return f"Error: Unexpected Google API response format"
             else:
                 logger.error(f"Google API request failed: {response.status_code} - {response.text}")
-                return None
+                if response.status_code == 404:
+                    return f"Error: Model '{model}' not found. Please verify the model name is correct."
+                return f"Error: Google API request failed with status {response.status_code}"
         except Exception as e:
             logger.exception(f"Error in Google API request: {e}")
-            return None
+            return f"Error: {str(e)}"
     
     def _ollama_summarize(self, content, instruction, api_key, model, max_tokens):
         """Summarize text using Ollama API."""
@@ -545,12 +570,13 @@ class DocumentSummarizer:
         host = api_key
         if not host.startswith('http'):
             host = f"http://{host}"
-        if not host.endswith('/api/chat'):
-            # Ensure the URL has the correct format
-            if host.endswith('/'):
-                host = host[:-1]
-            if not host.endswith('/api/chat'):
-                host = f"{host}/api/chat"
+            
+        # Remove trailing slash if present
+        if host.endswith('/'):
+            host = host[:-1]
+            
+        # Construct the endpoint URL
+        endpoint = f"{host}{AI_PROVIDERS['ollama']['endpoint']}"
         
         headers = {
             "Content-Type": "application/json"
@@ -570,15 +596,20 @@ class DocumentSummarizer:
         }
         
         try:
+            logger.info(f"Sending request to Ollama at {endpoint} with model {model}")
+            
+            # Use significantly longer timeout for Ollama to prevent timeouts
             response = requests.post(
-                host,
+                endpoint,
                 headers=headers,
                 json=data,
-                timeout=60  # Longer timeout for local models
+                timeout=180  # Increase to 3 minutes for local models which may take longer
             )
             
             if response.status_code == 200:
                 result = response.json()
+                logger.info(f"Received successful response from Ollama")
+                
                 if "message" in result and "content" in result["message"]:
                     summary = result["message"]["content"]
                     return summary
@@ -589,39 +620,27 @@ class DocumentSummarizer:
                 # Model not found, provide a more helpful error message
                 error_data = response.json()
                 error_msg = error_data.get("error", "Unknown error")
-                if "not found" in error_msg:
-                    # Check if we can suggest a model
-                    base_model = model.split(":")[0] if ":" in model else model
-                    try:
-                        # Try to get a list of available models
-                        model_url = f"{host.replace('/api/chat', '/api/tags')}"
-                        models_response = requests.get(model_url, timeout=5)
-                        if models_response.status_code == 200:
-                            models_data = models_response.json()
-                            available_models = []
-                            if "models" in models_data:
-                                available_models = [m["name"] for m in models_data["models"]]
-                            else:
-                                available_models = [m["name"] for m in models_data]
-                            
-                            similar_models = [m for m in available_models if base_model in m]
-                            if similar_models:
-                                logger.error(f"Model '{model}' not found. Similar models available: {', '.join(similar_models)}")
-                            else:
-                                logger.error(f"Model '{model}' not found. Try pulling it first with 'ollama pull {model}'")
-                        else:
-                            logger.error(f"Model '{model}' not found. Try pulling it with 'ollama pull {model}'")
-                    except Exception as e:
-                        logger.error(f"Model '{model}' not found. Try pulling it with 'ollama pull {model}'")
+                if "not found" in error_msg.lower():
+                    logger.error(f"Model '{model}' not found. Try pulling it with 'ollama pull {model}'")
+                    return f"Error: Model '{model}' not found. Please run 'ollama pull {model}' to download it first."
                 else:
                     logger.error(f"Ollama API request failed: {response.status_code} - {response.text}")
-                return None
+                    return f"Error: {error_msg}"
             else:
                 logger.error(f"Ollama API request failed: {response.status_code} - {response.text}")
-                return None
+                response_text = response.text[:500]  # Truncate long responses
+                return f"Error: Ollama API request failed with status {response.status_code}: {response_text}"
+        except requests.exceptions.ReadTimeout:
+            error_msg = f"Timeout while waiting for Ollama response. The model '{model}' may be too large or loading for the first time."
+            logger.error(error_msg)
+            return f"Error: {error_msg} Try again or use a different model."
+        except requests.exceptions.ConnectionError:
+            error_msg = f"Could not connect to Ollama at {host}. Make sure Ollama is running."
+            logger.error(error_msg)
+            return f"Error: {error_msg} Check if the Ollama server is running at {host}."
         except Exception as e:
             logger.exception(f"Error in Ollama API request: {e}")
-            return None
+            return f"Error: {str(e)}"
     
     def _rule_based_summarize_chunk(self, content: str, level: str) -> str:
         """Summarize a chunk of text using rule-based approaches."""
@@ -717,6 +736,12 @@ class DocumentSummarizer:
         """Combine multiple chunk summaries into a coherent summary."""
         if not summaries:
             return ""
+        
+        # Check if any summary contains an error message
+        for summary in summaries:
+            if summary.startswith("Error:"):
+                # Return the first error message we find
+                return summary
         
         # For brief summaries, we might want to further condense
         if level == 'brief' and len(summaries) > 1:
@@ -973,28 +998,155 @@ class SummarizeDialog(QDialog):
     extractCreated = pyqtSignal(int)  # extract_id
     
     def __init__(self, db_session, document_id, parent=None):
+        """Initialize the summarize dialog."""
         super().__init__(parent)
-        
-        self.db_session = db_session
+        self.setWindowTitle("Document Summary")
+        self.resize(800, 600)
         self.document_id = document_id
+        self.db_session = db_session
+        self.summarizer = None
+        self.worker_thread = None
+        self.worker = None
+        self.sections_thread = None
+        self.sections_worker = None
+        self.sections = None
         
-        # Initialize document
-        self.document = self.db_session.query(Document).get(document_id)
-        if not self.document:
-            raise ValueError(f"Document not found: {document_id}")
+        # Set default font to system font to avoid font issues
+        font = QApplication.font()
+        self.setFont(font)
         
         # Get API configuration from settings
         self.api_config = self._get_api_config()
         
-        # Initialize summarizer
-        self.summarizer = DocumentSummarizer(db_session, self.api_config)
+        # Create layout
+        layout = QVBoxLayout(self)
         
-        # Initialize UI
-        self._create_ui()
+        # Get document
+        self.document = db_session.query(Document).get(document_id)
+        if not self.document:
+            raise ValueError(f"Document with ID {document_id} not found.")
         
-        # Set window properties
-        self.setWindowTitle(f"Summarize Document: {self.document.title}")
-        self.resize(800, 600)
+        # Create summarizer manager
+        from core.document_processor.summarizer_manager import SummarizerManager
+        self.summarizer = SummarizerManager(db_session)
+        
+        # Create form layout for options
+        options_group = QGroupBox("Summarization Options")
+        options_layout = QFormLayout(options_group)
+        
+        # Provider selection
+        self.provider_combo = QComboBox()
+        self.available_providers = []
+        
+        # Add providers with their IDs as data
+        for provider_id, provider_info in AI_PROVIDERS.items():
+            self.provider_combo.addItem(provider_info["name"], provider_id)
+            self.available_providers.append(provider_info["name"])
+            
+        # Set current provider from settings
+        current_provider = self.api_config.get("provider", "openai")
+        for i in range(self.provider_combo.count()):
+            if self.provider_combo.itemData(i) == current_provider:
+                self.provider_combo.setCurrentIndex(i)
+                break
+                
+        options_layout.addRow("Provider:", self.provider_combo)
+        
+        # Update models when provider changes
+        self.provider_combo.currentIndexChanged.connect(self._update_model_combo)
+        
+        # Model selection
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)  # Allow custom model names
+        options_layout.addRow("Model:", self.model_combo)
+        
+        # Temperature
+        self.temperature_slider = QSlider(Qt.Orientation.Horizontal)
+        self.temperature_slider.setMinimum(0)
+        self.temperature_slider.setMaximum(100)
+        self.temperature_slider.setValue(70)  # Default to 0.7
+        self.temperature_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.temperature_slider.setTickInterval(10)
+        self.temperature_value = QLabel("0.7")
+        temp_layout = QHBoxLayout()
+        temp_layout.addWidget(self.temperature_slider)
+        temp_layout.addWidget(self.temperature_value)
+        options_layout.addRow("Temperature:", temp_layout)
+        self.temperature_slider.valueChanged.connect(self._on_temperature_changed)
+        
+        # Length of summary
+        self.length_combo = QComboBox()
+        self.length_combo.addItems(["Short", "Medium", "Long", "Very Long"])
+        self.length_combo.setCurrentIndex(1)  # Default to medium
+        options_layout.addRow("Length:", self.length_combo)
+        
+        # Maximum tokens
+        self.max_tokens_spin = QSpinBox()
+        self.max_tokens_spin.setMinimum(100)
+        self.max_tokens_spin.setMaximum(100000)
+        self.max_tokens_spin.setValue(4000)
+        self.max_tokens_spin.setSingleStep(100)
+        options_layout.addRow("Max Tokens:", self.max_tokens_spin)
+        
+        # Style selection
+        self.style_combo = QComboBox()
+        self.style_combo.addItems([
+            "Concise and Factual", 
+            "Comprehensive and Detailed",
+            "Academic and Formal",
+            "Simple and Accessible", 
+            "Critical Analysis",
+            "Key Points and Takeaways"
+        ])
+        options_layout.addRow("Style:", self.style_combo)
+        
+        # Add options group to layout
+        layout.addWidget(options_group)
+        
+        # Summary display
+        summary_group = QGroupBox("Summary")
+        self.summary_layout = QVBoxLayout(summary_group)
+        
+        # Summary text area
+        self.summary_text = QPlainTextEdit()
+        self.summary_text.setReadOnly(False)  # Allow editing
+        self.summary_layout.addWidget(self.summary_text)
+        
+        # Create extract button
+        create_extract_button = QPushButton("Create Extract from Selection")
+        create_extract_button.clicked.connect(self._on_create_summary_extract)
+        self.summary_layout.addWidget(create_extract_button)
+        
+        # Add summary group to layout
+        layout.addWidget(summary_group)
+        
+        # Status and progress
+        status_layout = QHBoxLayout()
+        self.status_label = QLabel("")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.progress_bar)
+        layout.addLayout(status_layout)
+        
+        # Buttons
+        bottom_buttons = QHBoxLayout()
+        
+        # Generate button
+        self.generate_button = QPushButton("Generate Summary")
+        self.generate_button.clicked.connect(self._on_generate_summary)
+        bottom_buttons.addWidget(self.generate_button)
+        
+        # Extract key sections button
+        self.extract_sections_button = QPushButton("Extract Key Sections")
+        self.extract_sections_button.clicked.connect(self._on_extract_key_sections)
+        bottom_buttons.addWidget(self.extract_sections_button)
+        
+        # Add buttons to layout
+        layout.addLayout(bottom_buttons)
+        
+        # Initialize UI with first provider's models
+        self._update_model_combo()
     
     def _get_api_config(self):
         """Get API configuration from settings."""
@@ -1010,69 +1162,48 @@ class SummarizeDialog(QDialog):
             if provider not in AI_PROVIDERS:
                 provider = "openai"  # Default to OpenAI if invalid
             
-            # Get API key for selected provider
+            # Get API key for selected provider - each provider has its own setting key
             setting_key = AI_PROVIDERS[provider]["setting_key"]
             
-            # Special handling for Ollama which uses host instead of API key
-            if provider == "ollama":
-                api_key = settings.get_setting("api", setting_key, "http://localhost:11434")
-                # If no host is set, check if Ollama is available at default address
+            # Get the correct API key based on the provider
+            if provider == "openai":
+                api_key = settings.get_setting("api", "openai_api_key", "")
+            elif provider == "anthropic":
+                api_key = settings.get_setting("api", "anthropic_api_key", "")
+            elif provider == "google":
+                api_key = settings.get_setting("api", "google_api_key", "")
+            elif provider == "openrouter":
+                api_key = settings.get_setting("api", "openrouter_api_key", "")
+            elif provider == "ollama":
+                api_key = settings.get_setting("api", "ollama_host", "http://localhost:11434")
+                # If no host is set, use the default localhost
                 if not api_key or api_key == "":
                     api_key = "http://localhost:11434"
-                    
-                # For Ollama, we also need to get the model from settings
-                model = settings.get_setting("api", "ollama_model", "llama3")
-                
-                # Try to verify the model exists - if not, fall back to a default that's likely to exist
-                try:
-                    host = api_key
-                    if not host.startswith('http'):
-                        host = f"http://{host}"
-                    if host.endswith('/'):
-                        host = host[:-1]
-                    
-                    model_url = f"{host}/api/tags"
-                    models_response = requests.get(model_url, timeout=5)
-                    
-                    if models_response.status_code == 200:
-                        models_data = models_response.json()
-                        available_models = []
-                        if "models" in models_data:
-                            available_models = [m["name"] for m in models_data["models"]]
-                        else:
-                            available_models = [m["name"] for m in models_data]
-                        
-                        # Check if selected model exists
-                        if model not in available_models:
-                            # Try to find a similar model
-                            base_model = model.split(":")[0] if ":" in model else model
-                            similar_models = [m for m in available_models if base_model in m]
-                            
-                            if similar_models:
-                                # Use the first similar model
-                                logger.warning(f"Model '{model}' not found. Using similar model: {similar_models[0]}")
-                                model = similar_models[0]
-                            elif available_models:
-                                # Fall back to first available model
-                                logger.warning(f"Model '{model}' not found. Using available model: {available_models[0]}")
-                                model = available_models[0]
-                            else:
-                                # If no models available, keep the original (will fail later)
-                                logger.warning(f"Model '{model}' not found and no alternatives available")
-                except Exception as e:
-                    logger.warning(f"Could not verify Ollama model availability: {e}")
             else:
-                # For other providers, get the API key normally
-                api_key = settings.get_setting("api", setting_key, "")
+                api_key = ""
                 
-                # Get saved model for this provider or use default
-                model_setting_key = f"{provider}_model"
-                model = settings.get_setting("ai", model_setting_key, AI_PROVIDERS[provider]["default_model"])
+            # Get model for the provider
+            if provider == "openai":
+                model = settings.get_setting("api", "openai_model", "gpt-3.5-turbo")
+            elif provider == "anthropic":
+                model = settings.get_setting("api", "anthropic_model", "claude-3-haiku-20240307")
+            elif provider == "google":
+                model = settings.get_setting("api", "google_model", "gemini-pro")
+            elif provider == "openrouter":
+                model = settings.get_setting("api", "openrouter_model", "openai/gpt-3.5-turbo")
+            elif provider == "ollama":
+                model = settings.get_setting("api", "ollama_model", "llama3")
+            else:
+                # Default to first model if available
+                available_models = AI_PROVIDERS[provider].get("models", [])
+                model = available_models[0] if available_models else ""
             
-            # If no API key is found (except for Ollama which has a default), return empty config - will use rule-based summarization
-            if not api_key and provider != "ollama":
-                return {}
+            # Log selected provider and model
+            logger.info(f"Using provider '{provider}' with model '{model}'")
+            if provider == "ollama":
+                logger.info(f"Ollama host set to: {api_key}")
             
+            # Build config dictionary
             return {
                 "provider": provider,
                 "api_key": api_key,
@@ -1082,510 +1213,17 @@ class SummarizeDialog(QDialog):
         except Exception as e:
             logger.exception(f"Error getting API configuration: {e}")
             return {}
-
-    def _create_ui(self):
-        """Create the UI layout."""
-        main_layout = QVBoxLayout(self)
-        
-        # Document info
-        info_label = QLabel(f"<b>Document:</b> {self.document.title}")
-        main_layout.addWidget(info_label)
-        
-        # Create tabs
-        tabs = QTabWidget()
-        
-        # Summary tab
-        summary_tab = QWidget()
-        self._create_summary_tab(summary_tab)
-        tabs.addTab(summary_tab, "Document Summary")
-        
-        # Key sections tab
-        sections_tab = QWidget()
-        self._create_sections_tab(sections_tab)
-        tabs.addTab(sections_tab, "Key Sections")
-        
-        main_layout.addWidget(tabs)
-        
-        # Button row
-        button_layout = QHBoxLayout()
-        
-        self.close_button = QPushButton("Close")
-        self.close_button.clicked.connect(self.reject)
-        button_layout.addWidget(self.close_button)
-        
-        main_layout.addLayout(button_layout)
     
-    def _create_summary_tab(self, tab):
-        """Create the summary tab."""
-        layout = QVBoxLayout(tab)
-        
-        # Options group
-        options_group = QGroupBox("Summary Options")
-        options_layout = QVBoxLayout(options_group)
-        
-        # Summary options layout
-        summary_options = QHBoxLayout()
-        
-        # Summary level
-        level_label = QLabel("Detail Level:")
-        summary_options.addWidget(level_label)
-        
-        self.level_combo = QComboBox()
-        self.level_combo.addItem("Brief", "brief")
-        self.level_combo.addItem("Medium", "medium")
-        self.level_combo.addItem("Detailed", "detailed")
-        self.level_combo.setCurrentIndex(1)  # Medium by default
-        summary_options.addWidget(self.level_combo)
-        
-        # AI option
-        self.use_ai_check = QCheckBox("Use AI (if available)")
-        self.use_ai_check.setChecked(True)
-        summary_options.addWidget(self.use_ai_check)
-        
-        options_layout.addLayout(summary_options)
-        
-        # AI Provider options
-        ai_provider_group = QGroupBox("AI Provider")
-        ai_provider_layout = QFormLayout(ai_provider_group)
-        
-        self.provider_combo = QComboBox()
-        for provider_id, provider_info in AI_PROVIDERS.items():
-            self.provider_combo.addItem(provider_info["name"], provider_id)
-        
-        # Set current provider from settings
-        if self.api_config and self.api_config.get("provider"):
-            for i in range(self.provider_combo.count()):
-                if self.provider_combo.itemData(i) == self.api_config["provider"]:
-                    self.provider_combo.setCurrentIndex(i)
-                    break
-        
-        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        ai_provider_layout.addRow("Provider:", self.provider_combo)
-        
-        # Model selection
-        self.model_combo = QComboBox()
-        self._update_model_combo()
-        ai_provider_layout.addRow("Model:", self.model_combo)
-        
-        # API Key management
-        self.api_key_button = QPushButton("Set API Key")
-        self.api_key_button.clicked.connect(self._on_set_api_key)
-        ai_provider_layout.addRow("API Key:", self.api_key_button)
-        
-        options_layout.addWidget(ai_provider_group)
-        
-        # Generate button
-        self.generate_button = QPushButton("Generate Summary")
-        self.generate_button.clicked.connect(self._on_generate_summary)
-        options_layout.addWidget(self.generate_button)
-        
-        layout.addWidget(options_group)
-        
-        # Progress bar (initially hidden)
-        self.summary_progress = QProgressBar()
-        self.summary_progress.setRange(0, 100)
-        self.summary_progress.setValue(0)
-        self.summary_progress.setVisible(False)
-        layout.addWidget(self.summary_progress)
-        
-        # Results area
-        self.summary_text = QTextEdit()
-        self.summary_text.setReadOnly(True)
-        self.summary_text.setPlaceholderText("Summary will appear here")
-        layout.addWidget(self.summary_text)
-        
-        # Additional info area
-        info_layout = QHBoxLayout()
-        
-        # Key concepts
-        self.concepts_list = QTextEdit()
-        self.concepts_list.setReadOnly(True)
-        self.concepts_list.setPlaceholderText("Key concepts will appear here")
-        self.concepts_list.setMaximumHeight(100)
-        info_layout.addWidget(self.concepts_list)
-        
-        # Create extract button
-        self.create_summary_extract_button = QPushButton("Create Extract")
-        self.create_summary_extract_button.clicked.connect(self._on_create_summary_extract)
-        self.create_summary_extract_button.setEnabled(False)
-        info_layout.addWidget(self.create_summary_extract_button)
-        
-        layout.addLayout(info_layout)
-    
-    def _create_sections_tab(self, tab):
-        """Create the key sections tab."""
-        layout = QVBoxLayout(tab)
-        
-        # Options group
-        options_group = QGroupBox("Section Options")
-        options_layout = QHBoxLayout(options_group)
-        
-        # Number of sections
-        sections_label = QLabel("Max Sections:")
-        options_layout.addWidget(sections_label)
-        
-        self.sections_spin = QSpinBox()
-        self.sections_spin.setRange(1, 20)
-        self.sections_spin.setValue(5)
-        options_layout.addWidget(self.sections_spin)
-        
-        # Extract button
-        self.extract_sections_button = QPushButton("Extract Key Sections")
-        self.extract_sections_button.clicked.connect(self._on_extract_key_sections)
-        options_layout.addWidget(self.extract_sections_button)
-        
-        layout.addWidget(options_group)
-        
-        # Progress bar (initially hidden)
-        self.sections_progress = QProgressBar()
-        self.sections_progress.setRange(0, 100)
-        self.sections_progress.setValue(0)
-        self.sections_progress.setVisible(False)
-        layout.addWidget(self.sections_progress)
-        
-        # Results area
-        self.sections_text = QTextEdit()
-        self.sections_text.setReadOnly(True)
-        self.sections_text.setPlaceholderText("Key sections will appear here")
-        layout.addWidget(self.sections_text)
-        
-        # Create extracts button
-        self.create_section_extracts_button = QPushButton("Create Extracts from Sections")
-        self.create_section_extracts_button.clicked.connect(self._on_create_section_extracts)
-        self.create_section_extracts_button.setEnabled(False)
-        layout.addWidget(self.create_section_extracts_button)
-    
-    @pyqtSlot()
-    def _on_generate_summary(self):
-        """Handle generate summary button click."""
-        # Get options
-        level = self.level_combo.currentData()
-        use_ai = self.use_ai_check.isChecked()
-        
-        # If using AI, make sure we have the current settings
-        if use_ai:
-            provider_id = self.provider_combo.currentData()
-            model = self.model_combo.currentData()
-            
-            # Check if we have an API key
-            if not self.api_config or not self.api_config.get("api_key"):
-                # Prompt for API key
-                self._on_set_api_key()
-                
-                # If still no API key, disable AI
-                if not self.api_config or not self.api_config.get("api_key"):
-                    use_ai = False
-            elif self.api_config["provider"] != provider_id or self.api_config["model"] != model:
-                # Update config with new provider/model
-                self.api_config["provider"] = provider_id
-                self.api_config["model"] = model
-                self.summarizer.api_config = self.api_config
-                
-                # Save to settings
-                from core.utils.settings_manager import SettingsManager
-                settings = SettingsManager()
-                settings.set_setting("ai", "provider", provider_id)
-                model_setting_key = f"{provider_id}_model"
-                settings.set_setting("ai", model_setting_key, model)
-                settings.save_settings()
-        
-        # Update UI
-        self.generate_button.setEnabled(False)
-        self.summary_text.clear()
-        self.concepts_list.clear()
-        self.create_summary_extract_button.setEnabled(False)
-        self.summary_progress.setValue(0)
-        self.summary_progress.setVisible(True)
-        QApplication.processEvents()
-        
-        # Create worker thread
-        self.summary_thread = QThread()
-        self.summary_worker = SummarizeWorker(
-            self.summarizer, self.document_id, level, use_ai
-        )
-        self.summary_worker.moveToThread(self.summary_thread)
-        
-        # Connect signals
-        self.summary_thread.started.connect(self.summary_worker.run)
-        self.summary_worker.finished.connect(self._on_summary_finished)
-        self.summary_worker.progress.connect(self.summary_progress.setValue)
-        self.summary_worker.error.connect(self._on_summary_error)
-        self.summary_worker.finished.connect(self.summary_thread.quit)
-        self.summary_worker.finished.connect(self.summary_worker.deleteLater)
-        self.summary_thread.finished.connect(self.summary_thread.deleteLater)
-        
-        # Start thread
-        self.summary_thread.start()
-    
-    @pyqtSlot(dict)
-    def _on_summary_finished(self, result):
-        """Handle summary generation completion."""
-        # Update UI
-        self.summary_text.setText(result.get('summary', ''))
-        
-        # Show key concepts
-        concepts_text = "\n".join(f"• {concept}" for concept in result.get('key_concepts', []))
-        self.concepts_list.setText(concepts_text)
-        
-        # Store result for extract creation
-        self.summary_result = result
-        
-        # Enable buttons
-        self.generate_button.setEnabled(True)
-        self.create_summary_extract_button.setEnabled(True)
-        self.summary_progress.setVisible(False)
-    
-    @pyqtSlot(str)
-    def _on_summary_error(self, error_msg):
-        """Handle summary generation error."""
-        # Update UI
-        self.summary_text.setText(f"Error: {error_msg}")
-        self.generate_button.setEnabled(True)
-        self.summary_progress.setVisible(False)
-    
-    @pyqtSlot()
-    def _on_create_summary_extract(self):
-        """Handle create summary extract button click."""
-        if not hasattr(self, 'summary_result'):
-            return
-        
-        try:
-            # Get options
-            level = self.level_combo.currentData()
-            use_ai = self.use_ai_check.isChecked()
-            
-            # Create extract
-            extract_id = self.summarizer.create_summary_extract(
-                self.document_id, level, use_ai
-            )
-            
-            if extract_id:
-                QMessageBox.information(
-                    self, "Extract Created", 
-                    f"Summary extract created successfully."
-                )
-                
-                # Emit signal
-                self.extractCreated.emit(extract_id)
-            else:
-                QMessageBox.warning(
-                    self, "Extract Creation Failed", 
-                    "Failed to create summary extract."
-                )
-                
-        except Exception as e:
-            logger.exception(f"Error creating summary extract: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"Error creating summary extract: {str(e)}"
-            )
-    
-    @pyqtSlot()
-    def _on_extract_key_sections(self):
-        """Handle extract key sections button click."""
-        # Get options
-        max_sections = self.sections_spin.value()
-        
-        # Update UI
-        self.extract_sections_button.setEnabled(False)
-        self.sections_text.clear()
-        self.create_section_extracts_button.setEnabled(False)
-        self.sections_progress.setValue(0)
-        self.sections_progress.setVisible(True)
-        QApplication.processEvents()
-        
-        # Create worker thread
-        self.sections_thread = QThread()
-        self.sections_worker = KeySectionsWorker(
-            self.summarizer, self.document_id, max_sections
-        )
-        self.sections_worker.moveToThread(self.sections_thread)
-        
-        # Connect signals
-        self.sections_thread.started.connect(self.sections_worker.run)
-        self.sections_worker.finished.connect(self._on_sections_finished)
-        self.sections_worker.progress.connect(self.sections_progress.setValue)
-        self.sections_worker.error.connect(self._on_sections_error)
-        self.sections_worker.finished.connect(self.sections_thread.quit)
-        self.sections_worker.finished.connect(self.sections_worker.deleteLater)
-        self.sections_thread.finished.connect(self.sections_thread.deleteLater)
-        
-        # Start thread
-        self.sections_thread.start()
-    
-    @pyqtSlot(list)
-    def _on_sections_finished(self, sections):
-        """Handle key sections extraction completion."""
-        # Update UI
-        self.sections = sections
-        
-        # Format sections
-        text = ""
-        for section in sections:
-            title = section.get('title', f"Section {section['section_id']+1}")
-            score = section.get('importance_score', 0)
-            word_count = section.get('word_count', 0)
-            
-            text += f"## {title}\n"
-            text += f"*Score: {score:.1f}/10 | Words: {word_count}*\n\n"
-            text += f"{section['content'][:500]}...\n\n"
-            text += "-" * 40 + "\n\n"
-        
-        self.sections_text.setText(text)
-        
-        # Enable buttons
-        self.extract_sections_button.setEnabled(True)
-        self.create_section_extracts_button.setEnabled(True)
-        self.sections_progress.setVisible(False)
-    
-    @pyqtSlot(str)
-    def _on_sections_error(self, error_msg):
-        """Handle key sections extraction error."""
-        # Update UI
-        self.sections_text.setText(f"Error: {error_msg}")
-        self.extract_sections_button.setEnabled(True)
-        self.sections_progress.setVisible(False)
-    
-    @pyqtSlot()
-    def _on_create_section_extracts(self):
-        """Handle create section extracts button click."""
-        if not hasattr(self, 'sections'):
-            return
-        
-        try:
-            from core.content_extractor.extractor import ContentExtractor
-            extractor = ContentExtractor(self.db_session)
-            
-            extracts_created = 0
-            
-            for section in self.sections:
-                title = section.get('title', f"Section {section['section_id']+1}")
-                
-                # Create extract
-                extract = extractor.create_extract(
-                    document_id=self.document_id,
-                    content=section['content'],
-                    context=f"Key section: {title}",
-                    priority=min(int(section['importance_score'] * 10), 100),
-                )
-                
-                if extract:
-                    extracts_created += 1
-                    # Emit signal for first extract only
-                    if extracts_created == 1:
-                        self.extractCreated.emit(extract.id)
-            
-            if extracts_created > 0:
-                QMessageBox.information(
-                    self, "Extracts Created", 
-                    f"Created {extracts_created} extracts from key sections."
-                )
-            else:
-                QMessageBox.warning(
-                    self, "No Extracts Created", 
-                    "Failed to create extracts from sections."
-                )
-                
-        except Exception as e:
-            logger.exception(f"Error creating section extracts: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"Error creating section extracts: {str(e)}"
-            )
-
-    @pyqtSlot(int)
-    def _on_provider_changed(self, index):
-        """Handle provider selection change."""
-        self._update_model_combo()
-    
-    @pyqtSlot()
-    def _on_set_api_key(self):
-        """Handle API key setting button click."""
-        provider_id = self.provider_combo.currentData()
-        provider_name = self.provider_combo.currentText()
-        
-        from core.utils.settings_manager import SettingsManager
-        settings = SettingsManager()
-        
-        setting_key = AI_PROVIDERS[provider_id]["setting_key"]
-        current_key = settings.get_setting("ai", setting_key, "")
-        
-        # Special handling for Ollama
-        if provider_id == "ollama":
-            # For Ollama, we need the host URL rather than an API key
-            current_key = settings.get_setting("api", setting_key, "http://localhost:11434")
-            
-            api_key, ok = QInputDialog.getText(
-                self, f"Set {provider_name} Host", 
-                f"Enter your {provider_name} host URL (default: http://localhost:11434):",
-                QLineEdit.EchoMode.Normal,
-                text=current_key
-            )
-            
-            if ok:
-                # If empty, use default
-                if not api_key:
-                    api_key = "http://localhost:11434"
-                
-                # Save to settings
-                settings.set_setting("api", setting_key, api_key)
-                
-                # Get and save model as well
-                model = self.model_combo.currentData()
-                settings.set_setting("api", "ollama_model", model)
-                
-                settings.save_settings()
-                
-                # Update API configuration
-                self.api_config = {
-                    "provider": provider_id,
-                    "api_key": api_key,
-                    "model": model
-                }
-                
-                # Update summarizer
-                self.summarizer.api_config = self.api_config
-            
-            return
-        
-        # Regular API key handling for other providers
-        # Mask key for display
-        masked_key = "****" + current_key[-4:] if current_key and len(current_key) > 4 else ""
-        hint_text = f"Current: {masked_key}" if masked_key else "No API key set"
-        
-        api_key, ok = QInputDialog.getText(
-            self, f"Set {provider_name} API Key", 
-            f"Enter your {provider_name} API key for AI-powered summarization:\n{hint_text}",
-            QLineEdit.EchoMode.Password
-        )
-        
-        if ok and api_key:
-            # Save to settings
-            settings.set_setting("ai", "provider", provider_id)
-            settings.set_setting("ai", setting_key, api_key)
-            
-            # Save selected model
-            model = self.model_combo.currentData()
-            model_setting_key = f"{provider_id}_model"
-            settings.set_setting("ai", model_setting_key, model)
-            
-            settings.save_settings()
-            
-            # Update API configuration
-            self.api_config = {
-                "provider": provider_id,
-                "api_key": api_key,
-                "model": model
-            }
-            
-            # Update summarizer
-            self.summarizer.api_config = self.api_config
-
     def _update_model_combo(self):
         """Update the model combo box based on selected provider."""
+        # Get the provider ID from the current item's data
         provider_id = self.provider_combo.currentData()
+        
+        # Save current text before clearing
+        current_text = self.model_combo.currentText()
         self.model_combo.clear()
         
+        # Get models for the provider
         if provider_id in AI_PROVIDERS:
             # Special handling for Ollama to check for available models
             if provider_id == "ollama":
@@ -1629,23 +1267,556 @@ class SummarizeDialog(QDialog):
                 for model in AI_PROVIDERS[provider_id]["models"]:
                     self.model_combo.addItem(model, model)
             
-            # Set current model from settings if available
+            # Add placeholder for custom model
+            if self.model_combo.count() > 0 and not self.model_combo.itemText(self.model_combo.count() - 1).startswith("-- Custom"):
+                self.model_combo.insertSeparator(self.model_combo.count())
+                self.model_combo.addItem("-- Custom Model --", "custom")
+            
+            # Set model from settings if available
+            model_to_set = ""
+            
+            # Try to get model from API config
             if self.api_config and self.api_config.get("provider") == provider_id and self.api_config.get("model"):
                 model_to_set = self.api_config["model"]
-                
-                # For Ollama, we might need to load from api settings
-                if provider_id == "ollama" and not model_to_set:
-                    from core.utils.settings_manager import SettingsManager
-                    settings = SettingsManager()
-                    model_to_set = settings.get_setting("api", "ollama_model", "llama3")
-                
-                # Find and set the model in the combo box
+            
+            # Otherwise try to get from settings
+            if not model_to_set:
+                from core.utils.settings_manager import SettingsManager
+                settings = SettingsManager()
+                if provider_id == "ollama":
+                    model_to_set = settings.get_setting("api", "ollama_model", "")
+                else:
+                    model_to_set = settings.get_setting("api", f"{provider_id}_model", "")
+            
+            # If we have a model from settings, set it
+            if model_to_set:
+                # Check if the model is in the list
+                index = -1
                 for i in range(self.model_combo.count()):
-                    if self.model_combo.itemData(i) == model_to_set:
-                        self.model_combo.setCurrentIndex(i)
+                    if self.model_combo.itemText(i) == model_to_set:
+                        index = i
                         break
                 
-                # If model not found, add it and select it
-                if self.model_combo.currentData() != model_to_set and model_to_set:
-                    self.model_combo.addItem(model_to_set, model_to_set)
-                    self.model_combo.setCurrentIndex(self.model_combo.count() - 1)
+                if index >= 0:
+                    self.model_combo.setCurrentIndex(index)
+                else:
+                    # Custom model - set the text directly
+                    self.model_combo.setCurrentText(model_to_set)
+            elif current_text and current_text.strip():
+                # If we had a custom text previously, restore it
+                self.model_combo.setCurrentText(current_text)
+
+    def _on_generate_summary(self):
+        """Handle generate summary button click."""
+        # Get options from length combo and other available controls
+        length_map = {
+            0: "brief",    # Short
+            1: "medium",   # Medium
+            2: "detailed", # Long
+            3: "detailed"  # Very Long
+        }
+        level = length_map.get(self.length_combo.currentIndex(), "medium")
+        
+        # Always use AI since we have the UI elements for it
+        use_ai = True
+        
+        # Get provider information
+        provider_id = self.provider_combo.currentData()
+        provider_name = self.provider_combo.currentText()
+        
+        if not provider_id:
+            # Default to first provider if not found
+            provider_id = list(AI_PROVIDERS.keys())[0]
+            logger.warning(f"No valid provider ID found, defaulting to {provider_id}")
+        
+        # Get model from text since we have an editable combo
+        model = self.model_combo.currentText().strip()
+        
+        if not model:
+            # If empty, use first item in the predefined models list
+            if provider_id in AI_PROVIDERS and AI_PROVIDERS[provider_id]["models"]:
+                model = AI_PROVIDERS[provider_id]["models"][0]
+                self.model_combo.setCurrentText(model)
+        
+        # Check if we have an API key
+        if not self.api_config or not self.api_config.get("api_key"):
+            # Prompt for API key
+            self._on_set_api_key()
+            
+            # If still no API key, disable AI
+            if not self.api_config or not self.api_config.get("api_key"):
+                use_ai = False
+                self.status_label.setText("No API key set. Using rule-based summarization.")
+                self.status_label.setStyleSheet("color: orange")
+        elif self.api_config["provider"] != provider_id or self.api_config["model"] != model:
+            # Update config with new provider/model
+            self.api_config["provider"] = provider_id
+            self.api_config["model"] = model
+            self.summarizer.summarizer.api_config = self.api_config
+            
+            # Save to settings
+            from core.utils.settings_manager import SettingsManager
+            settings = SettingsManager()
+            settings.set_setting("ai", "provider", provider_id)
+            model_setting_key = f"{provider_id}_model"
+            settings.set_setting("api", model_setting_key, model)
+            settings.save_settings()
+        
+        # Update UI
+        self.generate_button.setEnabled(False)
+        self.summary_text.clear()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.status_label.setText("Generating summary...")
+        self.status_label.setStyleSheet("")
+        QApplication.processEvents()
+        
+        # Ensure any previous threads are cleaned up
+        try:
+            if hasattr(self, 'summary_thread') and self.summary_thread is not None:
+                if self.summary_thread.isRunning():
+                    self.summary_thread.quit()
+                    self.summary_thread.wait(1000)  # Wait up to 1 second
+        except RuntimeError:
+            # Handle case where thread might have been deleted
+            logger.warning("Summary thread was already deleted during closeEvent")
+        except Exception as e:
+            logger.warning(f"Error cleaning up summary thread during closeEvent: {e}")
+            
+        # Create worker thread
+        self.summary_thread = QThread()
+        self.summary_worker = SummarizeWorker(
+            self.summarizer, self.document_id, level, use_ai
+        )
+        self.summary_worker.moveToThread(self.summary_thread)
+        
+        # Connect signals
+        self.summary_thread.started.connect(self.summary_worker.run)
+        self.summary_worker.finished.connect(self._on_summary_finished)
+        self.summary_worker.progress.connect(self.progress_bar.setValue)
+        self.summary_worker.error.connect(self._on_summary_error)
+        self.summary_worker.finished.connect(self.summary_thread.quit)
+        self.summary_worker.finished.connect(lambda: self.summary_worker.deleteLater())
+        self.summary_thread.finished.connect(lambda: self.summary_thread.deleteLater())
+        
+        # Start thread
+        self.summary_thread.start()
+    
+    @pyqtSlot(dict)
+    def _on_summary_finished(self, result):
+        """Handle summary generation finished."""
+        # Update UI
+        self.summary_text.setPlainText(result.get('summary', ''))
+        
+        # Store result for extract creation
+        self.summary_result = result
+        
+        # Enable buttons
+        self.generate_button.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Summary generated successfully")
+        self.status_label.setStyleSheet("color: green")
+        QApplication.processEvents()
+    
+    @pyqtSlot(str)
+    def _on_summary_error(self, error_msg):
+        """Handle summary generation error."""
+        error_text = f"Error: {error_msg}"
+        
+        # Format the error message with more details for common errors
+        if "ollama" in error_msg.lower() and "not found" in error_msg.lower():
+            model = self.model_combo.currentText()
+            error_text += f"\n\nTo fix this, you need to pull the model with the command:\n\nollama pull {model}"
+        elif "connection" in error_msg.lower() and "ollama" in error_msg.lower():
+            error_text += "\n\nMake sure the Ollama server is running by executing 'ollama serve' in a terminal."
+        elif "api key" in error_msg.lower():
+            provider = self.provider_combo.currentText()
+            error_text += f"\n\nYou need to set up your {provider} API key in the settings."
+        
+        self.summary_text.setPlainText(error_text)
+        self.generate_button.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(f"Error: {error_msg}")
+        self.status_label.setStyleSheet("color: red")
+        QApplication.processEvents()
+        
+        # Show a message box for critical errors
+        if "not found" in error_msg.lower() or "connection" in error_msg.lower() or "api key" in error_msg.lower():
+            QMessageBox.warning(self, "Summarization Error", error_text)
+    
+    @pyqtSlot()
+    def _on_create_summary_extract(self):
+        """Handle create extract from summary selection."""
+        try:
+            # Get selected text
+            cursor = self.summary_text.textCursor()
+            selected_text = cursor.selectedText()
+            
+            if not selected_text:
+                QMessageBox.information(
+                    self, "No Selection", 
+                    "Please select text in the summary to create an extract."
+                )
+                return
+            
+            # Create new extract from selection
+            extract = Extract(
+                content=selected_text,
+                document_id=self.document_id,
+                context=f"Summary Extract: {self.document.title[:50]}...",
+                created_date=datetime.now(),
+                last_reviewed=datetime.now(),
+                position=json.dumps({
+                    "source": "summary",
+                    "text": selected_text[:100]  # Store start of text for context
+                })
+            )
+            
+            # Add to database
+            self.db_session.add(extract)
+            self.db_session.commit()
+            
+            # Get the ID of the newly created extract
+            extract_id = extract.id
+            
+            # Inform user
+            QMessageBox.information(
+                self, "Extract Created", 
+                f"Extract created successfully from summary selection."
+            )
+            
+            # Emit signal with new extract ID (not the extract object)
+            self.extractCreated.emit(extract_id)
+                
+        except Exception as e:
+            logger.exception(f"Error creating extract from selection: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error creating extract: {str(e)}"
+            )
+    
+    @pyqtSlot()
+    def _on_extract_key_sections(self):
+        """Handle extract key sections button click."""
+        # Default max sections
+        max_sections = 5
+        
+        # Update UI
+        self.extract_sections_button.setEnabled(False)
+        self.summary_text.clear()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.status_label.setText("Extracting key sections...")
+        self.status_label.setStyleSheet("")
+        QApplication.processEvents()
+        
+        # Ensure any previous threads are cleaned up
+        try:
+            if hasattr(self, 'sections_thread') and self.sections_thread is not None:
+                if self.sections_thread.isRunning():
+                    self.sections_thread.quit()
+                    self.sections_thread.wait(1000)  # Wait up to 1 second
+        except RuntimeError:
+            # Handle case where thread might have been deleted
+            logger.warning("Sections thread was already deleted during closeEvent")
+        except Exception as e:
+            logger.warning(f"Error cleaning up sections thread during closeEvent: {e}")
+            
+        # Create worker thread
+        self.sections_thread = QThread()
+        self.sections_worker = KeySectionsWorker(
+            self.summarizer, self.document_id, max_sections
+        )
+        self.sections_worker.moveToThread(self.sections_thread)
+        
+        # Connect signals
+        self.sections_thread.started.connect(self.sections_worker.run)
+        self.sections_worker.finished.connect(self._on_sections_finished)
+        self.sections_worker.progress.connect(self.progress_bar.setValue)
+        self.sections_worker.error.connect(self._on_sections_error)
+        self.sections_worker.finished.connect(self.sections_thread.quit)
+        self.sections_worker.finished.connect(lambda: self.sections_worker.deleteLater())
+        self.sections_thread.finished.connect(lambda: self.sections_thread.deleteLater())
+        
+        # Start thread
+        self.sections_thread.start()
+    
+    @pyqtSlot(list)
+    def _on_sections_finished(self, sections):
+        """Handle key sections extraction finished."""
+        if not sections:
+            self._on_sections_error("No sections were extracted")
+            return
+            
+        # Store sections for later extraction
+        self.sections = sections
+        
+        # Sort sections by importance
+        sections.sort(key=lambda x: x['importance_score'], reverse=True)
+        
+        # Format sections for display
+        sections_text = []
+        for i, section in enumerate(sections):
+            title = section.get('title', f"Section {section['section_id']+1}")
+            importance = int(section['importance_score'] * 100)
+            
+            sections_text.append(f"## {title}")
+            sections_text.append(f"Importance: {importance}%")
+            sections_text.append("")
+            sections_text.append(section['content'])
+            sections_text.append("")
+        
+        # Update UI with sections
+        self.summary_text.setPlainText("\n".join(sections_text))
+        self.extract_sections_button.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Key sections extracted successfully")
+        self.status_label.setStyleSheet("color: green")
+        QApplication.processEvents()
+    
+    @pyqtSlot(str)
+    def _on_sections_error(self, error_msg):
+        """Handle key sections extraction error."""
+        error_text = f"Error: {error_msg}"
+        
+        # Format the error message with more details for common errors
+        if "ollama" in error_msg.lower() and "not found" in error_msg.lower():
+            model = self.model_combo.currentText()
+            error_text += f"\n\nTo fix this, you need to pull the model with the command:\n\nollama pull {model}"
+        elif "connection" in error_msg.lower() and "ollama" in error_msg.lower():
+            error_text += "\n\nMake sure the Ollama server is running by executing 'ollama serve' in a terminal."
+        elif "api key" in error_msg.lower():
+            provider = self.provider_combo.currentText()
+            error_text += f"\n\nYou need to set up your {provider} API key in the settings."
+        
+        # Update UI
+        self.summary_text.setPlainText(error_text)
+        self.extract_sections_button.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(f"Error: {error_msg}")
+        self.status_label.setStyleSheet("color: red")
+        QApplication.processEvents()
+        
+        # Show a message box for critical errors
+        if "not found" in error_msg.lower() or "connection" in error_msg.lower() or "api key" in error_msg.lower():
+            QMessageBox.warning(self, "Section Extraction Error", error_text)
+    
+    @pyqtSlot()
+    def _on_create_section_extracts(self):
+        """Handle create section extracts button click."""
+        if not hasattr(self, 'sections') or not self.sections:
+            QMessageBox.warning(
+                self, "No Sections", 
+                "No sections available to create extracts from."
+            )
+            return
+        
+        try:
+            from core.content_extractor.extractor import ContentExtractor
+            extractor = ContentExtractor(self.db_session)
+            
+            extracts_created = 0
+            first_extract_id = None
+            
+            for section in self.sections:
+                title = section.get('title', f"Section {section['section_id']+1}")
+                
+                # Create extract
+                extract = extractor.create_extract(
+                    document_id=self.document_id,
+                    content=section['content'],
+                    context=f"Key section: {title}",
+                    priority=min(int(section['importance_score'] * 10), 100),
+                )
+                
+                if extract:
+                    extracts_created += 1
+                    # Store the ID of the first extract
+                    if extracts_created == 1:
+                        first_extract_id = extract.id
+            
+            # Emit signal for the first extract ID (if any extracts were created)
+            if first_extract_id is not None:
+                self.extractCreated.emit(first_extract_id)
+            
+            if extracts_created > 0:
+                QMessageBox.information(
+                    self, "Extracts Created", 
+                    f"Created {extracts_created} extracts from key sections."
+                )
+            else:
+                QMessageBox.warning(
+                    self, "No Extracts Created", 
+                    "Failed to create extracts from sections."
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error creating section extracts: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Error creating section extracts: {str(e)}"
+            )
+
+    @pyqtSlot()
+    def _on_set_api_key(self):
+        """Handle API key setting button click."""
+        provider_id = self.provider_combo.currentData()
+        provider_name = self.provider_combo.currentText()
+        
+        if not provider_id or provider_id not in AI_PROVIDERS:
+            QMessageBox.warning(self, "Invalid Provider", f"The selected provider '{provider_name}' is not valid.")
+            return
+        
+        from core.utils.settings_manager import SettingsManager
+        settings = SettingsManager()
+        
+        # Get the current API key based on the provider
+        setting_key = AI_PROVIDERS[provider_id]["setting_key"]
+        
+        # Get the correct key based on the provider
+        if provider_id == "openai":
+            current_api_key = settings.get_setting("api", "openai_api_key", "")
+            prompt_text = "Enter your OpenAI API key:"
+            window_title = "OpenAI API Key"
+            placeholder = "sk-..."
+        elif provider_id == "anthropic":
+            current_api_key = settings.get_setting("api", "anthropic_api_key", "")
+            prompt_text = "Enter your Anthropic API key:"
+            window_title = "Anthropic API Key"
+            placeholder = "sk-ant-..."
+        elif provider_id == "google":
+            current_api_key = settings.get_setting("api", "google_api_key", "")
+            prompt_text = "Enter your Google API key:"
+            window_title = "Google API Key"
+            placeholder = "AIzaSy..."
+        elif provider_id == "openrouter":
+            current_api_key = settings.get_setting("api", "openrouter_api_key", "")
+            prompt_text = "Enter your OpenRouter API key:"
+            window_title = "OpenRouter API Key"
+            placeholder = "sk-or-..."
+        elif provider_id == "ollama":
+            current_api_key = settings.get_setting("api", "ollama_host", "http://localhost:11434")
+            prompt_text = "Enter your Ollama host URL:"
+            window_title = "Ollama Host"
+            placeholder = "http://localhost:11434"
+        else:
+            current_api_key = ""
+            prompt_text = f"Enter your {provider_name} API key:"
+            window_title = f"{provider_name} API Key"
+            placeholder = ""
+        
+        # Show input dialog
+        api_key, ok = QInputDialog.getText(
+            self, 
+            window_title, 
+            prompt_text,
+            echo=QLineEdit.EchoMode.Normal,
+            text=current_api_key
+        )
+        
+        if ok and api_key:
+            # Set the correct setting based on provider
+            if provider_id == "openai":
+                settings.set_setting("api", "openai_api_key", api_key)
+            elif provider_id == "anthropic":
+                settings.set_setting("api", "anthropic_api_key", api_key)
+            elif provider_id == "google":
+                settings.set_setting("api", "google_api_key", api_key)
+            elif provider_id == "openrouter":
+                settings.set_setting("api", "openrouter_api_key", api_key)
+            elif provider_id == "ollama":
+                # Format Ollama host URL
+                if not api_key.startswith("http"):
+                    api_key = f"http://{api_key}"
+                if api_key.endswith("/"):
+                    api_key = api_key[:-1]
+                settings.set_setting("api", "ollama_host", api_key)
+            
+            # Save settings
+            settings.save_settings()
+            
+            # Get model
+            model = self.model_combo.currentText().strip()
+            if model:
+                # Save model setting
+                if provider_id == "openai":
+                    settings.set_setting("api", "openai_model", model)
+                elif provider_id == "anthropic":
+                    settings.set_setting("api", "anthropic_model", model)
+                elif provider_id == "google":
+                    settings.set_setting("api", "google_model", model)
+                elif provider_id == "openrouter":
+                    settings.set_setting("api", "openrouter_model", model)
+                elif provider_id == "ollama":
+                    settings.set_setting("api", "ollama_model", model)
+                
+                # Save updated settings
+                settings.save_settings()
+            
+            # Update API config
+            self.api_config = self._get_api_config()
+            
+            # Log the change
+            if provider_id == "ollama":
+                logger.info(f"Updated Ollama host to: {api_key}")
+            else:
+                logger.info(f"Updated API key for {provider_name}")
+                
+            # Set as default provider
+            settings.set_setting("ai", "provider", provider_id)
+            settings.save_settings()
+            
+            QMessageBox.information(
+                self, 
+                "Settings Updated", 
+                f"{provider_name} settings updated successfully."
+            )
+
+    def _on_temperature_changed(self):
+        """Handle temperature change."""
+        # Update temperature value label
+        self.temperature_value.setText(f"{self.temperature_slider.value() / 100:.2f}")
+
+    def closeEvent(self, event):
+        """Clean up resources when the dialog is closed."""
+        # Clean up worker thread if it exists
+        try:
+            if hasattr(self, 'summary_thread') and self.summary_thread is not None:
+                if self.summary_thread.isRunning():
+                    self.summary_thread.quit()
+                    self.summary_thread.wait(1000)  # Wait up to 1 second
+        except RuntimeError:
+            # Handle case where thread might have been deleted
+            logger.warning("Summary thread was already deleted during closeEvent")
+        except Exception as e:
+            logger.warning(f"Error cleaning up summary thread during closeEvent: {e}")
+            
+        # Clean up sections worker thread if it exists
+        try:
+            if hasattr(self, 'sections_thread') and self.sections_thread is not None:
+                if self.sections_thread.isRunning():
+                    self.sections_thread.quit()
+                    self.sections_thread.wait(1000)  # Wait up to 1 second
+        except RuntimeError:
+            # Handle case where thread might have been deleted
+            logger.warning("Sections thread was already deleted during closeEvent")
+        except Exception as e:
+            logger.warning(f"Error cleaning up sections thread during closeEvent: {e}")
+            
+        # Delete workers explicitly
+        if hasattr(self, 'summary_worker') and self.summary_worker is not None:
+            try:
+                self.summary_worker.deleteLater()
+            except Exception:
+                pass
+            self.summary_worker = None
+            
+        if hasattr(self, 'sections_worker') and self.sections_worker is not None:
+            try:
+                self.sections_worker.deleteLater()
+            except Exception:
+                pass
+            self.sections_worker = None
+            
+        # Call parent's closeEvent
+        super().closeEvent(event)
