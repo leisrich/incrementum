@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QGroupBox, QFormLayout, QToolBar,
     QLineEdit, QMessageBox, QMenu, QListWidget,
-    QListWidgetItem, QDialog, QCheckBox, QTabWidget,
+    QListWidgetItem, QDialog, QCheckBox, QTabWidget, 
+    QRadioButton
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QSize, QModelIndex
 from PyQt6.QtGui import QAction, QIcon, QTextCursor, QColor
