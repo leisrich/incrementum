@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
-    QTabWidget, QLineEdit, QSizePolicy
+    QTabWidget, QLineEdit, QSizePolicy, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray
 try:
@@ -26,7 +26,7 @@ try:
     HAS_WEBENGINE = True
 except ImportError:
     HAS_WEBENGINE = False
-from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat
+from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QKeyEvent
 
 from core.knowledge_base.models import Document, Extract
 from core.content_extractor.extractor import ContentExtractor
@@ -48,6 +48,268 @@ class WebViewCallback(QObject):
     def selectionChanged(self, text):
         """Handle selection change from JavaScript."""
         self.document_view._handle_webview_selection(text)
+
+class VimKeyHandler:
+    """Helper class for handling Vim-like key bindings."""
+    
+    def __init__(self, document_view):
+        self.document_view = document_view
+        self.vim_mode = True  # Default to Vim mode on
+        self.command_mode = False  # Normal mode by default (not command mode)
+        self.current_command = ""
+        self.count_prefix = ""  # For number prefixes like 5j
+        
+    def toggle_vim_mode(self):
+        """Toggle Vim mode on/off."""
+        self.vim_mode = not self.vim_mode
+        if not self.vim_mode:
+            self.command_mode = False
+            self.current_command = ""
+        logger.debug(f"Vim mode {'enabled' if self.vim_mode else 'disabled'}")
+        return self.vim_mode
+        
+    def handle_key_event(self, event):
+        """Handle key events in Vim style."""
+        if not self.vim_mode:
+            return False
+            
+        # Get key information
+        key = event.key()
+        text = event.text()
+        modifiers = event.modifiers()
+        
+        # Handle count prefix (numbers before commands)
+        if not self.command_mode and text.isdigit() and self.count_prefix != "0":  # Don't start with 0
+            self.count_prefix += text
+            return True
+            
+        # Get count (default to 1 if no prefix)
+        count = int(self.count_prefix) if self.count_prefix else 1
+        
+        # Handle command mode (after : key)
+        if self.command_mode:
+            if key == Qt.Key.Key_Escape:
+                self.command_mode = False
+                self.current_command = ""
+                return True
+            elif key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter:
+                self._execute_command(self.current_command)
+                self.command_mode = False
+                self.current_command = ""
+                return True
+            elif key == Qt.Key.Key_Backspace:
+                self.current_command = self.current_command[:-1]
+                return True
+            else:
+                self.current_command += text
+                return True
+                
+        # Handle normal mode keys
+        if key == Qt.Key.Key_J:  # j - move down
+            self._scroll_down(count)
+            self.count_prefix = ""
+            return True
+            
+        elif key == Qt.Key.Key_K:  # k - move up
+            self._scroll_up(count)
+            self.count_prefix = ""
+            return True
+            
+        elif key == Qt.Key.Key_G:  # g - go to top/bottom
+            if modifiers & Qt.KeyboardModifier.ShiftModifier:  # G - go to bottom
+                self._scroll_to_bottom()
+            else:  # g - go to top
+                self._scroll_to_top()
+            self.count_prefix = ""
+            return True
+            
+        elif key == Qt.Key.Key_D:  # d - half page down
+            if modifiers & Qt.KeyboardModifier.ControlModifier:  # Ctrl+d
+                self._scroll_half_page_down()
+                self.count_prefix = ""
+                return True
+                
+        elif key == Qt.Key.Key_U:  # u - half page up
+            if modifiers & Qt.KeyboardModifier.ControlModifier:  # Ctrl+u
+                self._scroll_half_page_up()
+                self.count_prefix = ""
+                return True
+                
+        elif key == Qt.Key.Key_F:  # f - page down
+            if modifiers & Qt.KeyboardModifier.ControlModifier:  # Ctrl+f
+                self._scroll_page_down()
+                self.count_prefix = ""
+                return True
+                
+        elif key == Qt.Key.Key_B:  # b - page up
+            if modifiers & Qt.KeyboardModifier.ControlModifier:  # Ctrl+b
+                self._scroll_page_up()
+                self.count_prefix = ""
+                return True
+                
+        elif key == Qt.Key.Key_Slash:  # / - search
+            # TODO: Implement search functionality
+            self.count_prefix = ""
+            return True
+            
+        elif key == Qt.Key.Key_Colon:  # : - command mode
+            self.command_mode = True
+            self.current_command = ""
+            self.count_prefix = ""
+            return True
+            
+        elif key == Qt.Key.Key_Escape:  # ESC - clear state
+            self.count_prefix = ""
+            return True
+            
+        # If we've gotten this far and still have a count_prefix, it wasn't used,
+        # so we should clear it
+        self.count_prefix = ""
+        return False
+        
+    def _scroll_down(self, count=1):
+        """Scroll down by count lines."""
+        content_edit = self.document_view.content_edit
+        
+        # Handle different widget types
+        if isinstance(content_edit, QTextEdit):
+            scrollbar = content_edit.verticalScrollBar()
+            if scrollbar:
+                # Use line height as scroll unit
+                line_height = content_edit.fontMetrics().height()
+                scrollbar.setValue(scrollbar.value() + count * line_height)
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, use JavaScript to scroll
+            script = f"window.scrollBy(0, {count * 30});"  # 30px per line
+            content_edit.page().runJavaScript(script)
+        
+    def _scroll_up(self, count=1):
+        """Scroll up by count lines."""
+        content_edit = self.document_view.content_edit
+        
+        # Handle different widget types
+        if isinstance(content_edit, QTextEdit):
+            scrollbar = content_edit.verticalScrollBar()
+            if scrollbar:
+                # Use line height as scroll unit
+                line_height = content_edit.fontMetrics().height()
+                scrollbar.setValue(scrollbar.value() - count * line_height)
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, use JavaScript to scroll
+            script = f"window.scrollBy(0, -{count * 30});"  # 30px per line
+            content_edit.page().runJavaScript(script)
+    
+    def _scroll_to_top(self):
+        """Scroll to the top of the document."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            # For text edit, move cursor to start and ensure visible
+            cursor = content_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            content_edit.setTextCursor(cursor)
+            content_edit.ensureCursorVisible()
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, use JavaScript to scroll to top
+            script = "window.scrollTo(0, 0);"
+            content_edit.page().runJavaScript(script)
+    
+    def _scroll_to_bottom(self):
+        """Scroll to the bottom of the document."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            # For text edit, move cursor to end and ensure visible
+            cursor = content_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            content_edit.setTextCursor(cursor)
+            content_edit.ensureCursorVisible()
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, use JavaScript to scroll to bottom
+            script = "window.scrollTo(0, document.body.scrollHeight);"
+            content_edit.page().runJavaScript(script)
+    
+    def _scroll_half_page_down(self):
+        """Scroll down half a page (Ctrl+d in Vim)."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            scrollbar = content_edit.verticalScrollBar()
+            if scrollbar:
+                # Calculate half page height
+                page_step = scrollbar.pageStep()
+                scrollbar.setValue(scrollbar.value() + page_step // 2)
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, use JavaScript to get window height and scroll
+            script = "window.scrollBy(0, window.innerHeight / 2);"
+            content_edit.page().runJavaScript(script)
+    
+    def _scroll_half_page_up(self):
+        """Scroll up half a page (Ctrl+u in Vim)."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            scrollbar = content_edit.verticalScrollBar()
+            if scrollbar:
+                # Calculate half page height
+                page_step = scrollbar.pageStep()
+                scrollbar.setValue(scrollbar.value() - page_step // 2)
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, use JavaScript to get window height and scroll
+            script = "window.scrollBy(0, -window.innerHeight / 2);"
+            content_edit.page().runJavaScript(script)
+    
+    def _scroll_page_down(self):
+        """Scroll down a full page (Ctrl+f in Vim)."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            scrollbar = content_edit.verticalScrollBar()
+            if scrollbar:
+                # Use page step
+                page_step = scrollbar.pageStep()
+                scrollbar.setValue(scrollbar.value() + page_step)
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, use JavaScript to get window height and scroll
+            script = "window.scrollBy(0, window.innerHeight);"
+            content_edit.page().runJavaScript(script)
+    
+    def _scroll_page_up(self):
+        """Scroll up a full page (Ctrl+b in Vim)."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            scrollbar = content_edit.verticalScrollBar()
+            if scrollbar:
+                # Use page step
+                page_step = scrollbar.pageStep()
+                scrollbar.setValue(scrollbar.value() - page_step)
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, use JavaScript to get window height and scroll
+            script = "window.scrollBy(0, -window.innerHeight);"
+            content_edit.page().runJavaScript(script)
+    
+    def _execute_command(self, command):
+        """Execute a Vim-like command."""
+        command = command.strip()
+        
+        if not command:
+            return
+            
+        logger.debug(f"Executing Vim command: {command}")
+        
+        # Handle basic commands
+        if command in ['q', 'quit']:
+            # Close the document
+            self.document_view.close()
+        elif command.startswith('set '):
+            # Handle settings
+            setting = command[4:].strip()
+            if setting == 'novim':
+                self.toggle_vim_mode()
+            elif setting == 'vim':
+                self.vim_mode = True
+        # Add more commands as needed
 
 class DocumentView(QWidget):
     """UI component for viewing and processing documents."""
@@ -71,6 +333,9 @@ class DocumentView(QWidget):
             "size": None,
             "scroll_position": 0
         }
+        
+        # Create the Vim key handler
+        self.vim_handler = VimKeyHandler(self)
         
         # Create the UI
         self._create_ui()
@@ -104,6 +369,15 @@ class DocumentView(QWidget):
         self.create_extract_action.triggered.connect(self._on_create_extract)
         toolbar.addAction(self.create_extract_action)
         
+        toolbar.addSeparator()
+        
+        # Vim mode toggle
+        self.vim_toggle_action = QAction("Vim Mode", self)
+        self.vim_toggle_action.setCheckable(True)
+        self.vim_toggle_action.setChecked(self.vim_handler.vim_mode)
+        self.vim_toggle_action.triggered.connect(self._toggle_vim_mode)
+        toolbar.addAction(self.vim_toggle_action)
+        
         layout.addWidget(toolbar)
         
         # Content splitter
@@ -113,6 +387,7 @@ class DocumentView(QWidget):
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(0)  # Minimize spacing between elements
         
         # Content will be added dynamically based on document type
         
@@ -130,9 +405,63 @@ class DocumentView(QWidget):
         splitter.setStretchFactor(0, 19)  # Content gets 19x the stretch of extracts
         splitter.setStretchFactor(1, 1)   # Extracts get 1x stretch factor
         
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)  # Add stretch factor of 1 to expand
+        
+        # Add Vim mode status bar - use minimal height
+        self.vim_status_widget = QWidget()
+        self.vim_status_widget.setMaximumHeight(20)  # Limit height
+        vim_status_layout = QHBoxLayout(self.vim_status_widget)
+        vim_status_layout.setContentsMargins(2, 1, 2, 1)  # Minimal margins
+        
+        self.vim_status_label = QLabel("Vim Mode: Normal")
+        vim_status_layout.addWidget(self.vim_status_label)
+        
+        # Add vim command display
+        self.vim_command_label = QLabel("")
+        vim_status_layout.addWidget(self.vim_command_label)
+        
+        vim_status_layout.addStretch(1)  # Push everything to the left
+        
+        # Add to main layout - no stretch (keep minimal)
+        layout.addWidget(self.vim_status_widget, 0)  # Use 0 stretch factor
         
         self.setLayout(layout)
+        
+        # Update Vim status bar visibility based on mode
+        self._update_vim_status_visibility()
+    
+    def _update_vim_status_visibility(self):
+        """Update the visibility of the Vim status bar based on mode."""
+        self.vim_status_widget.setVisible(self.vim_handler.vim_mode)
+        self.vim_toggle_action.setChecked(self.vim_handler.vim_mode)
+    
+    def _toggle_vim_mode(self):
+        """Toggle Vim mode on/off."""
+        is_enabled = self.vim_handler.toggle_vim_mode()
+        self.vim_toggle_action.setChecked(is_enabled)
+        self._update_vim_status_visibility()
+    
+    def keyPressEvent(self, event):
+        """Handle key press events for Vim-like navigation."""
+        # Check if Vim handler wants to handle this key
+        if self.vim_handler.handle_key_event(event):
+            # Update command display if in command mode
+            if self.vim_handler.command_mode:
+                self.vim_status_label.setText("Vim Mode: Command")
+                self.vim_command_label.setText(":" + self.vim_handler.current_command)
+            else:
+                self.vim_status_label.setText("Vim Mode: Normal")
+                # Show count prefix if any
+                if self.vim_handler.count_prefix:
+                    self.vim_command_label.setText(self.vim_handler.count_prefix)
+                else:
+                    self.vim_command_label.setText("")
+            
+            # Event was handled
+            return
+        
+        # If not handled by Vim mode, pass to parent
+        super().keyPressEvent(event)
     
     def _create_webview_and_setup(self, html_content, base_url):
         """Create a QWebEngineView and set it up with the content."""
@@ -141,10 +470,14 @@ class DocumentView(QWidget):
             editor = QTextEdit()
             editor.setReadOnly(True)
             editor.setHtml(html_content)
+            editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             return editor
         
         # Create WebEngine view for HTML content
         webview = QWebEngineView()
+        
+        # Set size policy to expand
+        webview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # Configure settings to allow all JavaScript functionality
         settings = webview.settings()
@@ -753,6 +1086,9 @@ window.addEventListener('load', function() {
             text_edit = QTextEdit()
             text_edit.setReadOnly(True)
             
+            # Set size policy to expand
+            text_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
             # Read file content
             with open(self.document.file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -760,8 +1096,8 @@ window.addEventListener('load', function() {
             # Set content
             text_edit.setPlainText(content)
             
-            # Add to layout
-            self.content_layout.addWidget(text_edit)
+            # Add to layout - use stretch factor to expand
+            self.content_layout.addWidget(text_edit, 1)
             
             # Store for later use
             self.content_edit = text_edit
@@ -831,7 +1167,8 @@ window.addEventListener('load', function() {
                 text_edit = QTextEdit()
                 text_edit.setReadOnly(True)
                 text_edit.setPlainText(html_content)
-                self.content_layout.addWidget(text_edit)
+                text_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                self.content_layout.addWidget(text_edit, 1)  # Add stretch factor
                 self.content_edit = text_edit
                 logger.info("Displaying raw HTML content instead")
                 return
@@ -853,8 +1190,12 @@ window.addEventListener('load', function() {
             # Create web view with libraries injected as needed
             webview = self._create_webview_and_setup(html_content, base_url)
             
-            # Add to layout
-            self.content_layout.addWidget(webview)
+            # Set size policy to expand
+            if HAS_WEBENGINE and isinstance(webview, QWebEngineView):
+                webview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Add to layout with stretch
+            self.content_layout.addWidget(webview, 1)
             
             # Store for later use
             self.content_edit = webview
