@@ -113,6 +113,9 @@ class MainWindow(QMainWindow):
         # Flag to track initialization status
         self._initialization_complete = False
         
+        # Set application icon
+        self._set_application_icon()
+        
         # Initialize database session
         self.db_session = init_database()
         
@@ -172,6 +175,55 @@ class MainWindow(QMainWindow):
         
         # Connect exit action
         self.action_exit.triggered.connect(self.close)
+    
+    def _set_application_icon(self):
+        """Set application icon based on platform."""
+        import platform
+        import os
+        from PyQt6.QtGui import QIcon
+        from PyQt6.QtCore import QSize
+        
+        # Base path for icons
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                                "assets", "icons")
+        
+        # Detect platform
+        system = platform.system().lower()
+        
+        if system == "windows":
+            # Windows uses .ico files
+            icon_file = os.path.join(icon_path, "incrementum.ico")
+            if os.path.exists(icon_file):
+                app_icon = QIcon(icon_file)
+                self.setWindowIcon(app_icon)
+                QApplication.setWindowIcon(app_icon)  # Set application-wide
+        elif system == "darwin":  # macOS
+            # macOS can use large PNG icons
+            icon_file = os.path.join(icon_path, "incrementum.png") 
+            if os.path.exists(icon_file):
+                app_icon = QIcon(icon_file)
+                self.setWindowIcon(app_icon)
+                QApplication.setWindowIcon(app_icon)  # Set application-wide
+        else:  # Linux and others
+            # Linux typically uses various sized PNGs
+            icon = QIcon()
+            # Add multiple sizes for proper scaling
+            for size in [16, 22, 24, 32, 48, 64, 128, 256]:
+                icon_file = os.path.join(icon_path, f"incrementum_{size}.png")
+                if os.path.exists(icon_file):
+                    icon.addFile(icon_file, QSize(size, size))
+            
+            # Set the icon if we added any files
+            if not icon.isNull():
+                self.setWindowIcon(icon)
+                # On Linux/X11, also set the application-wide icon
+                # This makes the icon appear in task bars, etc.
+                QApplication.setWindowIcon(icon)
+                
+        # Also set application name and organization for proper desktop integration
+        QApplication.setApplicationName("Incrementum")
+        QApplication.setOrganizationName("Incrementum")
+        QApplication.setApplicationDisplayName("Incrementum - Incremental Learning System")
     
     def _check_session_state(self):
         """Debug check of session state after window is shown."""
