@@ -500,6 +500,292 @@ To import this deck, use the "Import Deck" function in Incrementum.
             logger.exception(f"Error importing deck: {e}")
             self.db_session.rollback()
             return (0, 0, 0)
+    
+    def export_all_data(self, filepath: str, format_type: str = "json") -> bool:
+        """
+        Export all data (extracts, learning items, documents, tags) to a single file.
+        
+        Args:
+            filepath: Path to save the export file
+            format_type: Format to use (json, markdown, or text)
+            
+        Returns:
+            True if export successful, False otherwise
+        """
+        try:
+            # Get all data from the database
+            documents = self.db_session.query(Document).all()
+            extracts = self.db_session.query(Extract).all()
+            learning_items = self.db_session.query(LearningItem).all()
+            tags = self.db_session.query(Tag).all()
+            categories = self.db_session.query(Category).all()
+            
+            if format_type.lower() == "json":
+                return self._export_all_json(filepath, documents, extracts, learning_items, tags, categories)
+            elif format_type.lower() == "markdown":
+                return self._export_all_markdown(filepath, documents, extracts, learning_items, tags, categories)
+            elif format_type.lower() == "text":
+                return self._export_all_text(filepath, documents, extracts, learning_items, tags, categories)
+            else:
+                logger.error(f"Unsupported export format: {format_type}")
+                return False
+                
+        except Exception as e:
+            logger.exception(f"Error exporting all data: {e}")
+            return False
+    
+    def _export_all_json(self, filepath: str, documents, extracts, learning_items, tags, categories) -> bool:
+        """Export all data in JSON format."""
+        export_data = {
+            'version': '1.0',
+            'export_date': datetime.utcnow().isoformat(),
+            'categories': [],
+            'documents': [],
+            'extracts': [],
+            'learning_items': [],
+            'tags': []
+        }
+        
+        # Add categories
+        for category in categories:
+            cat_data = {
+                'id': category.id,
+                'name': category.name,
+                'description': category.description,
+                'parent_id': category.parent_id
+            }
+            export_data['categories'].append(cat_data)
+        
+        # Add documents
+        for document in documents:
+            doc_data = {
+                'id': document.id,
+                'title': document.title,
+                'author': document.author,
+                'content_type': document.content_type,
+                'imported_date': document.imported_date.isoformat() if document.imported_date else None,
+                'category_id': document.category_id,
+                'tags': [tag.name for tag in document.tags]
+            }
+            export_data['documents'].append(doc_data)
+        
+        # Add extracts
+        for extract in extracts:
+            extract_data = {
+                'id': extract.id,
+                'content': extract.content,
+                'context': extract.context,
+                'document_id': extract.document_id,
+                'position': extract.position,
+                'priority': extract.priority,
+                'created_date': extract.created_date.isoformat() if extract.created_date else None,
+                'tags': [tag.name for tag in extract.tags]
+            }
+            export_data['extracts'].append(extract_data)
+        
+        # Add learning items
+        for item in learning_items:
+            item_data = {
+                'id': item.id,
+                'item_type': item.item_type,
+                'question': item.question,
+                'answer': item.answer,
+                'extract_id': item.extract_id,
+                'priority': item.priority,
+                'next_review': item.next_review.isoformat() if item.next_review else None,
+                'last_review': item.last_review.isoformat() if item.last_review else None,
+                'interval': item.interval,
+                'easiness': item.easiness,
+                'repetitions': item.repetitions
+            }
+            export_data['learning_items'].append(item_data)
+        
+        # Add tags
+        for tag in tags:
+            tag_data = {
+                'id': tag.id,
+                'name': tag.name
+            }
+            export_data['tags'].append(tag_data)
+        
+        # Write to file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Exported all data to {filepath} in JSON format")
+        return True
+    
+    def _export_all_markdown(self, filepath: str, documents, extracts, learning_items, tags, categories) -> bool:
+        """Export all data in Markdown format."""
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                # Header
+                f.write(f"# Incrementum Export\n\n")
+                f.write(f"*Generated on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
+                
+                # Categories
+                f.write(f"## Categories ({len(categories)})\n\n")
+                for category in categories:
+                    parent_info = f" (Child of: {category.parent.name})" if category.parent else ""
+                    f.write(f"### {category.name}{parent_info}\n\n")
+                    if category.description:
+                        f.write(f"{category.description}\n\n")
+                
+                # Documents
+                f.write(f"## Documents ({len(documents)})\n\n")
+                for document in documents:
+                    category_info = f" [Category: {document.category.name}]" if document.category else ""
+                    f.write(f"### {document.title}{category_info}\n\n")
+                    
+                    if document.author:
+                        f.write(f"**Author:** {document.author}  \n")
+                    
+                    f.write(f"**Type:** {document.content_type}  \n")
+                    f.write(f"**Imported:** {document.imported_date.strftime('%Y-%m-%d') if document.imported_date else 'Unknown'}  \n")
+                    
+                    if document.tags:
+                        f.write(f"**Tags:** {', '.join([tag.name for tag in document.tags])}  \n")
+                    
+                    f.write("\n")
+                
+                # Extracts
+                f.write(f"## Extracts ({len(extracts)})\n\n")
+                for extract in extracts:
+                    doc_title = extract.document.title if extract.document else "Unknown Document"
+                    f.write(f"### Extract from {doc_title}\n\n")
+                    
+                    f.write(f"**Content:**\n\n")
+                    f.write(f"```\n{extract.content}\n```\n\n")
+                    
+                    if extract.context:
+                        f.write(f"**Context:**\n\n")
+                        f.write(f"```\n{extract.context}\n```\n\n")
+                    
+                    if extract.tags:
+                        f.write(f"**Tags:** {', '.join([tag.name for tag in extract.tags])}\n\n")
+                    
+                    f.write(f"**Created:** {extract.created_date.strftime('%Y-%m-%d') if extract.created_date else 'Unknown'}\n\n")
+                    f.write(f"**Priority:** {extract.priority}\n\n")
+                
+                # Learning Items
+                f.write(f"## Learning Items ({len(learning_items)})\n\n")
+                for item in learning_items:
+                    item_extract = "Unknown Extract" 
+                    if item.extract:
+                        item_extract = f"{item.extract.content[:50]}..." if len(item.extract.content) > 50 else item.extract.content
+                    
+                    f.write(f"### {item.item_type} Item\n\n")
+                    f.write(f"**Question:**\n\n{item.question}\n\n")
+                    f.write(f"**Answer:**\n\n{item.answer}\n\n")
+                    f.write(f"**Extract:** {item_extract}\n\n")
+                    f.write(f"**Next Review:** {item.next_review.strftime('%Y-%m-%d') if item.next_review else 'Not scheduled'}\n\n")
+                    f.write(f"**Last Review:** {item.last_review.strftime('%Y-%m-%d') if item.last_review else 'Never reviewed'}\n\n")
+                    f.write(f"**Repetitions:** {item.repetitions}\n\n")
+                    f.write(f"**Interval:** {item.interval} days\n\n")
+                    f.write(f"**Easiness:** {item.easiness}\n\n")
+                
+                # Tags
+                f.write(f"## Tags ({len(tags)})\n\n")
+                tag_list = sorted([tag.name for tag in tags])
+                for i, tag_name in enumerate(tag_list):
+                    f.write(f"`{tag_name}` ")
+                    if (i + 1) % 5 == 0:
+                        f.write("\n")
+            
+            logger.info(f"Exported all data to {filepath} in Markdown format")
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Error exporting to Markdown: {e}")
+            return False
+    
+    def _export_all_text(self, filepath: str, documents, extracts, learning_items, tags, categories) -> bool:
+        """Export all data in plain text format."""
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                # Header
+                f.write(f"INCREMENTUM EXPORT\n")
+                f.write(f"=================\n\n")
+                f.write(f"Generated on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                # Categories
+                f.write(f"CATEGORIES ({len(categories)})\n")
+                f.write(f"=========================\n\n")
+                for category in categories:
+                    parent_info = f" (Child of: {category.parent.name})" if category.parent else ""
+                    f.write(f"{category.name}{parent_info}\n")
+                    if category.description:
+                        f.write(f"  {category.description}\n")
+                    f.write("\n")
+                
+                # Documents
+                f.write(f"DOCUMENTS ({len(documents)})\n")
+                f.write(f"=======================\n\n")
+                for document in documents:
+                    category_info = f" [Category: {document.category.name}]" if document.category else ""
+                    f.write(f"{document.title}{category_info}\n")
+                    
+                    if document.author:
+                        f.write(f"  Author: {document.author}\n")
+                    
+                    f.write(f"  Type: {document.content_type}\n")
+                    f.write(f"  Imported: {document.imported_date.strftime('%Y-%m-%d') if document.imported_date else 'Unknown'}\n")
+                    
+                    if document.tags:
+                        f.write(f"  Tags: {', '.join([tag.name for tag in document.tags])}\n")
+                    
+                    f.write("\n")
+                
+                # Extracts
+                f.write(f"EXTRACTS ({len(extracts)})\n")
+                f.write(f"====================\n\n")
+                for extract in extracts:
+                    doc_title = extract.document.title if extract.document else "Unknown Document"
+                    f.write(f"Extract from {doc_title}\n")
+                    f.write(f"-------------------------\n")
+                    
+                    f.write(f"Content:\n{extract.content}\n\n")
+                    
+                    if extract.context:
+                        f.write(f"Context:\n{extract.context}\n\n")
+                    
+                    if extract.tags:
+                        f.write(f"Tags: {', '.join([tag.name for tag in extract.tags])}\n")
+                    
+                    f.write(f"Created: {extract.created_date.strftime('%Y-%m-%d') if extract.created_date else 'Unknown'}\n")
+                    f.write(f"Priority: {extract.priority}\n\n")
+                
+                # Learning Items
+                f.write(f"LEARNING ITEMS ({len(learning_items)})\n")
+                f.write(f"=============================\n\n")
+                for item in learning_items:
+                    item_extract = "Unknown Extract" 
+                    if item.extract:
+                        item_extract = f"{item.extract.content[:50]}..." if len(item.extract.content) > 50 else item.extract.content
+                    
+                    f.write(f"{item.item_type} Item\n")
+                    f.write(f"-------------------------\n")
+                    f.write(f"Question:\n{item.question}\n\n")
+                    f.write(f"Answer:\n{item.answer}\n\n")
+                    f.write(f"Extract: {item_extract}\n")
+                    f.write(f"Next Review: {item.next_review.strftime('%Y-%m-%d') if item.next_review else 'Not scheduled'}\n")
+                    f.write(f"Last Review: {item.last_review.strftime('%Y-%m-%d') if item.last_review else 'Never reviewed'}\n")
+                    f.write(f"Repetitions: {item.repetitions}\n")
+                    f.write(f"Interval: {item.interval} days\n")
+                    f.write(f"Easiness: {item.easiness}\n\n")
+                
+                # Tags
+                f.write(f"TAGS ({len(tags)})\n")
+                f.write(f"=============\n\n")
+                for tag in tags:
+                    f.write(f"{tag.name}\n")
+            
+            logger.info(f"Exported all data to {filepath} in Text format")
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Error exporting to Text: {e}")
+            return False
 
 
 # ui/export_dialog.py

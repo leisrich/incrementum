@@ -2,6 +2,7 @@
 
 import os
 import logging
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
 
 from PyQt6.QtWidgets import (
@@ -50,52 +51,41 @@ class ExportDialog(QDialog):
         # Export type selection
         type_layout = QHBoxLayout()
         
-        self.type_group = QButtonGroup(self)
+        self.export_type_group = QButtonGroup(self)
         
         self.extracts_radio = QRadioButton("Extracts")
-        self.extracts_radio.setChecked(True)
-        self.type_group.addButton(self.extracts_radio)
-        type_layout.addWidget(self.extracts_radio)
-        
         self.items_radio = QRadioButton("Learning Items")
-        self.type_group.addButton(self.items_radio)
-        type_layout.addWidget(self.items_radio)
-        
         self.deck_radio = QRadioButton("Complete Deck")
-        self.type_group.addButton(self.deck_radio)
+        self.all_data_radio = QRadioButton("All Data")
+        
+        self.export_type_group.addButton(self.extracts_radio)
+        self.export_type_group.addButton(self.items_radio)
+        self.export_type_group.addButton(self.deck_radio)
+        self.export_type_group.addButton(self.all_data_radio)
+        
+        # Default to selected type based on provided IDs
+        if self.extract_ids:
+            self.extracts_radio.setChecked(True)
+        elif self.item_ids:
+            self.items_radio.setChecked(True)
+        else:
+            self.all_data_radio.setChecked(True)
+        
+        type_layout.addWidget(self.extracts_radio)
+        type_layout.addWidget(self.items_radio)
         type_layout.addWidget(self.deck_radio)
-        
-        # Connect signals
-        self.extracts_radio.toggled.connect(self._on_export_type_changed)
-        self.items_radio.toggled.connect(self._on_export_type_changed)
-        self.deck_radio.toggled.connect(self._on_export_type_changed)
-        
+        type_layout.addWidget(self.all_data_radio)
         content_layout.addLayout(type_layout)
         
-        # Include learning items checkbox (for extracts)
-        self.include_items_check = QCheckBox("Include linked learning items")
+        # Item selection list
+        self.items_list = QListWidget()
+        self.items_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        content_layout.addWidget(self.items_list)
+        
+        # Include learning items option (for extracts)
+        self.include_items_check = QCheckBox("Include related learning items")
         self.include_items_check.setChecked(True)
         content_layout.addWidget(self.include_items_check)
-        
-        # Deck title (for deck export)
-        deck_title_layout = QFormLayout()
-        self.deck_title = QLineEdit()
-        self.deck_title.setText(f"Incrementum Deck - {datetime.now().strftime('%Y-%m-%d')}")
-        deck_title_layout.addRow("Deck Title:", self.deck_title)
-        content_layout.addLayout(deck_title_layout)
-        
-        # Deck description (for deck export)
-        deck_desc_layout = QFormLayout()
-        self.deck_description = QTextEdit()
-        self.deck_description.setMaximumHeight(100)
-        self.deck_description.setText("Exported from Incrementum")
-        deck_desc_layout.addRow("Description:", self.deck_description)
-        content_layout.addLayout(deck_desc_layout)
-        
-        # Items list
-        self.items_list = QListWidget()
-        self.items_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        content_layout.addWidget(self.items_list)
         
         main_layout.addWidget(content_group)
         
@@ -105,33 +95,49 @@ class ExportDialog(QDialog):
         
         # Format selection
         self.format_combo = QComboBox()
-        self.format_combo.addItem("JSON Format (.json)", "json")
-        self.format_combo.addItem("Deck Package (.izd)", "izd")
-        options_layout.addRow("Export Format:", self.format_combo)
+        self.format_combo.addItem("JSON", "json")
+        self.format_combo.addItem("Markdown", "markdown")
+        self.format_combo.addItem("Plain Text", "text")
+        options_layout.addRow("Format:", self.format_combo)
         
-        # Connect signals
-        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        # Filename
+        filename_layout = QHBoxLayout()
+        self.filename_edit = QLineEdit()
+        self.filename_edit.setText(f"incrementum_export_{datetime.now().strftime('%Y%m%d')}")
+        
+        self.browse_button = QPushButton("Browse...")
+        filename_layout.addWidget(self.filename_edit)
+        filename_layout.addWidget(self.browse_button)
+        options_layout.addRow("Filename:", filename_layout)
+        
+        # Optional description
+        self.description_edit = QTextEdit()
+        self.description_edit.setPlaceholderText("Optional description for this export")
+        self.description_edit.setMaximumHeight(80)
+        options_layout.addRow("Description:", self.description_edit)
         
         main_layout.addWidget(options_group)
         
         # Buttons
         button_layout = QHBoxLayout()
-        
-        self.export_button = QPushButton("Export...")
-        self.export_button.clicked.connect(self._on_export)
-        button_layout.addWidget(self.export_button)
+        self.export_button = QPushButton("Export")
+        self.cancel_button = QPushButton("Cancel")
         
         button_layout.addStretch()
-        
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.export_button)
         button_layout.addWidget(self.cancel_button)
         
         main_layout.addLayout(button_layout)
         
-        # Initial UI state
+        # Connect signals
+        self.export_type_group.buttonClicked.connect(self._on_export_type_changed)
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        self.browse_button.clicked.connect(self._on_browse)
+        self.export_button.clicked.connect(self._on_export)
+        self.cancel_button.clicked.connect(self.reject)
+        
+        # Initial UI update
         self._on_export_type_changed()
-        self._on_format_changed()
     
     def _load_items(self):
         """Load items based on selection type."""
@@ -211,30 +217,95 @@ class ExportDialog(QDialog):
                 # No extracts specified, show message
                 self.items_list.addItem("No extracts selected for deck export")
     
+    def _load_extracts(self):
+        """Load extracts for selection."""
+        self.items_list.clear()
+        
+        # Get recent extracts
+        extracts = self.db_session.query(Extract).order_by(Extract.created_date.desc()).limit(100).all()
+        
+        if extracts:
+            for extract in extracts:
+                # Create list item with shortened content
+                content = extract.content
+                if len(content) > 100:
+                    content = content[:97] + "..."
+                
+                item = QListWidgetItem(content)
+                item.setData(Qt.ItemDataRole.UserRole, extract.id)
+                
+                # Pre-select if it's in the initial extracts list
+                if self.extract_ids and extract.id in self.extract_ids:
+                    item.setSelected(True)
+                
+                self.items_list.addItem(item)
+        else:
+            # No extracts in database
+            item = QListWidgetItem("No extracts found in database")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.items_list.addItem(item)
+    
+    def _load_learning_items(self):
+        """Load learning items for selection."""
+        self.items_list.clear()
+        
+        # Get recent learning items
+        items = self.db_session.query(LearningItem).order_by(LearningItem.created_date.desc()).limit(100).all()
+        
+        if items:
+            for item in items:
+                # Create list item with question
+                question = item.question
+                if len(question) > 100:
+                    question = question[:97] + "..."
+                
+                list_item = QListWidgetItem(question)
+                list_item.setData(Qt.ItemDataRole.UserRole, item.id)
+                
+                # Pre-select if it's in the initial items list
+                if self.item_ids and item.id in self.item_ids:
+                    list_item.setSelected(True)
+                
+                self.items_list.addItem(list_item)
+        else:
+            # No learning items in database
+            item = QListWidgetItem("No learning items found in database")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.items_list.addItem(item)
+    
     @pyqtSlot()
     def _on_export_type_changed(self):
-        """Handle export type selection change."""
-        # Update UI based on selection
+        """Handle export type change."""
+        # Update UI based on selected export type
         if self.extracts_radio.isChecked():
+            self.items_list.setEnabled(True)
+            self.include_items_check.setEnabled(True)
             self.include_items_check.setVisible(True)
-            self.deck_title.setVisible(False)
-            self.deck_description.setVisible(False)
-            self.format_combo.setEnabled(True)
-        elif self.items_radio.isChecked():
-            self.include_items_check.setVisible(False)
-            self.deck_title.setVisible(False)
-            self.deck_description.setVisible(False)
-            self.format_combo.setEnabled(True)
-        elif self.deck_radio.isChecked():
-            self.include_items_check.setVisible(False)
-            self.deck_title.setVisible(True)
-            self.deck_description.setVisible(True)
-            # Force package format for deck
-            self.format_combo.setCurrentIndex(1)  # Deck Package
-            self.format_combo.setEnabled(False)
+            self._load_extracts()
         
-        # Reload items
-        self._load_items()
+        elif self.items_radio.isChecked():
+            self.items_list.setEnabled(True)
+            self.include_items_check.setEnabled(False)
+            self.include_items_check.setVisible(False)
+            self._load_learning_items()
+        
+        elif self.deck_radio.isChecked():
+            self.items_list.setEnabled(True)
+            self.include_items_check.setEnabled(False)
+            self.include_items_check.setVisible(False)
+            self._load_extracts()
+        
+        elif self.all_data_radio.isChecked():
+            self.items_list.setEnabled(False)
+            self.include_items_check.setEnabled(False)
+            self.include_items_check.setVisible(False)
+            self.items_list.clear()
+            item = QListWidgetItem("All data will be exported")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.items_list.addItem(item)
+        
+        # Update filename
+        self._update_filename()
     
     @pyqtSlot()
     def _on_format_changed(self):
@@ -253,83 +324,180 @@ class ExportDialog(QDialog):
     @pyqtSlot()
     def _on_export(self):
         """Handle export button click."""
-        # Get selected IDs
-        selected_ids = []
-        for i in range(self.items_list.count()):
-            item = self.items_list.item(i)
-            if item.isSelected():
-                item_id = item.data(Qt.ItemDataRole.UserRole)
-                if item_id is not None:
-                    selected_ids.append(item_id)
+        # Get file path
+        file_format = self.format_combo.currentData()
+        extension = ".json" if file_format == "json" else ".md" if file_format == "markdown" else ".txt"
         
-        if not selected_ids:
-            QMessageBox.warning(
-                self, "No Items Selected", 
-                "Please select at least one item to export."
+        filepath = self.filename_edit.text()
+        if not filepath.endswith(extension):
+            filepath += extension
+        
+        # Check if file exists
+        if os.path.exists(filepath):
+            reply = QMessageBox.question(
+                self, "File Exists", 
+                f"File '{filepath}' already exists. Overwrite?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
             )
-            return
+            
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         
-        # Get export format
-        format_type = self.format_combo.currentData()
-        
-        # Get file extension
-        if format_type == "json":
-            file_ext = ".json"
-            file_filter = "JSON Files (*.json)"
-        else:  # izd
-            file_ext = ".izd"
-            file_filter = "Incrementum Deck Files (*.izd)"
-        
-        # Get save path
-        filepath, _ = QFileDialog.getSaveFileName(
-            self, "Export To", "", file_filter
-        )
-        
-        if not filepath:
-            return
-        
-        # Add extension if missing
-        if not filepath.endswith(file_ext):
-            filepath += file_ext
-        
-        # Perform export based on type
+        # Perform export based on selected type
         success = False
-        
-        if self.extracts_radio.isChecked():
-            # Export extracts
-            include_items = self.include_items_check.isChecked()
-            success = self.export_manager.export_extracts(selected_ids, filepath, include_items)
+        if self.all_data_radio.isChecked():
+            # Export all data
+            success = self.export_manager.export_all_data(filepath, file_format)
             
             if success:
                 QMessageBox.information(
-                    self, "Export Successful", 
-                    f"Successfully exported {len(selected_ids)} extracts to {filepath}"
+                    self, "Export Complete", 
+                    f"All data has been exported to:\n{filepath}"
+                )
+                self.accept()
+            else:
+                QMessageBox.critical(
+                    self, "Export Failed", 
+                    f"Failed to export all data. Check the logs for details."
+                )
+        
+        elif self.extracts_radio.isChecked():
+            # Get selected extracts
+            selected_items = self.items_list.selectedItems()
+            if not selected_items:
+                QMessageBox.warning(
+                    self, "No Selection", 
+                    "Please select at least one extract to export."
+                )
+                return
+            
+            # Get extract IDs
+            extract_ids = [
+                item.data(Qt.ItemDataRole.UserRole)
+                for item in selected_items
+            ]
+            
+            # Export extracts
+            include_items = self.include_items_check.isChecked()
+            success = self.export_manager.export_extracts(extract_ids, filepath, include_items)
+            
+            if success:
+                QMessageBox.information(
+                    self, "Export Complete", 
+                    f"Exported {len(extract_ids)} extracts to:\n{filepath}"
+                )
+                self.accept()
+            else:
+                QMessageBox.critical(
+                    self, "Export Failed", 
+                    f"Failed to export extracts. Check the logs for details."
                 )
         
         elif self.items_radio.isChecked():
+            # Get selected learning items
+            selected_items = self.items_list.selectedItems()
+            if not selected_items:
+                QMessageBox.warning(
+                    self, "No Selection", 
+                    "Please select at least one learning item to export."
+                )
+                return
+            
+            # Get learning item IDs
+            item_ids = [
+                item.data(Qt.ItemDataRole.UserRole)
+                for item in selected_items
+            ]
+            
             # Export learning items
-            success = self.export_manager.export_learning_items(selected_ids, filepath)
+            success = self.export_manager.export_learning_items(item_ids, filepath)
             
             if success:
                 QMessageBox.information(
-                    self, "Export Successful", 
-                    f"Successfully exported {len(selected_ids)} learning items to {filepath}"
+                    self, "Export Complete", 
+                    f"Exported {len(item_ids)} learning items to:\n{filepath}"
+                )
+                self.accept()
+            else:
+                QMessageBox.critical(
+                    self, "Export Failed", 
+                    f"Failed to export learning items. Check the logs for details."
                 )
         
         elif self.deck_radio.isChecked():
+            # Get selected extracts
+            selected_items = self.items_list.selectedItems()
+            if not selected_items:
+                QMessageBox.warning(
+                    self, "No Selection", 
+                    "Please select at least one extract to include in the deck."
+                )
+                return
+            
+            # Get extract IDs
+            extract_ids = [
+                item.data(Qt.ItemDataRole.UserRole)
+                for item in selected_items
+            ]
+            
             # Export deck
-            success = self.export_manager.export_deck(selected_ids, filepath)
+            success = self.export_manager.export_deck(extract_ids, filepath)
             
             if success:
                 QMessageBox.information(
-                    self, "Export Successful", 
-                    f"Successfully exported deck with {len(selected_ids)} extracts to {filepath}"
+                    self, "Export Complete", 
+                    f"Exported deck with {len(extract_ids)} extracts to:\n{filepath}"
                 )
+                self.accept()
+            else:
+                QMessageBox.critical(
+                    self, "Export Failed", 
+                    f"Failed to export deck. Check the logs for details."
+                )
+    
+    def _update_filename(self):
+        """Update the suggested filename based on export type."""
+        date_str = datetime.now().strftime('%Y%m%d')
         
-        if success:
-            self.accept()
+        if self.extracts_radio.isChecked():
+            filename = f"incrementum_extracts_{date_str}"
+        elif self.items_radio.isChecked():
+            filename = f"incrementum_learningitems_{date_str}"
+        elif self.deck_radio.isChecked():
+            filename = f"incrementum_deck_{date_str}"
+        elif self.all_data_radio.isChecked():
+            filename = f"incrementum_alldata_{date_str}"
         else:
-            QMessageBox.warning(
-                self, "Export Failed", 
-                f"Failed to export to {filepath}"
-            )
+            filename = f"incrementum_export_{date_str}"
+        
+        self.filename_edit.setText(filename)
+    
+    @pyqtSlot()
+    def _on_browse(self):
+        """Handle browse button click to select file save location."""
+        # Get appropriate file extension based on selected format
+        file_format = self.format_combo.currentData()
+        if file_format == "json":
+            file_filter = "JSON Files (*.json)"
+            extension = ".json"
+        elif file_format == "markdown":
+            file_filter = "Markdown Files (*.md)"
+            extension = ".md"
+        else:  # text format
+            file_filter = "Text Files (*.txt)"
+            extension = ".txt"
+        
+        # Get the current filename
+        current_filename = self.filename_edit.text()
+        if not current_filename.endswith(extension):
+            current_filename += extension
+        
+        # Open file save dialog
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export To", current_filename, file_filter
+        )
+        
+        if filepath:
+            # Update filename field
+            self.filename_edit.setText(filepath)

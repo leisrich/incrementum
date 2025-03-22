@@ -725,93 +725,48 @@ class MainWindow(QMainWindow):
             
    
     def _create_menu_bar(self):
-        """Create the menu bar with all menus."""
-        self.menu_bar = self.menuBar()
+        """Create the menu bar with main menus."""
+        menu_bar = self.menuBar()
         
         # File menu
-        self.file_menu = self.menu_bar.addMenu("&File")
+        file_menu = menu_bar.addMenu("&File")
+        file_menu.addAction(self.action_import_file)
+        file_menu.addAction(self.action_import_url)
         
-        # Add new extract action
-        self.action_new_extract = QAction("New &Extract...", self)
-        self.action_new_extract.setShortcut(QKeySequence("Ctrl+E"))
-        self.action_new_extract.triggered.connect(self._on_new_extract)
-        self.file_menu.addAction(self.action_new_extract)
+        # Add arxiv import action
+        self.action_import_arxiv = QAction("Import from Arxiv...", self)
+        self.action_import_arxiv.triggered.connect(self._on_import_arxiv)
+        file_menu.addAction(self.action_import_arxiv)
         
-        # Add new learning item action
-        self.action_new_item = QAction("New Learning &Item...", self)
-        self.action_new_item.setShortcut(QKeySequence("Ctrl+I"))
-        self.action_new_item.triggered.connect(self._on_new_learning_item)
-        self.file_menu.addAction(self.action_new_item)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_import_knowledge)
+        file_menu.addAction(self.action_export_knowledge)
         
-        self.file_menu.addSeparator()
+        # Add export all data action
+        self.action_export_all_data = QAction("Export All Data...", self)
+        self.action_export_all_data.triggered.connect(self._on_export_all_data)
+        file_menu.addAction(self.action_export_all_data)
         
-        # Add save action
-        self.action_save = QAction("&Save", self)
-        self.action_save.setShortcut(QKeySequence.StandardKey.Save)
-        self.action_save.triggered.connect(self._on_save)
-        self.file_menu.addAction(self.action_save)
-        
-        self.file_menu.addSeparator()
-        
-        # Import menu - add as a separate top-level menu
-        self.import_menu = self.menu_bar.addMenu("&Import")
-        
-        # Add import from file action
-        self.action_import_file = QAction("Import from &File...", self)
-        self.action_import_file.setStatusTip("Import a document from a file")
-        self.action_import_file.triggered.connect(self._on_import_file)
-        self.import_menu.addAction(self.action_import_file)
-        
-        # Add import from URL action
-        self.action_import_url = QAction("Import from &URL...", self)
-        self.action_import_url.setStatusTip("Import a document from a URL")
-        self.action_import_url.triggered.connect(self._on_import_url)
-        self.import_menu.addAction(self.action_import_url)
-        
-        # Add web browser action if enabled in settings
-        if self.settings_manager.get_setting("ui", "web_browser_enabled", True):
-            self.action_web_browser = QAction("Open &Web Browser...", self)
-            self.action_web_browser.setStatusTip("Browse the web and create extracts")
-            self.action_web_browser.setShortcut(QKeySequence("Ctrl+B"))
-            self.action_web_browser.triggered.connect(self._on_open_web_browser)
-            self.import_menu.addAction(self.action_web_browser)
-        
-        # Add import knowledge action
-        self.action_import_knowledge = QAction("Import &Knowledge Base...", self)
-        self.action_import_knowledge.setStatusTip("Import knowledge from a backup file")
-        self.action_import_knowledge.triggered.connect(self._on_import_knowledge)
-        self.import_menu.addAction(self.action_import_knowledge)
-        
-        # Export menu - remains in File menu
-        self.file_menu.addSeparator()
-        
-        # Add export knowledge action
-        self.action_export_knowledge = QAction("&Export Knowledge Base...", self)
-        self.action_export_knowledge.triggered.connect(self._on_export_knowledge)
-        self.file_menu.addAction(self.action_export_knowledge)
-        
-        self.file_menu.addSeparator()
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_save)
+        file_menu.addSeparator()
         
         # Recent documents submenu
         self.recent_menu = QMenu("Recent Documents", self)
-        self.file_menu.addMenu(self.recent_menu)
+        file_menu.addMenu(self.recent_menu)
         
-        self.file_menu.addSeparator()
-        
-        # Add exit action
-        self.action_exit = QAction("E&xit", self)
-        self.action_exit.setShortcut(QKeySequence.StandardKey.Quit)
-        self.file_menu.addAction(self.action_exit)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_exit)
         
         # Edit menu
-        edit_menu = self.menu_bar.addMenu("&Edit")
+        edit_menu = menu_bar.addMenu("&Edit")
         edit_menu.addAction(self.action_new_extract)
         edit_menu.addAction(self.action_new_learning_item)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_manage_tags)
         
         # View menu
-        self.view_menu = self.menu_bar.addMenu("&View")
+        self.view_menu = menu_bar.addMenu("&View")
         
         # Panel toggles
         panels_menu = self.view_menu.addMenu("Panels")
@@ -827,14 +782,14 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.action_tab_docks)
         
         # Learning menu
-        learning_menu = self.menu_bar.addMenu("&Learning")
+        learning_menu = menu_bar.addMenu("&Learning")
         learning_menu.addAction(self.action_start_review)
         learning_menu.addSeparator()
         learning_menu.addAction(self.action_browse_extracts)
         learning_menu.addAction(self.action_browse_learning_items)
         
         # Tools menu
-        self.tools_menu = self.menu_bar.addMenu("&Tools")
+        self.tools_menu = menu_bar.addMenu("&Tools")
         self.tools_menu.addAction(self.action_start_review)
         self.tools_menu.addAction(self.action_view_queue)
         self.tools_menu.addAction(self.action_prev_document)
@@ -859,7 +814,7 @@ class MainWindow(QMainWindow):
         self.tools_menu.addAction(self.action_backup)
         
         # Help menu
-        help_menu = self.menu_bar.addMenu("&Help")
+        help_menu = menu_bar.addMenu("&Help")
         help_action = help_menu.addAction("Documentation")
         layout_help_action = help_menu.addAction("Interface Layout")
         layout_help_action.triggered.connect(self._on_layout_help)
@@ -2697,3 +2652,19 @@ class MainWindow(QMainWindow):
             if hasattr(widget, 'document_id'):
                 return widget.document_id
         return None
+
+    @pyqtSlot()
+    def _on_export_all_data(self):
+        """Handler for exporting all data."""
+        from ui.export_dialog import ExportDialog
+        
+        # Create dialog with no pre-selected extracts or items
+        dialog = ExportDialog(self.db_session, None, None, self)
+        
+        # Pre-select "All Data" option (it should already be the default when no IDs are provided)
+        if hasattr(dialog, 'all_data_radio'):
+            dialog.all_data_radio.setChecked(True)
+            dialog._on_export_type_changed()  # Update UI based on selection
+        
+        # Show dialog
+        dialog.exec()
