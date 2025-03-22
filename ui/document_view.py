@@ -56,14 +56,18 @@ class VimKeyHandler:
         self.document_view = document_view
         self.vim_mode = True  # Default to Vim mode on
         self.command_mode = False  # Normal mode by default (not command mode)
+        self.visual_mode = False  # Not in visual mode by default
         self.current_command = ""
         self.count_prefix = ""  # For number prefixes like 5j
+        self.selection_start = None  # For visual mode selection
+        self.selection_active = False
         
     def toggle_vim_mode(self):
         """Toggle Vim mode on/off."""
         self.vim_mode = not self.vim_mode
         if not self.vim_mode:
             self.command_mode = False
+            self.visual_mode = False
             self.current_command = ""
         logger.debug(f"Vim mode {'enabled' if self.vim_mode else 'disabled'}")
         return self.vim_mode
@@ -78,6 +82,10 @@ class VimKeyHandler:
         text = event.text()
         modifiers = event.modifiers()
         
+        # Handle visual mode specially
+        if self.visual_mode:
+            return self._handle_visual_mode(key, text, modifiers)
+            
         # Handle count prefix (numbers before commands)
         if not self.command_mode and text.isdigit() and self.count_prefix != "0":  # Don't start with 0
             self.count_prefix += text
@@ -103,6 +111,12 @@ class VimKeyHandler:
             else:
                 self.current_command += text
                 return True
+        
+        # Enter visual mode with v
+        if key == Qt.Key.Key_V:
+            self._enter_visual_mode()
+            self.count_prefix = ""
+            return True
                 
         # Handle normal mode keys
         if key == Qt.Key.Key_J:  # j - move down
@@ -166,7 +180,166 @@ class VimKeyHandler:
         # so we should clear it
         self.count_prefix = ""
         return False
+    
+    def _handle_visual_mode(self, key, text, modifiers):
+        """Handle key events while in visual mode."""
+        # Exit visual mode with Escape
+        if key == Qt.Key.Key_Escape:
+            self._exit_visual_mode()
+            return True
+            
+        # Extract text with 'e'
+        if key == Qt.Key.Key_E:
+            self._extract_selected_text()
+            self._exit_visual_mode()
+            return True
+            
+        # Flashcard with 'f'
+        if key == Qt.Key.Key_F:
+            self._create_flashcard()
+            self._exit_visual_mode()
+            return True
+            
+        # Cloze deletion with 'c'
+        if key == Qt.Key.Key_C:
+            self._create_cloze_deletion()
+            self._exit_visual_mode()
+            return True
+            
+        # Movement keys to extend selection
+        if key == Qt.Key.Key_H:  # left
+            self._extend_selection_left()
+            return True
+            
+        if key == Qt.Key.Key_J:  # down
+            self._extend_selection_down()
+            return True
+            
+        if key == Qt.Key.Key_K:  # up
+            self._extend_selection_up()
+            return True
+            
+        if key == Qt.Key.Key_L:  # right
+            self._extend_selection_right()
+            return True
+            
+        if key == Qt.Key.Key_W:  # word forward
+            self._extend_selection_word_forward()
+            return True
+            
+        if key == Qt.Key.Key_B:  # word backward
+            self._extend_selection_word_backward()
+            return True
+            
+        return True  # Consume all keys in visual mode
+    
+    def _enter_visual_mode(self):
+        """Enter visual mode for text selection."""
+        self.visual_mode = True
+        logger.debug("Entering visual mode")
         
+        content_edit = self.document_view.content_edit
+        
+        # Setup based on content type
+        if isinstance(content_edit, QTextEdit):
+            # For text edit, ensure cursor is visible
+            cursor = content_edit.textCursor()
+            self.selection_start = cursor.position()
+            content_edit.ensureCursorVisible()
+            
+            # Set a different cursor shape to indicate visual mode
+            content_edit.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+            
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # For web view, set cursor style with JavaScript
+            script = """
+            document.body.style.cursor = 'text';
+            
+            // Create selection markers
+            const marker = document.createElement('div');
+            marker.id = 'vim-cursor-marker';
+            marker.style.position = 'absolute';
+            marker.style.width = '2px';
+            marker.style.height = '1.2em';
+            marker.style.backgroundColor = 'rgba(255, 0, 0, 0.7)';
+            marker.style.zIndex = '9999';
+            
+            // Add to document
+            document.body.appendChild(marker);
+            
+            // Position at beginning of first text node we can find
+            const textNodes = [];
+            function findTextNodes(node) {
+                if (node.nodeType === Node.TEXT_NODE && node.textContent.trim().length > 0) {
+                    textNodes.push(node);
+                } else {
+                    for (let i = 0; i < node.childNodes.length; i++) {
+                        findTextNodes(node.childNodes[i]);
+                    }
+                }
+            }
+            
+            findTextNodes(document.body);
+            
+            // If we found any text nodes, create a selection
+            if (textNodes.length > 0) {
+                const range = document.createRange();
+                range.setStart(textNodes[0], 0);
+                range.setEnd(textNodes[0], 0);
+                
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                
+                // Position marker at selection start
+                const rect = range.getBoundingClientRect();
+                marker.style.left = rect.left + 'px';
+                marker.style.top = rect.top + 'px';
+                
+                // Store initial position in a way we can access later
+                window.vimVisualModeStart = {
+                    node: textNodes[0],
+                    offset: 0
+                };
+            }
+            """
+            content_edit.page().runJavaScript(script)
+        
+        # Update the mode display
+        self.document_view.vim_status_label.setText("Vim Mode: Visual")
+        
+    def _exit_visual_mode(self):
+        """Exit visual mode."""
+        self.visual_mode = False
+        logger.debug("Exiting visual mode")
+        
+        content_edit = self.document_view.content_edit
+        
+        # Reset cursor/selection based on content type
+        if isinstance(content_edit, QTextEdit):
+            # Reset cursor shape
+            content_edit.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # Reset cursor and remove visual markers with JavaScript
+            script = """
+            document.body.style.cursor = 'auto';
+            
+            // Remove any selection marker
+            const marker = document.getElementById('vim-cursor-marker');
+            if (marker) {
+                marker.parentNode.removeChild(marker);
+            }
+            
+            // Clear selection
+            window.getSelection().removeAllRanges();
+            delete window.vimVisualModeStart;
+            """
+            content_edit.page().runJavaScript(script)
+        
+        # Update mode display
+        self.document_view.vim_status_label.setText("Vim Mode: Normal")
+    
     def _scroll_down(self, count=1):
         """Scroll down by count lines."""
         content_edit = self.document_view.content_edit
@@ -310,6 +483,337 @@ class VimKeyHandler:
             elif setting == 'vim':
                 self.vim_mode = True
         # Add more commands as needed
+    
+    def _extract_selected_text(self):
+        """Extract the currently selected text."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            selected_text = content_edit.textCursor().selectedText()
+            if selected_text:
+                self.document_view.selected_text = selected_text
+                self.document_view._on_create_extract()
+                
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # Use JavaScript to get selected text
+            script = """
+            window.getSelection().toString();
+            """
+            content_edit.page().runJavaScript(
+                script,
+                lambda text: self._handle_extract_from_webview(text)
+            )
+    
+    def _handle_extract_from_webview(self, text):
+        """Handle extract creation from web view selected text."""
+        if text and text.strip():
+            self.document_view.selected_text = text.strip()
+            self.document_view._on_create_extract()
+    
+    def _create_flashcard(self):
+        """Create a flashcard from selected text."""
+        # This would require integration with a flashcard system
+        # For now, we'll just extract the text
+        self._extract_selected_text()
+        
+        # TODO: Add flashcard-specific handling when a flashcard system is available
+        logger.debug("Flashcard creation requested - extracting text for now")
+    
+    def _create_cloze_deletion(self):
+        """Create a cloze deletion from selected text."""
+        # This would require integration with a flashcard/cloze system
+        # For now, we'll just extract the text
+        self._extract_selected_text()
+        
+        # TODO: Add cloze-specific handling when a cloze system is available
+        logger.debug("Cloze deletion requested - extracting text for now")
+    
+    def _extend_selection_left(self):
+        """Extend selection to the left."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            cursor = content_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
+            content_edit.setTextCursor(cursor)
+            
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            script = """
+            const selection = window.getSelection();
+            if (selection.rangeCount > 0) {
+                const range = selection.getRangeAt(0);
+                
+                // Try to extend one character left
+                try {
+                    const startNode = range.startContainer;
+                    const startOffset = range.startOffset;
+                    
+                    if (startOffset > 0) {
+                        // Can move left within current node
+                        range.setStart(startNode, startOffset - 1);
+                    } else {
+                        // Need to find previous text node
+                        // This is simplified - would need more complex traversal for complete implementation
+                    }
+                    
+                    // Update selection
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    
+                    // Update marker
+                    const marker = document.getElementById('vim-cursor-marker');
+                    if (marker) {
+                        const rect = range.getBoundingClientRect();
+                        marker.style.left = rect.left + 'px';
+                        marker.style.top = rect.top + 'px';
+                    }
+                } catch (e) {
+                    console.error('Error extending selection left:', e);
+                }
+            }
+            return window.getSelection().toString();
+            """
+            content_edit.page().runJavaScript(script)
+    
+    def _extend_selection_right(self):
+        """Extend selection to the right."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            cursor = content_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor)
+            content_edit.setTextCursor(cursor)
+            
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            script = """
+            const selection = window.getSelection();
+            if (selection.rangeCount > 0) {
+                const range = selection.getRangeAt(0);
+                
+                // Try to extend one character right
+                try {
+                    const endNode = range.endContainer;
+                    const endOffset = range.endOffset;
+                    
+                    if (endNode.nodeType === Node.TEXT_NODE && endOffset < endNode.textContent.length) {
+                        // Can move right within current text node
+                        range.setEnd(endNode, endOffset + 1);
+                    } else {
+                        // Need to find next text node (simplified)
+                    }
+                    
+                    // Update selection
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                } catch (e) {
+                    console.error('Error extending selection right:', e);
+                }
+            }
+            return window.getSelection().toString();
+            """
+            content_edit.page().runJavaScript(script)
+    
+    def _extend_selection_up(self):
+        """Extend selection upward."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            cursor = content_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Up, QTextCursor.MoveMode.KeepAnchor)
+            content_edit.setTextCursor(cursor)
+            
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # This is quite complex in a web page - we'll use a simplified approach
+            script = """
+            const selection = window.getSelection();
+            if (selection.rangeCount === 0) return '';
+            
+            // Get current range
+            const range = selection.getRangeAt(0);
+            
+            // Create a point slightly above the start of current selection
+            const startRect = range.getBoundingClientRect();
+            const x = startRect.left;
+            const y = startRect.top - 20; // Move up by approximate line height
+            
+            // Use document.caretPositionFromPoint or document.elementFromPoint
+            let newNode, newOffset;
+            
+            if (document.caretPositionFromPoint) {
+                const pos = document.caretPositionFromPoint(x, y);
+                if (pos) {
+                    newNode = pos.offsetNode;
+                    newOffset = pos.offset;
+                }
+            } else if (document.elementFromPoint) {
+                // Fallback method - less accurate
+                const element = document.elementFromPoint(x, y);
+                if (element && element.firstChild) {
+                    newNode = element.firstChild;
+                    newOffset = 0;
+                }
+            }
+            
+            // If we found a node, update selection
+            if (newNode) {
+                try {
+                    // Create new range from new point to current end
+                    const newRange = document.createRange();
+                    newRange.setStart(newNode, newOffset);
+                    newRange.setEnd(range.endContainer, range.endOffset);
+                    
+                    // Apply new selection
+                    selection.removeAllRanges();
+                    selection.addRange(newRange);
+                } catch (e) {
+                    console.error('Error extending selection up:', e);
+                }
+            }
+            
+            return selection.toString();
+            """
+            content_edit.page().runJavaScript(script)
+    
+    def _extend_selection_down(self):
+        """Extend selection downward."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            cursor = content_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Down, QTextCursor.MoveMode.KeepAnchor)
+            content_edit.setTextCursor(cursor)
+            
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # Similar approach to _extend_selection_up but in opposite direction
+            script = """
+            const selection = window.getSelection();
+            if (selection.rangeCount === 0) return '';
+            
+            // Get current range
+            const range = selection.getRangeAt(0);
+            
+            // Create a point slightly below the end of current selection
+            const endRect = range.getBoundingClientRect();
+            const x = endRect.right;
+            const y = endRect.bottom + 20; // Move down by approximate line height
+            
+            // Use document.caretPositionFromPoint or document.elementFromPoint
+            let newNode, newOffset;
+            
+            if (document.caretPositionFromPoint) {
+                const pos = document.caretPositionFromPoint(x, y);
+                if (pos) {
+                    newNode = pos.offsetNode;
+                    newOffset = pos.offset;
+                }
+            } else if (document.elementFromPoint) {
+                // Fallback method - less accurate
+                const element = document.elementFromPoint(x, y);
+                if (element && element.firstChild) {
+                    newNode = element.firstChild;
+                    newOffset = 0;
+                }
+            }
+            
+            // If we found a node, update selection
+            if (newNode) {
+                try {
+                    // Create new range from current start to new point
+                    const newRange = document.createRange();
+                    newRange.setStart(range.startContainer, range.startOffset);
+                    newRange.setEnd(newNode, newOffset);
+                    
+                    // Apply new selection
+                    selection.removeAllRanges();
+                    selection.addRange(newRange);
+                } catch (e) {
+                    console.error('Error extending selection down:', e);
+                }
+            }
+            
+            return selection.toString();
+            """
+            content_edit.page().runJavaScript(script)
+    
+    def _extend_selection_word_forward(self):
+        """Extend selection to the next word."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            cursor = content_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.NextWord, QTextCursor.MoveMode.KeepAnchor)
+            content_edit.setTextCursor(cursor)
+            
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # Simplified word selection - better implementations would use text node traversal
+            script = """
+            const selection = window.getSelection();
+            if (!selection.rangeCount) return '';
+            
+            const range = selection.getRangeAt(0);
+            const endNode = range.endContainer;
+            
+            if (endNode.nodeType === Node.TEXT_NODE) {
+                const text = endNode.textContent;
+                const endOffset = range.endOffset;
+                
+                // Find next word boundary
+                let nextSpace = text.indexOf(' ', endOffset);
+                if (nextSpace === -1) nextSpace = text.length;
+                
+                // Extend to word boundary
+                range.setEnd(endNode, nextSpace + 1);
+                
+                // Update selection
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }
+            
+            return selection.toString();
+            """
+            content_edit.page().runJavaScript(script)
+    
+    def _extend_selection_word_backward(self):
+        """Extend selection to the previous word."""
+        content_edit = self.document_view.content_edit
+        
+        if isinstance(content_edit, QTextEdit):
+            cursor = content_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.PreviousWord, QTextCursor.MoveMode.KeepAnchor)
+            content_edit.setTextCursor(cursor)
+            
+        elif HAS_WEBENGINE and isinstance(content_edit, QWebEngineView):
+            # Simplified word selection - better implementations would use text node traversal
+            script = """
+            const selection = window.getSelection();
+            if (!selection.rangeCount) return '';
+            
+            const range = selection.getRangeAt(0);
+            const startNode = range.startContainer;
+            
+            if (startNode.nodeType === Node.TEXT_NODE) {
+                const text = startNode.textContent;
+                const startOffset = range.startOffset;
+                
+                // Find previous word boundary
+                const textBefore = text.substring(0, startOffset);
+                let prevSpace = textBefore.lastIndexOf(' ');
+                
+                // If no space found, go to beginning of text
+                if (prevSpace === -1) prevSpace = 0;
+                else prevSpace += 1; // Move past the space
+                
+                // Extend selection
+                range.setStart(startNode, prevSpace);
+                
+                // Update selection
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }
+            
+            return selection.toString();
+            """
+            content_edit.page().runJavaScript(script)
 
 class DocumentView(QWidget):
     """UI component for viewing and processing documents."""
@@ -420,7 +924,17 @@ class DocumentView(QWidget):
         self.vim_command_label = QLabel("")
         vim_status_layout.addWidget(self.vim_command_label)
         
+        # Add visual mode indicator
+        self.vim_visual_label = QLabel("")
+        self.vim_visual_label.setStyleSheet("color: #c22;")  # Red text for visual mode
+        vim_status_layout.addWidget(self.vim_visual_label)
+        
         vim_status_layout.addStretch(1)  # Push everything to the left
+        
+        # Add keyboard shortcuts info
+        self.vim_shortcuts_label = QLabel("v:visual e:extract f:flashcard c:cloze")
+        self.vim_shortcuts_label.setStyleSheet("color: #666; font-size: 9pt;")
+        vim_status_layout.addWidget(self.vim_shortcuts_label)
         
         # Add to main layout - no stretch (keep minimal)
         layout.addWidget(self.vim_status_widget, 0)  # Use 0 stretch factor
@@ -449,8 +963,14 @@ class DocumentView(QWidget):
             if self.vim_handler.command_mode:
                 self.vim_status_label.setText("Vim Mode: Command")
                 self.vim_command_label.setText(":" + self.vim_handler.current_command)
+                self.vim_visual_label.setText("")
+            elif self.vim_handler.visual_mode:
+                self.vim_status_label.setText("Vim Mode: Visual")
+                self.vim_command_label.setText("")
+                self.vim_visual_label.setText("[Selection Mode]")
             else:
                 self.vim_status_label.setText("Vim Mode: Normal")
+                self.vim_visual_label.setText("")
                 # Show count prefix if any
                 if self.vim_handler.count_prefix:
                     self.vim_command_label.setText(self.vim_handler.count_prefix)

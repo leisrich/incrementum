@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (
     QMessageBox, QFileDialog, QApplication,
     QDockWidget, QScrollArea, QSplitter, QTreeView,
     QListView, QSizePolicy, QStyle, QComboBox,
-    QLineEdit, QCompleter, QDialogButtonBox, QFrame
+    QLineEdit, QCompleter, QDialogButtonBox, QFrame,
+    QInputDialog
 )
 from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread, QByteArray
 from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QAction
@@ -869,6 +870,11 @@ class MainWindow(QMainWindow):
         self.content_tabs.setDocumentMode(True)
         self.content_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
         self.content_tabs.currentChanged.connect(self._on_tab_changed)
+        
+        # Enable tracking mouse for middle-click detection
+        self.content_tabs.setMouseTracking(True)
+        # Install event filter for custom mouse handling
+        self.content_tabs.installEventFilter(self)
         
         main_layout.addWidget(self.content_tabs)
         
@@ -2207,7 +2213,42 @@ class MainWindow(QMainWindow):
             # Reload document list
             self.document_model._reload_documents()
     
-    @pyqtSlot(int)
+    def eventFilter(self, obj, event):
+        """Filter events to handle middle mouse clicks on tabs."""
+        if obj == self.content_tabs and event.type() == event.Type.MouseButtonRelease:
+            # Check if it's a middle mouse button click
+            if event.button() == Qt.MouseButton.MiddleButton:
+                # Find the tab under the cursor
+                tab_bar = self.content_tabs.tabBar()
+                tab_index = tab_bar.tabAt(event.pos())
+                
+                if tab_index != -1:  # Valid tab index
+                    logger.debug(f"Middle-click detected on tab {tab_index}")
+                    # Close tab without rating
+                    self._force_close_tab(tab_index)
+                    return True  # Event handled
+        
+        # Pass other events to default handler
+        return super().eventFilter(obj, event)
+    
+    def _force_close_tab(self, index):
+        """Close tab without prompting for rating."""
+        widget = self.content_tabs.widget(index)
+        
+        # Check if widget is a document view
+        if isinstance(widget, DocumentView):
+            # Save document position
+            if hasattr(widget, '_save_position'):
+                widget._save_position()
+        
+        # Remove tab without rating prompt
+        self.content_tabs.removeTab(index)
+        widget.deleteLater()
+        
+        # Update the session state
+        self._save_session()
+    
+    @pyqtSlot()
     def _on_tab_close_requested(self, index):
         """Handle tab close request."""
         widget = self.content_tabs.widget(index)
@@ -2227,6 +2268,9 @@ class MainWindow(QMainWindow):
         # Remove tab
         self.content_tabs.removeTab(index)
         widget.deleteLater()
+        
+        # Update the session state
+        self._save_session()
 
     def _prompt_document_rating(self, document_id):
         """Prompt the user to rate a document for scheduling."""
