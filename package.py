@@ -52,84 +52,149 @@ def clean_previous_builds():
     if spec_file.exists():
         spec_file.unlink()
 
-def create_windows_package():
-    """Create Windows executable and installer."""
-    print("Building Windows package...")
+def create_spec_file():
+    """Create a PyInstaller spec file with proper configuration."""
+    print("Creating PyInstaller spec file...")
     
-    # Basic PyInstaller command for Windows
+    # Base command to create the spec file
     pyinstaller_cmd = [
         "pyinstaller",
         "--name", APP_NAME,
         "--icon", ICON_PATH,
-        "--windowed",  # No console window
-        "--onefile",   # Single executable file
-        "--clean",     # Clean PyInstaller cache
-        "--noconfirm", # Overwrite output directory
-        "--add-data", f"assets{os.pathsep}assets",  # Include assets directory
+        "--windowed",   # No console window
+        "--noconfirm",  # Overwrite output directory
+        "--log-level", "DEBUG",
         # Include additional modules that might be needed
         "--hidden-import=core.knowledge_base.database",
         "--hidden-import=core.knowledge_base.database_migration",
-        MAIN_SCRIPT
+        "--collect-all", "PyQt6",
+        "--exclude-module=PyQt5",
+        "--exclude-module=tkinter",
+        "--exclude-module=PySide2",
+        "--exclude-module=PySide6",
+        "--exclude-module=IPython",
+        "--exclude-module=matplotlib",
+        "--exclude-module=notebook",
+        "--exclude-module=jupyter",
+        # Only create the spec file for now
+        "--onefile",
+        MAIN_SCRIPT,
+        "--specpath", "."
     ]
     
-    # Run PyInstaller
-    subprocess.check_call(pyinstaller_cmd)
+    # Run PyInstaller to create spec file
+    try:
+        subprocess.check_call(pyinstaller_cmd)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to create spec file: {e}")
+        return False
+
+def modify_spec_file():
+    """Modify the spec file to ensure PyQt6 is used and PyQt5 is excluded."""
+    spec_file = Path(f"{APP_NAME}.spec")
+    if not spec_file.exists():
+        print(f"Spec file {spec_file} does not exist. Cannot modify.")
+        return False
+    
+    print(f"Modifying spec file: {spec_file}")
+    
+    # Read the spec file
+    with open(spec_file, 'r') as file:
+        content = file.read()
+    
+    # Add PyQt5 to excludes
+    if "excludes=" in content:
+        content = content.replace(
+            "excludes=[]", 
+            "excludes=['PyQt5', 'tkinter', 'PySide2', 'PySide6', 'IPython', 'matplotlib', 'notebook', 'jupyter']"
+        )
+    else:
+        print("Could not find excludes section in spec file.")
+        return False
+    
+    # Ensure datas includes assets
+    if "datas=[]" in content:
+        assets_path = os.path.join(os.getcwd(), "assets")
+        content = content.replace(
+            "datas=[]", 
+            f"datas=[('assets', 'assets')]"
+        )
+    
+    # Write the modified content back to the spec file
+    with open(spec_file, 'w') as file:
+        file.write(content)
+    
+    print("Spec file modified successfully.")
+    return True
+
+def build_from_spec():
+    """Build the executable using the spec file."""
+    spec_file = Path(f"{APP_NAME}.spec")
+    if not spec_file.exists():
+        print(f"Spec file {spec_file} does not exist. Cannot build.")
+        return False
+    
+    print(f"Building from spec file: {spec_file}")
+    
+    # Run PyInstaller with the spec file
+    try:
+        subprocess.check_call(["pyinstaller", "--clean", spec_file])
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to build from spec file: {e}")
+        return False
+
+def create_windows_package():
+    """Create Windows executable."""
+    print("Building Windows package...")
+    
+    if not create_spec_file():
+        return False
+    
+    if not modify_spec_file():
+        return False
+    
+    if not build_from_spec():
+        return False
     
     print(f"Windows package created: dist/{APP_NAME}.exe")
+    return True
 
 def create_macos_package():
     """Create macOS .app bundle."""
     print("Building macOS package...")
     
-    # PyInstaller command for macOS
-    pyinstaller_cmd = [
-        "pyinstaller",
-        "--name", APP_NAME,
-        "--icon", ICON_PATH,
-        "--windowed",  # macOS .app bundle
-        "--onefile",   # Single executable inside the .app
-        "--clean",     # Clean PyInstaller cache
-        "--noconfirm", # Overwrite output directory
-        "--add-data", f"assets{os.pathsep}assets",  # Include assets directory
-        "--osx-bundle-identifier", "com.incrementum.app",  # Bundle identifier
-        # Include additional modules that might be needed
-        "--hidden-import=core.knowledge_base.database",
-        "--hidden-import=core.knowledge_base.database_migration",
-        MAIN_SCRIPT
-    ]
+    if not create_spec_file():
+        return False
     
-    # Run PyInstaller
-    subprocess.check_call(pyinstaller_cmd)
+    if not modify_spec_file():
+        return False
+    
+    if not build_from_spec():
+        return False
     
     print(f"macOS package created: dist/{APP_NAME}.app")
+    return True
 
 def create_linux_package():
-    """Create Linux executable and AppImage."""
+    """Create Linux executable."""
     print("Building Linux package...")
     
-    # Basic PyInstaller command for Linux
-    pyinstaller_cmd = [
-        "pyinstaller",
-        "--name", APP_NAME,
-        "--icon", ICON_PATH,
-        "--windowed",  # No terminal window
-        "--onefile",   # Single executable file
-        "--clean",     # Clean PyInstaller cache
-        "--noconfirm", # Overwrite output directory
-        "--add-data", f"assets{os.pathsep}assets",  # Include assets directory
-        # Include additional modules that might be needed
-        "--hidden-import=core.knowledge_base.database",
-        "--hidden-import=core.knowledge_base.database_migration",
-        MAIN_SCRIPT
-    ]
+    if not create_spec_file():
+        return False
     
-    # Run PyInstaller
-    subprocess.check_call(pyinstaller_cmd)
+    if not modify_spec_file():
+        return False
+    
+    if not build_from_spec():
+        return False
     
     print(f"Linux package created: dist/{APP_NAME}")
     
     # Create desktop entry file
     create_linux_desktop_file()
+    return True
 
 def create_linux_desktop_file():
     """Create a .desktop file for Linux."""
@@ -255,33 +320,38 @@ def main():
         return
     
     # Create platform-specific packages
+    success = False
     system = args.platform
+    
     if system == "all":
         if platform.system().lower() == "windows":
-            create_windows_package()
+            success = create_windows_package()
         elif platform.system().lower() == "darwin":
-            create_macos_package()
+            success = create_macos_package()
         elif platform.system().lower() == "linux":
-            create_linux_package()
+            success = create_linux_package()
         else:
             print(f"Cannot build packages for all platforms from {platform.system()}")
     elif system == "windows":
-        create_windows_package()
+        success = create_windows_package()
     elif system == "macos" or system == "darwin":
-        create_macos_package()
+        success = create_macos_package()
     elif system == "linux":
-        create_linux_package()
+        success = create_linux_package()
     else:
         print(f"Unknown platform: {system}")
         return
     
-    # Copy any additional dependencies
-    copy_dependencies()
-    
-    # Create platform-specific README
-    create_platform_specific_readme()
-    
-    print(f"\n{APP_NAME} packaging completed successfully!")
+    if success:
+        # Copy any additional dependencies
+        copy_dependencies()
+        
+        # Create platform-specific README
+        create_platform_specific_readme()
+        
+        print(f"\n{APP_NAME} packaging completed successfully!")
+    else:
+        print(f"\nFailed to create {APP_NAME} package for {system}.")
 
 if __name__ == "__main__":
     main() 

@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, and_, or_, not_, case, cast, Float
 from sqlalchemy.orm import Session, aliased
 from core.knowledge_base.models import Document, Category, Extract, LearningItem, Tag, ReviewLog
-from PyQt5.QtCore import Qt, pyqtSlot, QTimer, QModelIndex, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer, QModelIndex, QPoint
+from PyQt6.QtWidgets import QWidget
 
 logger = logging.getLogger(__name__)
 
