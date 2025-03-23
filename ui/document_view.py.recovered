@@ -1,0 +1,594 @@
+# If the patching approach doesn't work, here's a complete replacement for document_view.py
+# Save this as ui/document_view.py.new and rename it if needed
+
+import os
+import logging
+from typing import Optional, List, Dict
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+    QPushButton, QScrollArea, QSplitter, QTextEdit,
+    QToolBar, QMenu, QMessageBox, QApplication, QDialog
+)
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject
+try:
+    # Import QWebEngineView if available for better HTML rendering
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebChannel import QWebChannel
+    HAS_WEBENGINE = True
+except ImportError:
+    HAS_WEBENGINE = False
+from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat
+
+from core.knowledge_base.models import Document, Extract
+from core.content_extractor.extractor import ContentExtractor
+from .extract_view import ExtractView
+
+logger = logging.getLogger(__name__)
+
+class WebViewCallback(QObject):
+    """Class to handle callbacks from JavaScript in QWebEngineView."""
+    
+    def __init__(self, document_view):
+        super().__init__()
+        self.document_view = document_view
+    
+    @pyqtSlot(str)
+    def selectionChanged(self, text):
+        """Handle selection change from JavaScript."""
+        self.document_view._handle_webview_selection(text)
+
+class DocumentView(QWidget):
+    """UI component for viewing and processing documents."""
+    
+    def __init__(self, document: Document, db_session):
+        super().__init__()
+        
+        self.document = document
+        self.db_session = db_session
+        self.extractor = ContentExtractor(db_session)
+        
+        # Content display variables
+        self.content_text = ""
+        self.selected_text = ""
+        
+        # Set up UI
+        self._create_ui()
+        self._load_document()
+    
+    def _create_ui(self):
+        """Create the UI layout."""
+        main_layout = QVBoxLayout(self)
+        
+        # Document info area
+        info_layout = QHBoxLayout()
+        self.title_label = QLabel()
+        info_layout.addWidget(self.title_label)
+        info_layout.addStretch()
+        
+        # Extract button
+        self.extract_button = QPushButton("Create Extract")
+        self.extract_button.clicked.connect(self._on_create_extract)
+        self.extract_button.setEnabled(False)  # Disabled until text is selected
+        info_layout.addWidget(self.extract_button)
+        
+        # Auto-segment button
+        self.segment_button = QPushButton("Auto-Segment")
+        self.segment_button.clicked.connect(self._on_auto_segment)
+        info_layout.addWidget(self.segment_button)
+        
+        # External viewer button (will only be shown for applicable formats)
+        self.external_viewer_button = QPushButton("Open in External Viewer")
+        self.external_viewer_button.clicked.connect(self._on_open_external)
+        self.external_viewer_button.setVisible(False)  # Hidden by default
+        info_layout.addWidget(self.external_viewer_button)
+        
+        # Add Remove button
+        self.remove_button = QPushButton("Remove Document")
+        self.remove_button.clicked.connect(self._on_remove_document)
+        info_layout.addWidget(self.remove_button)
+        
+        main_layout.addLayout(info_layout)
+        
+        # Main content splitter
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # Document content area
+        self.content_area = QWidget()
+        self.content_layout = QVBoxLayout(self.content_area)
+        
+        # For PDF, we'd use a specialized viewer
+        # For now, use a simple text editor for all content
+        self.content_edit = QTextEdit()
+        self.content_edit.setReadOnly(True)
+        self.content_edit.selectionChanged.connect(self._on_selection_changed)
+        self.content_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.content_edit.customContextMenuRequested.connect(self._on_content_menu)
+        
+        self.content_layout.addWidget(self.content_edit)
+        
+        # Extracts area
+        self.extracts_area = QWidget()
+        extracts_layout = QVBoxLayout(self.extracts_area)
+        extracts_layout.addWidget(QLabel("Extracts:"))
+        
+        # Extracts list for this document
+        self.extracts_list = QTextEdit()
+        self.extracts_list.setReadOnly(True)
+        extracts_layout.addWidget(self.extracts_list)
+        
+        # Add areas to splitter
+        self.splitter.addWidget(self.content_area)
+        self.splitter.addWidget(self.extracts_area)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 1)
+        
+        main_layout.addWidget(self.splitter)
+
+    def _create_webview_and_setup(self, html_content, base_url):
+        """Create a QWebEngineView and set it up with the content."""
+        if not HAS_WEBENGINE:
+            return None
+        
+        # Remove the existing content_edit if it exists
+        if hasattr(self, 'content_edit') and self.content_edit:
+            self.content_edit.setParent(None)
+            self.content_edit.deleteLater()
+        
+        # Create QWebEngineView for HTML display
+        webview = QWebEngineView()
+        self.content_layout.addWidget(webview)
+        
+        # Set up web channel for JavaScript callbacks
+        self.web_channel = QWebChannel()
+        self.callback_handler = WebViewCallback(self)
+        self.web_channel.registerObject("callbackHandler", self.callback_handler)
+        webview.page().setWebChannel(self.web_channel)
+        
+        # Load HTML content with base URL
+        webview.setHtml(html_content, base_url)
+        
+        # Inject JavaScript to capture selections
+        selection_js = """
+        // Set up the callback channel
+        new QWebChannel(qt.webChannelTransport, function(channel) {
+            window.callbackHandler = channel.objects.callbackHandler;
+            
+            // Add selection change listener
+            document.addEventListener('selectionchange', function() {
+                const selection = window.getSelection();
+                const text = selection.toString();
+                // Send the selection back to Python
+                if (text) {
+                    window.callbackHandler.selectionChanged(text);
+                }
+            });
+        });
+        """
+        
+        # Inject the JavaScript after the page has loaded
+        webview.loadFinished.connect(lambda ok: webview.page().runJavaScript(selection_js))
+        
+        # Connect fallback selection changed signal (may not be reliable)
+        if hasattr(webview, 'selectionChanged'):
+            webview.selectionChanged.connect(self._on_webview_selection_changed)
+        
+        # Set context menu policy
+        webview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        webview.customContextMenuRequested.connect(self._on_content_menu)
+        
+        return webview
+
+    def _load_epub(self):
+        """Load EPUB document content with proper encoding handling."""
+        try:
+            # Check if a pre-converted HTML file exists
+            html_path = os.path.splitext(self.document.file_path)[0] + '.html'
+            
+            if os.path.exists(html_path):
+                logger.info(f"Using pre-generated HTML file: {html_path}")
+                
+                # Load the HTML file
+                with open(html_path, 'r', encoding='utf-8', errors='replace') as file:
+                    html_content = file.read()
+                
+                # Use QWebEngineView for HTML display if available
+                if HAS_WEBENGINE:
+                    # Set base URL to resolve relative paths correctly
+                    base_url = QUrl.fromLocalFile(os.path.dirname(html_path) + os.sep)
+                    
+                    # Create and setup web view
+                    self.content_edit = self._create_webview_and_setup(html_content, base_url)
+                    
+                    # Extract text for extracts
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    self.content_text = soup.get_text(separator='\n\n')  # Store text for extracts
+                    
+                    return
+            
+            # If no HTML file exists, extract content from EPUB
+            from core.document_processor.handlers.epub_handler import EPUBHandler
+            
+            handler = EPUBHandler()
+            content = handler.extract_content(self.document.file_path)
+            
+            # If HTML content was extracted, use it
+            if content['html']:
+                # Use QWebEngineView for HTML display if available
+                if HAS_WEBENGINE:
+                    # Set base URL to resolve relative paths correctly
+                    base_url = QUrl.fromLocalFile(os.path.dirname(self.document.file_path) + os.sep)
+                    
+                    # Create and setup web view
+                    self.content_edit = self._create_webview_and_setup(content['html'], base_url)
+                    
+                    self.content_text = content['text']  # Store text for extracts
+                    
+                    return
+            
+            # Fallback to markdown or text display
+            display_content = content['markdown'] if content['markdown'] else content['text']
+            self.content_text = display_content
+            
+            # Use setMarkdown if available (newer PyQt versions), otherwise use setText
+            if hasattr(self.content_edit, 'setMarkdown'):
+                self.content_edit.setMarkdown(display_content)
+            else:
+                self.content_edit.setText(display_content)
+
+        except Exception as e:
+            logger.exception(f"Error loading EPUB: {e}")
+            self.content_edit.setText(f"Error loading EPUB: {str(e)}")
+    
+    def _load_document(self):
+        """Load document content."""
+        self.title_label.setText(f"{self.document.title}")
+        
+        # Show/hide external viewer button based on document type
+        self.external_viewer_button.setVisible(self.document.content_type in ['epub', 'pdf'])
+        
+        # Load content based on document type
+        if self.document.content_type == 'pdf':
+            self._load_pdf()
+        elif self.document.content_type in ['html', 'htm']:
+            self._load_html()
+        elif self.document.content_type == 'epub':
+            self._load_epub()
+        else:
+            self._load_text()
+        
+        # Load existing extracts
+        self._load_extracts()
+    
+    def _load_pdf(self):
+        """Load PDF document content."""
+        try:
+            # In a real app, we'd use a specialized PDF viewer
+            # For now, just extract text and display it
+            from pdfminer.high_level import extract_text
+            
+            text = extract_text(self.document.file_path)
+            self.content_text = text
+            self.content_edit.setText(text)
+            
+        except Exception as e:
+            logger.exception(f"Error loading PDF: {e}")
+            self.content_edit.setText(f"Error loading PDF: {str(e)}")
+    
+    def _load_html(self):
+        """Load HTML document content with proper rendering."""
+        try:
+            # Read the HTML file
+            with open(self.document.file_path, 'r', encoding='utf-8', errors='replace') as file:
+                html_content = file.read()
+            
+            # Parse HTML to extract text
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, 'lxml')
+            text = soup.get_text(separator='\n')
+            self.content_text = text  # Store text for extracts
+            
+            # Use QWebEngineView for HTML display if available
+            if HAS_WEBENGINE:
+                # Set base URL to resolve relative paths correctly
+                base_url = QUrl.fromLocalFile(os.path.dirname(self.document.file_path) + os.sep)
+                
+                # Create and setup web view
+                self.content_edit = self._create_webview_and_setup(html_content, base_url)
+                
+                return
+            
+            # Fall back to regular text display if QWebEngineView is not available
+            self.content_edit.setText(text)
+            
+        except Exception as e:
+            logger.exception(f"Error loading HTML: {e}")
+            self.content_edit.setText(f"Error loading HTML: {str(e)}")
+    
+    def _load_text(self):
+        """Load text document content."""
+        try:
+            if not os.path.exists(self.document.file_path):
+                error_msg = f"File not found: {self.document.file_path}"
+                logger.error(error_msg)
+                self.content_edit.setText(error_msg)
+                return
+
+            # Try UTF-8 first
+            try:
+                with open(self.document.file_path, 'r', encoding='utf-8') as file:
+                    text = file.read()
+            except UnicodeDecodeError:
+                # If UTF-8 fails, try other common encodings
+                encodings = ['latin-1', 'windows-1252', 'iso-8859-1', 'cp1252']
+                
+                for encoding in encodings:
+                    try:
+                        with open(self.document.file_path, 'r', encoding=encoding) as file:
+                            text = file.read()
+                        logger.info(f"Successfully read file using {encoding} encoding")
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    # If all encodings fail
+                    error_msg = f"Could not decode file with any supported encoding: {self.document.file_path}"
+                    logger.error(error_msg)
+                    self.content_edit.setText(error_msg)
+                    return
+            
+            self.content_text = text
+            self.content_edit.setText(text)
+            
+        except Exception as e:
+            logger.exception(f"Error loading text: {e}")
+            self.content_edit.setText(f"Error loading text: {str(e)}")
+    
+    def _load_extracts(self):
+        """Load existing extracts for this document."""
+        extracts = self.db_session.query(Extract).filter(
+            Extract.document_id == self.document.id
+        ).order_by(Extract.created_date.desc()).all()
+        
+        if not extracts:
+            self.extracts_list.setText("No extracts yet")
+            return
+        
+        # Display extracts
+        text = ""
+        for extract in extracts:
+            text += f"Priority: {extract.priority}\n"
+            text += f"{extract.content[:100]}...\n"
+            text += f"Created: {extract.created_date}\n"
+            text += "-" * 40 + "\n"
+        
+        self.extracts_list.setText(text)
+    
+    @pyqtSlot()
+    def _on_selection_changed(self):
+        """Handle text selection changes."""
+        self.selected_text = self.content_edit.textCursor().selectedText()
+        self.extract_button.setEnabled(bool(self.selected_text))
+    
+    @pyqtSlot()
+    def _on_create_extract(self):
+        """Create an extract from selected text."""
+        if not self.selected_text:
+            return
+        
+        # Different handling based on the type of content editor
+        if HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
+            # For QWebEngineView, we already have the selected text from _handle_webview_selection
+            # We need to get context differently since we don't have textCursor
+            
+            # Use a portion of the content_text as context (if available)
+            if self.content_text:
+                # Try to find the selection in the content_text to get proper context
+                selection_index = self.content_text.find(self.selected_text)
+                if selection_index >= 0:
+                    # Get surrounding context
+                    start_pos = max(0, selection_index - 100)
+                    end_pos = min(len(self.content_text), selection_index + len(self.selected_text) + 100)
+                    context = self.content_text[start_pos:end_pos]
+                    position = f"pos:{selection_index}"
+                else:
+                    # Fallback if we can't find the exact text
+                    context = self.selected_text
+                    position = "unknown"
+            else:
+                context = self.selected_text
+                position = "unknown"
+        else:
+            # For QTextEdit and similar widgets, use the textCursor to get context
+            cursor = self.content_edit.textCursor()
+            position = cursor.position()
+            
+            # Try to get some context before and after selection
+            start_pos = max(0, position - 100)
+            end_pos = min(len(self.content_text), position + 100)
+            
+            context = self.content_text[start_pos:end_pos]
+            position = f"pos:{position}"
+        
+        # Create extract
+        extract = self.extractor.create_extract(
+            document_id=self.document.id,
+            content=self.selected_text,
+            context=context,
+            position=position,
+            priority=50  # Default priority
+        )
+        
+        if extract:
+            # Reload extracts
+            self._load_extracts()
+            
+            # Open extract view
+            self._open_extract(extract)
+        else:
+            QMessageBox.warning(
+                self, "Extract Creation Failed", 
+                "Failed to create extract"
+            )
+    
+    @pyqtSlot()
+    def _on_auto_segment(self):
+        """Auto-segment the document into potential extracts."""
+        # Get segments
+        segments = self.extractor.auto_segment_content(self.document.id)
+        
+        if not segments:
+            QMessageBox.information(
+                self, "Auto-Segment", 
+                "No segments were identified in this document"
+            )
+            return
+        
+        # Create extracts for segments
+        for segment in segments:
+            extract = self.extractor.create_extract(
+                document_id=self.document.id,
+                content=segment['content'],
+                position=segment.get('position', ''),
+                priority=segment.get('priority', 50)
+            )
+        
+        # Reload extracts
+        self._load_extracts()
+        
+        QMessageBox.information(
+            self, "Auto-Segment", 
+            f"Created {len(segments)} extracts from this document"
+        )
+    
+    @pyqtSlot(QPoint)
+    def _on_content_menu(self, pos):
+        """Show context menu for content."""
+        # Create menu
+        menu = QMenu(self)
+        
+        # Add actions
+        create_extract_action = menu.addAction("Create Extract")
+        create_extract_action.triggered.connect(self._on_create_extract)
+        
+        # Show menu
+        if HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
+            # For QWebEngineView, use screen position
+            menu.exec(QApplication.activeWindow().mapToGlobal(pos))
+        else:
+            menu.exec(self.content_edit.mapToGlobal(pos))
+    
+    def _open_extract(self, extract: Extract):
+        """Open an extract in the parent tab widget."""
+        extract_view = ExtractView(extract, self.db_session)
+        
+        # We need to find the parent tab widget
+        # This is a bit hacky - in a real app, we'd use signals/slots
+        parent = self.parent()
+        while parent and not isinstance(parent, QTabWidget):
+            parent = parent.parent()
+        
+        if parent:
+            tab_index = parent.addTab(extract_view, "Extract")
+            parent.setCurrentIndex(tab_index)
+
+    def _on_webview_selection_changed(self):
+        """Handle selection changes in the QWebEngineView."""
+        if HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
+            # Use JavaScript to get selected text
+            self.content_edit.page().runJavaScript(
+                "window.getSelection().toString();",
+                self._handle_webview_selection
+            )
+
+    def _handle_webview_selection(self, text):
+        """Process selected text from QWebEngineView."""
+        self.selected_text = text
+        self.extract_button.setEnabled(bool(self.selected_text))
+
+    def _on_remove_document(self):
+        """Remove the current document from the system."""
+        try:
+            # Ask for confirmation
+            reply = QMessageBox.question(
+                self, 
+                "Remove Document", 
+                f"Are you sure you want to remove '{self.document.title}'?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # Delete associated file if it exists and is in our document directory
+                from core.document_processor.document_importer import DOCUMENT_STORAGE_DIR
+                file_path = self.document.file_path
+                
+                # Check if file exists and is in our document directory
+                if os.path.exists(file_path) and os.path.dirname(os.path.abspath(file_path)) == os.path.abspath(DOCUMENT_STORAGE_DIR):
+                    try:
+                        os.remove(file_path)
+                        
+                        # Also remove any related files (HTML, _files directory, etc.)
+                        base_path = os.path.splitext(file_path)[0]
+                        html_path = base_path + '.html'
+                        files_dir = base_path + '_files'
+                        
+                        if os.path.exists(html_path):
+                            os.remove(html_path)
+                        
+                        if os.path.exists(files_dir) and os.path.isdir(files_dir):
+                            import shutil
+                            shutil.rmtree(files_dir)
+                            
+                        logger.info(f"Removed document files: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"Error removing document file {file_path}: {e}")
+                
+                # Delete database record
+                self.db_session.delete(self.document)
+                self.db_session.commit()
+                logger.info(f"Removed document from database: {self.document.title}")
+                
+                # Close the tab
+                parent = self.parent()
+                while parent and not hasattr(parent, 'removeTab'):
+                    parent = parent.parent()
+                
+                if parent:
+                    index = parent.indexOf(self)
+                    if index >= 0:
+                        parent.removeTab(index)
+        
+        except Exception as e:
+            logger.exception(f"Error removing document: {e}")
+            QMessageBox.warning(
+                self, "Error", f"Failed to remove document: {str(e)}"
+            )
+
+    def _on_open_external(self):
+        """Open the document in an external viewer."""
+        try:
+            # Check if file exists
+            if not os.path.exists(self.document.file_path):
+                QMessageBox.warning(self, "File Not Found", f"Could not find file: {self.document.file_path}")
+                return
+            
+            # Determine how to open based on platform
+            import platform
+            import subprocess
+            
+            system = platform.system()
+            
+            if system == 'Windows':
+                os.startfile(self.document.file_path)
+            elif system == 'Darwin':  # macOS
+                subprocess.run(['open', self.document.file_path], check=True)
+            else:  # Linux and others
+                subprocess.run(['xdg-open', self.document.file_path], check=True)
+            
+            logger.info(f"Opened {self.document.file_path} in external viewer")
+            
+        except Exception as e:
+            logger.exception(f"Error opening file externally: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to open file in external viewer: {str(e)}")
