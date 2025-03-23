@@ -12,7 +12,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-def setup_epub_webview(document, content_edit, db_session, restore_position=True):
+def setup_epub_webview(document, content_edit, db_session, restore_position=True, theme_manager=None):
     """
     Set up appropriate handlers for tracking position in EPUB documents.
     
@@ -21,6 +21,7 @@ def setup_epub_webview(document, content_edit, db_session, restore_position=True
         content_edit: The QWebEngineView instance
         db_session: Database session
         restore_position: Whether to restore the position
+        theme_manager: ThemeManager instance for applying themes
         
     Returns:
         bool: True if setup was successful
@@ -33,13 +34,19 @@ def setup_epub_webview(document, content_edit, db_session, restore_position=True
     
     # Add a load finished handler to set position
     def on_load_finished(success):
-        if success and target_position and target_position > 0:
-            logger.info(f"EPUB page loaded, restoring position to {target_position}")
-            # Set a series of delayed attempts to restore position
-            restore_attempts = [300, 800, 1500]  # Try at different times
-            
-            for delay in restore_attempts:
-                QTimer.singleShot(delay, lambda: set_webview_position(content_edit, target_position))
+        if success:
+            # Apply theme if available
+            if theme_manager:
+                apply_theme_to_epub(content_edit, theme_manager)
+                
+            # Restore position if available
+            if target_position and target_position > 0:
+                logger.info(f"EPUB page loaded, restoring position to {target_position}")
+                # Set a series of delayed attempts to restore position
+                restore_attempts = [300, 800, 1500]  # Try at different times
+                
+                for delay in restore_attempts:
+                    QTimer.singleShot(delay, lambda: set_webview_position(content_edit, target_position))
     
     # Connect load finished handler
     content_edit.loadFinished.connect(on_load_finished)
@@ -158,4 +165,72 @@ def save_webview_position(webview, document, db_session):
             handle_position
         )
     except Exception as e:
-        logger.exception(f"Error saving WebView position: {e}") 
+        logger.exception(f"Error saving WebView position: {e}")
+
+def apply_theme_to_epub(webview, theme_manager):
+    """Apply the current theme to an EPUB webview."""
+    if not HAS_WEBENGINE or not isinstance(webview, QWebEngineView):
+        return
+    
+    try:
+        logger.debug("Applying theme to EPUB content")
+        is_dark = theme_manager.current_theme == "dark"
+        
+        # Create custom CSS based on the current theme
+        colors = theme_manager.DEFAULT_DARK_COLORS if is_dark else theme_manager.DEFAULT_LIGHT_COLORS
+        
+        # Create a CSS for the theme
+        theme_css = f"""
+        :root {{
+            --bg-color: {colors['base']};
+            --text-color: {colors['text']};
+            --link-color: {colors['link']};
+            --highlight-color: {colors['highlight']};
+            --highlight-text-color: {colors['highlightedText']};
+            --accent-color: {colors['highlight']};
+        }}
+        
+        body {{
+            background-color: var(--bg-color) !important;
+            color: var(--text-color) !important;
+        }}
+        
+        p, div, span, h1, h2, h3, h4, h5, h6, li {{
+            color: var(--text-color) !important;
+        }}
+        
+        a, a:visited {{
+            color: var(--link-color) !important;
+        }}
+        
+        ::selection {{
+            background-color: var(--highlight-color) !important;
+            color: var(--highlight-text-color) !important;
+        }}
+        """
+        
+        # Inject CSS into the page
+        script = f"""
+        (function() {{
+            // Remove any existing theme CSS
+            let existingStyle = document.getElementById('incrementum-theme-style');
+            if (existingStyle) {{
+                existingStyle.remove();
+            }}
+            
+            // Add new theme CSS
+            let style = document.createElement('style');
+            style.id = 'incrementum-theme-style';
+            style.textContent = `{theme_css}`;
+            document.head.appendChild(style);
+            
+            console.log('Applied {"dark" if is_dark else "light"} theme to EPUB content');
+            return true;
+        }})();
+        """
+        
+        webview.page().runJavaScript(script, lambda result: 
+            logger.debug(f"Theme applied to EPUB: {result}")
+        )
+    except Exception as e:
+        logger.exception(f"Error applying theme to EPUB: {e}") 

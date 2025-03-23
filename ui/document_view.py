@@ -1680,7 +1680,7 @@ window.addEventListener('load', function() {
                     theme_manager = main_window.theme_manager
                 else:
                     # Create a new instance if not available
-                    from core.settings.settings_manager import SettingsManager
+                    from core.utils.settings_manager import SettingsManager
                     settings_manager = SettingsManager()
                     theme_manager = ThemeManager(settings_manager)
                 
@@ -1700,14 +1700,19 @@ window.addEventListener('load', function() {
                 return True
                 
             except Exception as e:
-                logger.exception(f"Failed to load EPUB document: {e}")
-                content_edit.setHtml(f"<h1>Error loading EPUB</h1><p>{str(e)}</p>")
-                self.content_layout.addWidget(content_edit)
+                logger.exception(f"Error loading EPUB content: {e}")
+                error_widget = QLabel(f"Error loading EPUB: {str(e)}")
+                error_widget.setWordWrap(True)
+                error_widget.setStyleSheet("color: red; padding: 20px;")
+                self.content_layout.addWidget(error_widget)
                 return False
                 
         except Exception as e:
-            logger.exception(f"Error setting up EPUB view: {e}")
-            self._set_error_message(f"Could not load EPUB document: {e}")
+            logger.exception(f"Error setting up EPUB viewer: {e}")
+            error_widget = QLabel(f"Error setting up EPUB viewer: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_widget)
             return False
     
     def _load_text(self):

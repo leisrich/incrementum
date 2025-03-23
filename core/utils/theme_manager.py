@@ -62,6 +62,106 @@ class ThemeManager:
         "shadow": "#1A1A1A",
         "light": "#505050"
     }
+
+    # Nord theme - a cool, arctic-inspired color palette
+    NORD_COLORS = {
+        "window": "#2E3440",
+        "windowText": "#D8DEE9",
+        "base": "#3B4252",
+        "alternateBase": "#434C5E",
+        "text": "#E5E9F0",
+        "button": "#4C566A",
+        "buttonText": "#ECEFF4",
+        "brightText": "#ECEFF4",
+        "highlight": "#5E81AC",
+        "highlightedText": "#ECEFF4",
+        "link": "#88C0D0",
+        "midLight": "#4C566A",
+        "dark": "#2E3440",
+        "mid": "#3B4252",
+        "shadow": "#1D2128",
+        "light": "#4C566A"
+    }
+
+    # Solarized Light theme - a popular soft, balanced theme
+    SOLARIZED_LIGHT_COLORS = {
+        "window": "#FDF6E3",
+        "windowText": "#657B83",
+        "base": "#EEE8D5",
+        "alternateBase": "#FDF6E3",
+        "text": "#586E75",
+        "button": "#93A1A1",
+        "buttonText": "#002B36",
+        "brightText": "#002B36",
+        "highlight": "#268BD2",
+        "highlightedText": "#FDF6E3",
+        "link": "#2AA198",
+        "midLight": "#EEE8D5",
+        "dark": "#93A1A1",
+        "mid": "#EEE8D5",
+        "shadow": "#839496",
+        "light": "#FDF6E3"
+    }
+
+    # Solarized Dark theme - darker variant of Solarized
+    SOLARIZED_DARK_COLORS = {
+        "window": "#002B36",
+        "windowText": "#839496",
+        "base": "#073642",
+        "alternateBase": "#002B36",
+        "text": "#93A1A1",
+        "button": "#586E75",
+        "buttonText": "#EEE8D5",
+        "brightText": "#FDF6E3",
+        "highlight": "#268BD2",
+        "highlightedText": "#FDF6E3",
+        "link": "#2AA198",
+        "midLight": "#073642",
+        "dark": "#073642",
+        "mid": "#586E75",
+        "shadow": "#002B36",
+        "light": "#657B83"
+    }
+
+    # Dracula theme - a dark theme with vibrant colors
+    DRACULA_COLORS = {
+        "window": "#282A36",
+        "windowText": "#F8F8F2",
+        "base": "#282A36",
+        "alternateBase": "#44475A",
+        "text": "#F8F8F2",
+        "button": "#44475A",
+        "buttonText": "#F8F8F2",
+        "brightText": "#FFFFFF",
+        "highlight": "#BD93F9",
+        "highlightedText": "#FFFFFF",
+        "link": "#8BE9FD",
+        "midLight": "#44475A",
+        "dark": "#191A21",
+        "mid": "#44475A",
+        "shadow": "#191A21",
+        "light": "#6272A4"
+    }
+
+    # Cyberpunk theme - a bright neon-colored theme
+    CYBERPUNK_COLORS = {
+        "window": "#0D0221",
+        "windowText": "#FF00FF",
+        "base": "#180437",
+        "alternateBase": "#290661",
+        "text": "#00FFFF",
+        "button": "#290661",
+        "buttonText": "#FFFFFF",
+        "brightText": "#FFFFFF",
+        "highlight": "#FF00FF",
+        "highlightedText": "#FFFFFF",
+        "link": "#00FF9F",
+        "midLight": "#290661",
+        "dark": "#0D0221",
+        "mid": "#180437",
+        "shadow": "#050110",
+        "light": "#3A0A87"
+    }
     
     def __init__(self, settings_manager=None):
         """
@@ -104,6 +204,36 @@ class ThemeManager:
         if not dark_theme_path.exists():
             with open(dark_theme_path, 'w', encoding='utf-8') as f:
                 json.dump(self.DEFAULT_DARK_COLORS, f, indent=4)
+
+        # Create Nord theme
+        nord_theme_path = self.theme_dir / "nord.json"
+        if not nord_theme_path.exists():
+            with open(nord_theme_path, 'w', encoding='utf-8') as f:
+                json.dump(self.NORD_COLORS, f, indent=4)
+
+        # Create Solarized Light theme
+        solarized_light_path = self.theme_dir / "solarized_light.json"
+        if not solarized_light_path.exists():
+            with open(solarized_light_path, 'w', encoding='utf-8') as f:
+                json.dump(self.SOLARIZED_LIGHT_COLORS, f, indent=4)
+
+        # Create Solarized Dark theme
+        solarized_dark_path = self.theme_dir / "solarized_dark.json"
+        if not solarized_dark_path.exists():
+            with open(solarized_dark_path, 'w', encoding='utf-8') as f:
+                json.dump(self.SOLARIZED_DARK_COLORS, f, indent=4)
+
+        # Create Dracula theme
+        dracula_path = self.theme_dir / "dracula.json"
+        if not dracula_path.exists():
+            with open(dracula_path, 'w', encoding='utf-8') as f:
+                json.dump(self.DRACULA_COLORS, f, indent=4)
+
+        # Create Cyberpunk theme
+        cyberpunk_path = self.theme_dir / "cyberpunk.json"
+        if not cyberpunk_path.exists():
+            with open(cyberpunk_path, 'w', encoding='utf-8') as f:
+                json.dump(self.CYBERPUNK_COLORS, f, indent=4)
     
     def get_available_themes(self) -> list:
         """
@@ -307,33 +437,66 @@ class ThemeManager:
         
         Args:
             app: QApplication instance
-            theme_path: Path to the custom theme file
-        """
-        # Check for JSON theme file
-        if theme_path.lower().endswith('.json'):
-            theme_data = self._load_theme_from_file(theme_path)
-            if theme_data:
-                self._apply_palette_colors(app, theme_data)
-                logger.info(f"Applied custom theme from {theme_path}")
-                
-                # Check for matching QSS file
-                qss_path = os.path.splitext(theme_path)[0] + '.qss'
-                if os.path.exists(qss_path):
-                    qss = self._load_qss_from_file(qss_path)
-                    app.setStyleSheet(qss)
-                    
-                return True
-        
-        # Check for QSS theme file
-        elif theme_path.lower().endswith('.qss'):
-            qss = self._load_qss_from_file(theme_path)
-            app.setStyleSheet(qss)
-            logger.info(f"Applied custom QSS theme from {theme_path}")
-            return True
+            theme_path: Path to the theme file
             
-        # If we got here, the theme couldn't be applied
-        logger.error(f"Failed to apply custom theme from {theme_path}")
-        return False
+        Returns:
+            bool: True if theme was successfully applied
+        """
+        try:
+            # Check if file exists
+            if not os.path.exists(theme_path):
+                logger.error(f"Custom theme file not found: {theme_path}")
+                return False
+            
+            # Apply based on file type
+            if theme_path.lower().endswith('.json'):
+                # Load JSON theme file
+                theme_data = self._load_theme_from_file(theme_path)
+                if not theme_data:
+                    logger.error(f"Failed to load theme data from {theme_path}")
+                    return False
+                
+                # Apply palette colors from theme data
+                self._apply_palette_colors(app, theme_data)
+                
+                # Look for matching QSS file
+                qss_path = os.path.splitext(theme_path)[0] + ".qss"
+                if os.path.exists(qss_path):
+                    logger.info(f"Found matching QSS file: {qss_path}")
+                    qss_content = self._load_qss_from_file(qss_path)
+                    if qss_content:
+                        app.setStyleSheet(qss_content)
+                
+                # Store current theme info
+                self.current_theme = os.path.basename(theme_path).split('.')[0]
+                self.custom_theme_path = theme_path
+                
+                logger.info(f"Applied custom theme from {theme_path}")
+                return True
+            
+            elif theme_path.lower().endswith('.qss'):
+                # Load QSS style sheet
+                qss_content = self._load_qss_from_file(theme_path)
+                if not qss_content:
+                    logger.error(f"Failed to load QSS content from {theme_path}")
+                    return False
+                
+                # Apply style sheet
+                app.setStyleSheet(qss_content)
+                
+                # Store current theme info
+                self.current_theme = os.path.basename(theme_path).split('.')[0]
+                self.custom_theme_path = theme_path
+                
+                logger.info(f"Applied custom QSS theme from {theme_path}")
+                return True
+            else:
+                logger.error(f"Unsupported theme file type: {theme_path}")
+                return False
+            
+        except Exception as e:
+            logger.exception(f"Error applying custom theme: {e}")
+            return False
         
     def _apply_palette_colors(self, app: QApplication, colors: dict):
         """

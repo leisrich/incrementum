@@ -1,19 +1,22 @@
 # ui/settings_dialog.py
 
 import os
+import json
 import logging
+import shutil
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QTabWidget, QWidget, QFormLayout,
-    QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
-    QComboBox, QColorDialog, QFileDialog, QGroupBox,
-    QMessageBox, QDialogButtonBox, QInputDialog
+    QDialog, QTabWidget, QVBoxLayout, QHBoxLayout, QWidget,
+    QLabel, QLineEdit, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
+    QCheckBox, QSlider, QGroupBox, QFormLayout, QGridLayout,
+    QMessageBox, QFileDialog, QColorDialog, QInputDialog,
+    QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QSettings
-from PyQt6.QtGui import QColor, QFont
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QFont, QIcon, QPixmap, QColor
 
 from core.utils.settings_manager import SettingsManager
 from core.utils.theme_manager import ThemeManager
@@ -29,6 +32,11 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         
         self.settings_manager = settings_manager
+        
+        # Store original theme settings to allow reverting if user cancels
+        self.original_theme = self.settings_manager.get_setting("ui", "theme", "light")
+        self.original_is_custom = self.settings_manager.get_setting("ui", "custom_theme", False)
+        self.original_theme_file = self.settings_manager.get_setting("ui", "theme_file", "")
         
         # Create UI
         self._create_ui()
@@ -1171,6 +1179,10 @@ class SettingsDialog(QDialog):
     def _on_apply(self):
         """Handle Apply button click."""
         if self._save_settings():
+            # Update original theme settings when applied
+            self.original_theme = self.settings_manager.get_setting("ui", "theme", "light")
+            self.original_is_custom = self.settings_manager.get_setting("ui", "custom_theme", False)
+            self.original_theme_file = self.settings_manager.get_setting("ui", "theme_file", "")
             self.settingsChanged.emit()
         else:
             QMessageBox.warning(
@@ -1341,37 +1353,25 @@ class SettingsDialog(QDialog):
                 if theme_path and os.path.exists(theme_path):
                     self.theme_file_path.setText(theme_path)
             
-            # Apply the theme immediately
+            # Apply the theme immediately for preview only
             app = QApplication.instance()
             if app:
+                custom_path = ""
                 if is_custom:
                     # For custom themes
                     custom_path = self.theme_file_path.text()
                     if custom_path and os.path.exists(custom_path):
-                        # Save settings for custom theme
-                        self.settings_manager.set_setting("ui", "custom_theme", True)
-                        self.settings_manager.set_setting("ui", "theme_file", custom_path)
-                        self.settings_manager.set_setting("ui", "theme", selected_theme)
-                        
-                        # Apply the theme
+                        # Apply the theme (but don't save settings yet)
                         self.theme_manager.apply_theme(app, theme_name=selected_theme, 
                                                     custom_theme_path=custom_path)
                     else:
                         logger.warning(f"Custom theme path not valid: {custom_path}")
                 else:
                     # For built-in themes
-                    self.settings_manager.set_setting("ui", "theme", selected_theme)
-                    self.settings_manager.set_setting("ui", "custom_theme", False)
-                    self.settings_manager.set_setting("ui", "theme_file", "")  # Clear custom theme path
                     self.theme_manager.apply_theme(app, theme_name=selected_theme)
                 
-                # Save the settings
-                self.settings_manager.save_settings()
-                
-                # Inform the application that settings changed
-                self.settingsChanged.emit()
-                
-                logger.info(f"Theme applied: {selected_theme}")
+                # Note: We're not saving the settings here anymore, just previewing the theme
+                logger.info(f"Theme previewed: {selected_theme}")
                 
         except Exception as e:
             logger.exception(f"Error changing theme: {e}")
@@ -1478,3 +1478,14 @@ class SettingsDialog(QDialog):
                                   f"Failed to fetch models: {response.status_code} {response.text}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error fetching models: {str(e)}")
+
+    def closeEvent(self, event):
+        """Handle dialog close event - restore original theme if not saved."""
+        if self.result() == QDialog.Rejected:
+            # Restore the original theme if dialog was canceled
+            app = QApplication.instance()
+            if app:
+                self.theme_manager.apply_theme(app, theme_name=self.original_theme, 
+                                              custom_theme_path=self.original_theme_file)
+                # No need to save settings here as we're just restoring the original
+        super().closeEvent(event)

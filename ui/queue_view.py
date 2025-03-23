@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex
 from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut, QPalette
 
-from core.knowledge_base.models import Document, Category, Extract
+from core.knowledge_base.models import Document, Category, Extract, IncrementalReading
 from core.spaced_repetition import FSRSAlgorithm
 from core.utils.settings_manager import SettingsManager
 from core.utils.shortcuts import ShortcutManager
@@ -430,10 +430,10 @@ class QueueView(QWidget):
         if is_dark_mode:
             # Dark theme colors (more subdued and visible on dark backgrounds)
             return {
-                'overdue': QColor(120, 50, 50),  # Darker red
-                'new': QColor(40, 70, 120),      # Darker blue
-                'extract': QColor(70, 70, 70),   # Dark gray
-                'extract_child': QColor(60, 60, 60)  # Slightly darker gray
+                'overdue': QColor(80, 30, 30),      # Darker red
+                'new': QColor(30, 50, 80),          # Darker blue
+                'extract': QColor(50, 50, 50),      # Dark gray
+                'extract_child': QColor(45, 45, 45)  # Slightly darker gray
             }
         else:
             # Light theme colors (original colors)
@@ -964,6 +964,22 @@ class QueueView(QWidget):
             )
             
             if reply == QMessageBox.StandardButton.Yes:
+                # First delete any incremental reading records for this document 
+                try:
+                    incremental_records = self.db_session.query(IncrementalReading).filter(
+                        IncrementalReading.document_id == doc_id
+                    ).all()
+                    
+                    for record in incremental_records:
+                        self.db_session.delete(record)
+                    
+                    # Commit these deletions first
+                    self.db_session.flush()
+                    
+                except Exception as e:
+                    logger.warning(f"Error deleting incremental reading records: {e}")
+                    # Continue with document deletion
+                
                 # Delete document
                 self.db_session.delete(document)
                 self.db_session.commit()
