@@ -4,6 +4,7 @@ import os
 import logging
 import tempfile
 import fitz  # PyMuPDF
+import re
 from typing import Dict, Any, List, Tuple, Optional
 
 from PyQt6.QtWidgets import (
@@ -295,7 +296,7 @@ class PDFGraphicsView(QWidget):
             h_scroll = self.scroll_area.horizontalScrollBar().value()
             v_scroll = self.scroll_area.verticalScrollBar().value()
 
-            # Convert screen coordinates to PDF coordinates, accounting for scroll
+            # Convert screen coordinates to PDF coordinates, accounting for scroll and zoom
             start_x = (self.selection_start.x() + h_scroll) / self.zoom_factor
             start_y = (self.selection_start.y() + v_scroll) / self.zoom_factor
             end_x = (self.selection_end.x() + h_scroll) / self.zoom_factor
@@ -309,33 +310,67 @@ class PDFGraphicsView(QWidget):
                 max(start_y, end_y)
             )
 
-            # Extract text from this region
-            self.selected_text = self.page.get_text("text", clip=fitz_rect)
+            # Extract text from this region (try different options if one fails)
+            try:
+                # First try extracting as normal text
+                self.selected_text = self.page.get_text("text", clip=fitz_rect)
+                
+                # If that doesn't work well, try with different options
+                if not self.selected_text or len(self.selected_text.strip()) < 3:
+                    # Try with different extraction modes
+                    self.selected_text = self.page.get_text("blocks", clip=fitz_rect)
+                    
+                # Clean up text - remove excessive whitespace and newlines
+                self.selected_text = re.sub(r'\s+', ' ', self.selected_text).strip()
+                
+            except Exception as e:
+                logger.warning(f"Text extraction failed: {e}")
+                self.selected_text = ""
 
             # Clear current highlights
             self.current_highlights = []
 
             # Get text spans for more precise highlighting
             try:
-                spans = self.page.get_text("dict", clip=fitz_rect)["blocks"]
-
-                # Create highlight rectangles for each text span
-                for block in spans:
-                    if "type" in block and block["type"] == 0:  # Text block
-                        for line in block.get("lines", []):
-                            for span in line.get("spans", []):
-                                if "bbox" in span:
-                                    span_rect = fitz.Rect(span["bbox"])
-
-                                    # Convert to screen coordinates for highlighting
-                                    screen_rect = QRectF(
-                                        span_rect.x0 * self.zoom_factor - h_scroll,
-                                        span_rect.y0 * self.zoom_factor - v_scroll,
-                                        (span_rect.x1 - span_rect.x0) * self.zoom_factor,
-                                        (span_rect.y1 - span_rect.y0) * self.zoom_factor
-                                    )
-
-                                    self.current_highlights.append(screen_rect)
+                # Get all words in the selection area
+                words = self.page.get_text("words", clip=fitz_rect)
+                
+                # Create highlight rectangles for each word
+                for word in words:
+                    if len(word) >= 4:  # Each word entry should have at least x0,y0,x1,y1
+                        word_rect = fitz.Rect(word[0:4])  # Extract the rectangle coordinates
+                        
+                        # Convert to screen coordinates for highlighting
+                        screen_rect = QRectF(
+                            word_rect.x0 * self.zoom_factor - h_scroll,
+                            word_rect.y0 * self.zoom_factor - v_scroll,
+                            (word_rect.x1 - word_rect.x0) * self.zoom_factor,
+                            (word_rect.y1 - word_rect.y0) * self.zoom_factor
+                        )
+                        
+                        self.current_highlights.append(screen_rect)
+                
+                # If word-level highlighting failed, fall back to using spans
+                if len(self.current_highlights) == 0:
+                    spans = self.page.get_text("dict", clip=fitz_rect).get("blocks", [])
+                    
+                    for block in spans:
+                        if block.get("type", -1) == 0:  # Text block
+                            for line in block.get("lines", []):
+                                for span in line.get("spans", []):
+                                    if "bbox" in span:
+                                        span_rect = fitz.Rect(span["bbox"])
+                                        
+                                        # Convert to screen coordinates for highlighting
+                                        screen_rect = QRectF(
+                                            span_rect.x0 * self.zoom_factor - h_scroll,
+                                            span_rect.y0 * self.zoom_factor - v_scroll,
+                                            (span_rect.x1 - span_rect.x0) * self.zoom_factor,
+                                            (span_rect.y1 - span_rect.y0) * self.zoom_factor
+                                        )
+                                        
+                                        self.current_highlights.append(screen_rect)
+                
             except Exception as e:
                 # Fallback to simple rectangular highlight if span extraction fails
                 logger.warning(f"Detailed highlighting failed, using rectangle: {e}")
@@ -356,29 +391,41 @@ class PDFGraphicsView(QWidget):
 
         except Exception as e:
             logger.exception(f"Error in _update_selection: {e}")
+            
     def add_highlight(self, text=None):
         """Add current selection to permanent highlights."""
-        # Initialize page highlights if not exists
-        if self.current_page_num not in self.highlights:
-            self.highlights[self.current_page_num] = []
+        try:
+            # Initialize page highlights if not exists
+            if self.current_page_num not in self.highlights:
+                self.highlights[self.current_page_num] = []
+                
+            if text is None:
+                # Use current selection
+                self.highlights[self.current_page_num].extend(self.current_highlights)
+            else:
+                # Highlight specific text
+                try:
+                    instances = self.page.search_for(text)
+                    
+                    # Get scroll position
+                    h_scroll = self.scroll_area.horizontalScrollBar().value()
+                    v_scroll = self.scroll_area.verticalScrollBar().value()
+                    
+                    for inst in instances:
+                        # Convert to screen coordinates
+                        screen_rect = QRectF(
+                            inst.x0 * self.zoom_factor - h_scroll,
+                            inst.y0 * self.zoom_factor - v_scroll,
+                            (inst.x1 - inst.x0) * self.zoom_factor,
+                            (inst.y1 - inst.y0) * self.zoom_factor
+                        )
+                        self.highlights[self.current_page_num].append(screen_rect)
+                except Exception as e:
+                    logger.warning(f"Search-based highlighting failed: {e}")
             
-        if text is None:
-            # Use current selection
-            self.highlights[self.current_page_num].extend(self.current_highlights)
-        else:
-            # Highlight specific text
-            instances = self.page.search_for(text)
-            for inst in instances:
-                # Convert to screen coordinates
-                screen_rect = QRectF(
-                    inst.x0 * self.zoom_factor,
-                    inst.y0 * self.zoom_factor,
-                    (inst.x1 - inst.x0) * self.zoom_factor,
-                    (inst.y1 - inst.y0) * self.zoom_factor
-                )
-                self.highlights[self.current_page_num].append(screen_rect)
-        
-        self.update()
+            self.update()
+        except Exception as e:
+            logger.exception(f"Error adding highlight: {e}")
     
     def clear_highlights(self):
         """Clear all highlights on current page."""

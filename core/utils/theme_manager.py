@@ -655,4 +655,13 @@ class ThemeManager:
             return True
         except Exception as e:
             logger.error(f"Error creating theme template: {e}")
-            return False 
+            return False
+
+    def is_dark_theme(self) -> bool:
+        """Check if current theme is dark.
+        
+        Returns:
+            bool: True if dark theme, False otherwise
+        """
+        # Simplest implementation - just check the current theme name
+        return self.current_theme == "dark" 

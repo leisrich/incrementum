@@ -940,16 +940,31 @@ class DocumentView(QWidget):
         self.vim_key_handler = VimKeyHandler(self)
     
     def _clear_content_layout(self):
-        """Clear the content layout by removing all widgets."""
-        if hasattr(self, 'content_layout') and self.content_layout:
-            # Remove each widget from the layout
-            while self.content_layout.count():
-                item = self.content_layout.takeAt(0)
-                widget = item.widget()
+        """Clear the content layout of any widgets."""
+        try:
+            # Stop audio playback if there's an audio player
+            if hasattr(self, 'audio_player') and self.audio_player is not None:
+                try:
+                    # Stop playback and save position
+                    self.audio_player.stop()
+                    self.audio_player.save_position()
+                    logger.info("Audio player stopped and position saved")
+                except Exception as e:
+                    logger.error(f"Error stopping audio player: {e}")
                 
-                if widget:
-                    widget.setParent(None)  # Remove parent relationship
-                    widget.deleteLater()     # Schedule for deletion
+                # Clear reference to audio player
+                self.audio_player = None
+
+            # Clear the content layout
+            if self.content_layout:
+                while self.content_layout.count():
+                    item = self.content_layout.takeAt(0)
+                    widget = item.widget()
+                    if widget:
+                        widget.hide()
+                        widget.deleteLater()
+        except Exception as e:
+            logger.error(f"Error clearing content layout: {e}")
     
     def _update_vim_status_visibility(self):
         """Update the visibility of the Vim status bar based on Vim mode state."""
@@ -1394,6 +1409,8 @@ window.addEventListener('load', function() {
                 self.keep_alive(self.webview)
             if hasattr(self, 'youtube_callback'):
                 self.keep_alive(self.youtube_callback)
+            if hasattr(self, 'audio_player'):
+                self.keep_alive(self.audio_player)
                 
             # Clear the document area
             self._clear_content_layout()
@@ -1425,6 +1442,8 @@ window.addEventListener('load', function() {
                 self._load_html()
             elif doc_type == "txt":
                 self._load_text()
+            elif doc_type in ["mp3", "wav", "ogg", "flac", "m4a", "aac"]:
+                self._load_audio()
             else:
                 # Default to text view
                 self._load_text()
@@ -3090,3 +3109,34 @@ window.addEventListener('load', function() {
                 self, "Export Error", 
                 f"An error occurred while exporting extracts: {str(e)}"
             )
+
+    def _load_audio(self):
+        """Load an audio file for playback with position tracking."""
+        try:
+            from ui.load_audio_helper import setup_audio_player
+            
+            # Calculate initial position
+            target_position = 0
+            if hasattr(self.document, 'position') and self.document.position is not None:
+                target_position = self.document.position
+                
+            # Set up the audio player
+            self.audio_player = setup_audio_player(
+                self, 
+                self.document, 
+                self.db_session, 
+                target_position
+            )
+            
+            # Add to layout
+            self.content_layout.addWidget(self.audio_player)
+            
+            # Update last accessed timestamp
+            self.document.last_accessed = datetime.now()
+            self.db_session.commit()
+            
+        except Exception as e:
+            logger.exception(f"Error loading audio file: {e}")
+            error_label = QLabel(f"Error loading audio file: {str(e)}")
+            error_label.setStyleSheet("color: red;")
+            self.content_layout.addWidget(error_label)

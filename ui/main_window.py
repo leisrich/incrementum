@@ -16,9 +16,9 @@ from PyQt6.QtWidgets import (
     QDockWidget, QScrollArea, QSplitter, QTreeView,
     QListView, QSizePolicy, QStyle, QComboBox,
     QLineEdit, QCompleter, QDialogButtonBox, QFrame,
-    QInputDialog
+    QInputDialog, QProgressBar, QListWidget, QTextEdit
 )
-from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread, QByteArray
+from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread, QByteArray, QUrl
 from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QAction
 
 from core.knowledge_base.models import init_database, Document, Category, Extract, LearningItem, Tag
@@ -59,6 +59,7 @@ from ui.dialogs.content_processor_dialog import ContentProcessorDialog
 from ui.dialogs.rss_feed_dialog import RSSFeedDialog
 from .rss_view import RSSView
 from .incremental_reading_view import IncrementalReadingView
+from .detailed_queue_view import DetailedQueueView
 
 logger = logging.getLogger(__name__)
 
@@ -818,42 +819,168 @@ class MainWindow(QMainWindow):
         # Help menu
         help_menu = menu_bar.addMenu("&Help")
         help_action = help_menu.addAction("Documentation")
+        help_action.triggered.connect(self._on_show_documentation)
         layout_help_action = help_menu.addAction("Interface Layout")
         layout_help_action.triggered.connect(self._on_layout_help)
         about_action = help_menu.addAction("About")
         about_action.triggered.connect(self._on_about)
     
     def _create_tool_bar(self):
-        """Create the toolbar with main actions."""
-        self.tool_bar = QToolBar()
+        """Create and setup the toolbar."""
+        self.tool_bar = QToolBar("Main Toolbar", self)
         self.tool_bar.setObjectName("MainToolBar")
-        self.tool_bar.setIconSize(QSize(24, 24))
-        self.tool_bar.setMovable(False)
+        self.tool_bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.tool_bar.setIconSize(QSize(32, 32))
+        self.addToolBar(self.tool_bar)
         
-        # Add common actions
+        # Add actions to toolbar with icons
+        
+        # Import document action
+        self.action_import_file.setIcon(QIcon.fromTheme("document-open", 
+                                       self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogStart)))
         self.tool_bar.addAction(self.action_import_file)
+        
+        # Import URL action
+        self.action_import_url.setIcon(QIcon.fromTheme("web-browser", 
+                                      self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)))
         self.tool_bar.addAction(self.action_import_url)
+        
+        # Add separator
+        self.tool_bar.addSeparator()
+        
+        # Read Next action
+        self.action_read_next.setIcon(QIcon.fromTheme("go-next", 
+                                     self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)))
+        self.tool_bar.addAction(self.action_read_next)
+        
+        # Start Review action
+        self.action_start_review.setIcon(QIcon.fromTheme("view-refresh", 
+                                        self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)))
+        self.tool_bar.addAction(self.action_start_review)
+        
+        # Add separator
+        self.tool_bar.addSeparator()
         
         # Add web browser action if enabled
         if self.settings_manager.get_setting("ui", "web_browser_enabled", True):
+            self.action_web_browser.setIcon(QIcon.fromTheme("applications-internet", 
+                                          self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)))
             self.tool_bar.addAction(self.action_web_browser)
+            self.tool_bar.addSeparator()
         
+        # Add Reading Queue button with custom appearance
+        self.reading_queue_btn = QToolButton()
+        self.reading_queue_btn.setText("Reading Queue")
+        self.reading_queue_btn.setToolTip("Show detailed reading queue")
+        self.reading_queue_btn.setIcon(QIcon.fromTheme("view-grid", 
+             self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView)))
+        self.reading_queue_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.reading_queue_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.reading_queue_btn.clicked.connect(self._on_show_detailed_queue)
+        self.tool_bar.addWidget(self.reading_queue_btn)
+        
+        # Add separator
+        self.tool_bar.addSeparator()
+        
+        # Save action
+        self.action_save.setIcon(QIcon.fromTheme("document-save", 
+                                self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)))
         self.tool_bar.addAction(self.action_save)
         self.tool_bar.addSeparator()
         
+        # Bookmark action
+        self.action_add_bookmark.setIcon(QIcon.fromTheme("bookmark-new", 
+                                        self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton)))
         self.tool_bar.addAction(self.action_add_bookmark)
+        
+        # Highlight action
+        self.action_highlight.setIcon(QIcon.fromTheme("format-text-color", 
+                                     self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)))
         self.tool_bar.addAction(self.action_highlight)
         self.tool_bar.addSeparator()
+        
+        # Generate items action
+        self.action_generate_items.setIcon(QIcon.fromTheme("document-new", 
+                                         self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)))
         self.tool_bar.addAction(self.action_generate_items)
         self.tool_bar.addSeparator()
-        self.tool_bar.addAction(self.action_start_review)
-        self.tool_bar.addAction(self.action_view_queue)
-        self.tool_bar.addAction(self.action_prev_document)
-        self.tool_bar.addAction(self.action_read_next)
-        self.tool_bar.addSeparator()
-        self.tool_bar.addAction(self.action_search)
         
-        self.addToolBar(self.tool_bar)
+        # Previous document action
+        self.action_prev_document.setIcon(QIcon.fromTheme("go-previous", 
+                                        self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft)))
+        self.tool_bar.addAction(self.action_prev_document)
+        self.tool_bar.addSeparator()
+        
+        # Search action
+        self.action_search.setIcon(QIcon.fromTheme("edit-find", 
+                                 self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)))
+        self.tool_bar.addAction(self.action_search)
+    
+    def _on_show_detailed_queue(self):
+        """Display a dialog with a detailed view of the reading queue."""
+        from ui.detailed_queue_view import DetailedQueueView
+        
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Detailed Reading Queue")
+        dialog.setWindowIcon(QIcon.fromTheme("view-grid", 
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView)))
+        dialog.resize(900, 600)
+        
+        # Create layout
+        layout = QVBoxLayout(dialog)
+        
+        # Create queue view
+        queue_view = DetailedQueueView(self.db_session, self.settings_manager)
+        
+        # Connect document selection signal to handler
+        queue_view.documentSelected.connect(lambda doc_id: self._on_queue_document_selected(doc_id, dialog))
+        
+        # Add to layout
+        layout.addWidget(queue_view)
+        
+        # Add button row
+        button_layout = QHBoxLayout()
+        
+        # Read next button
+        read_next_btn = QPushButton("Read Next Document")
+        read_next_btn.setIcon(QIcon.fromTheme("go-next", 
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)))
+        read_next_btn.clicked.connect(lambda: self.action_read_next.trigger())
+        button_layout.addWidget(read_next_btn)
+        
+        # Add stretch to push buttons to right
+        button_layout.addStretch()
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Show dialog
+        dialog.exec()
+    
+    def _on_queue_document_selected(self, document_id, dialog=None):
+        """Handle document selection from detailed queue view."""
+        try:
+            # Load the document
+            document = self.db_session.query(Document).get(document_id)
+            if not document:
+                logger.error(f"Document with ID {document_id} not found")
+                return
+                
+            # Close the dialog if provided
+            if dialog and not dialog.isHidden():
+                dialog.accept()
+                
+            # Open the document
+            self._open_document(document.id)
+            
+        except Exception as e:
+            logger.exception(f"Error opening document from queue: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to open document: {str(e)}")
     
     def _create_status_bar(self):
         """Create the status bar."""
@@ -1919,11 +2046,42 @@ class MainWindow(QMainWindow):
     
     @pyqtSlot()
     def _on_manage_tags(self):
-        """Handler for managing tags."""
-        QMessageBox.information(
-            self, "Manage Tags", 
-            "Tag management interface would be shown here."
-        )
+        """Open the tag manager dialog."""
+        try:
+            # Create and show the tag manager dialog
+            from ui.tag_view import TagView
+            
+            # Create TagView with only db_session as required
+            tag_view = TagView(self.db_session)
+            
+            # Add to a dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Tag Manager")
+            dialog.setMinimumSize(800, 600)
+            
+            # Create layout
+            layout = QVBoxLayout(dialog)
+            layout.addWidget(tag_view)
+            
+            # Add close button at the bottom
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+            
+            close_button = QPushButton("Close")
+            close_button.clicked.connect(dialog.accept)
+            button_layout.addWidget(close_button)
+            
+            layout.addLayout(button_layout)
+            
+            # Show dialog
+            dialog.exec()
+            
+        except Exception as e:
+            logger.exception(f"Error opening tag manager: {e}")
+            QMessageBox.critical(
+                self, "Error",
+                f"Error opening tag manager: {str(e)}"
+            )
     
     @pyqtSlot(bool)
     def _on_toggle_category_panel(self, checked):
@@ -2716,3 +2874,281 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.action_exit)
         
         # Edit menu
+        edit_menu = menubar.addMenu("&Edit")
+        edit_menu.addAction(self.action_new_extract)
+        edit_menu.addAction(self.action_new_learning_item)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_manage_tags)
+        
+        # View menu
+        self.view_menu = menubar.addMenu("&View")
+        
+        # Panel toggles
+        panels_menu = self.view_menu.addMenu("Panels")
+        panels_menu.addAction(self.action_toggle_category_panel)
+        panels_menu.addAction(self.action_toggle_search_panel)
+        panels_menu.addAction(self.action_toggle_stats_panel)
+        panels_menu.addAction(self.action_toggle_queue_panel)  # Add queue panel toggle
+        
+        # Add dock arrangement actions
+        self.view_menu.addSeparator()
+        self.view_menu.addAction(self.action_tile_docks)
+        self.view_menu.addAction(self.action_cascade_docks)
+        self.view_menu.addAction(self.action_tab_docks)
+        
+        # Learning menu
+        learning_menu = menubar.addMenu("&Learning")
+        learning_menu.addAction(self.action_start_review)
+        learning_menu.addSeparator()
+        learning_menu.addAction(self.action_browse_extracts)
+        learning_menu.addAction(self.action_browse_learning_items)
+        
+        # Tools menu
+        self.tools_menu = menubar.addMenu("&Tools")
+        self.tools_menu.addAction(self.action_start_review)
+        self.tools_menu.addAction(self.action_view_queue)
+        self.tools_menu.addAction(self.action_prev_document)
+        self.tools_menu.addAction(self.action_read_next)
+        self.tools_menu.addSeparator()
+        self.tools_menu.addAction(self.action_search)
+        self.tools_menu.addAction(self.action_view_network)
+        self.tools_menu.addSeparator()
+        self.tools_menu.addAction(self.action_backup_restore)
+        self.tools_menu.addAction(self.action_settings)
+        self.tools_menu.addAction(self.action_statistics)
+        self.tools_menu.addAction(self.action_summarize_document)
+        
+        # NOW ADD THE RSS FEEDS ACTION TO THE TOOLS MENU
+        self.tools_menu.addSeparator()
+        self.tools_menu.addAction(self.action_rss_feeds)
+        
+        # NOW ADD THE ADDITIONAL TOOL ACTIONS THAT WERE ORIGINALLY IN _create_actions
+        self.tools_menu.addAction(self.action_tag_manager)
+        self.tools_menu.addAction(self.action_batch_processor)
+        self.tools_menu.addAction(self.action_review_manager)
+        self.tools_menu.addAction(self.action_backup)
+        
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        help_action = help_menu.addAction("Documentation")
+        help_action.triggered.connect(self._on_show_documentation)
+        layout_help_action = help_menu.addAction("Interface Layout")
+        layout_help_action.triggered.connect(self._on_layout_help)
+        about_action = help_menu.addAction("About")
+        about_action.triggered.connect(self._on_about)
+
+    @pyqtSlot()
+    def _on_show_documentation(self):
+        """Show documentation by displaying markdown files."""
+        try:
+            import os
+            
+            # Try to import markdown, but handle the case where it's not installed
+            try:
+                import markdown
+                markdown_available = True
+            except ImportError:
+                markdown_available = False
+                logger.warning("Markdown module not installed. Documentation will be displayed as plain text.")
+                # Show warning to user
+                QMessageBox.warning(
+                    self, "Module Missing",
+                    "The 'markdown' Python package is not installed. Documentation will be displayed as plain text.\n\n"
+                    "To install it, run: pip install markdown"
+                )
+            
+            # Create documentation dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Incrementum Documentation")
+            dialog.resize(900, 700)
+            
+            # Create layout
+            layout = QVBoxLayout(dialog)
+            
+            # Create tab widget to organize documentation
+            tab_widget = QTabWidget()
+            
+            # Find all markdown files in docs directory
+            docs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
+            
+            if os.path.exists(docs_dir):
+                # Create a tab for main documentation files
+                main_docs_tab = QWidget()
+                main_docs_layout = QVBoxLayout(main_docs_tab)
+                
+                # Create a list of available documentation
+                docs_list = QListWidget()
+                main_docs_layout.addWidget(QLabel("<h2>Available Documentation</h2>"))
+                main_docs_layout.addWidget(docs_list)
+                
+                # Content display
+                docs_content = QTextEdit()
+                docs_content.setReadOnly(True)
+                main_docs_layout.addWidget(docs_content)
+                
+                # Add to tabs
+                tab_widget.addTab(main_docs_tab, "Main Documentation")
+                
+                # Populate list with markdown files
+                main_md_files = [f for f in os.listdir(docs_dir) if f.endswith('.md')]
+                
+                for md_file in sorted(main_md_files):
+                    docs_list.addItem(md_file)
+                
+                # Connect selection signal
+                docs_list.currentItemChanged.connect(
+                    lambda current, previous: self._display_markdown_file(
+                        os.path.join(docs_dir, current.text()), docs_content, markdown_available
+                    ) if current else None
+                )
+                
+                # Check for user guide directory
+                user_guide_dir = os.path.join(docs_dir, "user_guide")
+                if os.path.exists(user_guide_dir) and os.path.isdir(user_guide_dir):
+                    self._add_documentation_tab(tab_widget, user_guide_dir, "User Guide", markdown_available)
+                
+                # Check for developer guide directory
+                dev_guide_dir = os.path.join(docs_dir, "developer")
+                if os.path.exists(dev_guide_dir) and os.path.isdir(dev_guide_dir):
+                    self._add_documentation_tab(tab_widget, dev_guide_dir, "Developer Guide", markdown_available)
+                
+                # Select first item if available
+                if docs_list.count() > 0:
+                    docs_list.setCurrentRow(0)
+            else:
+                # No documentation found
+                no_docs_label = QLabel("No documentation files found.")
+                tab_widget.addTab(no_docs_label, "Documentation")
+            
+            # Add tab widget to layout
+            layout.addWidget(tab_widget)
+            
+            # Add close button
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+            
+            close_button = QPushButton("Close")
+            close_button.clicked.connect(dialog.accept)
+            button_layout.addWidget(close_button)
+            
+            layout.addLayout(button_layout)
+            
+            # Show dialog
+            dialog.exec()
+            
+        except Exception as e:
+            logger.exception(f"Error showing documentation: {e}")
+            QMessageBox.critical(
+                self, "Error",
+                f"Error showing documentation: {str(e)}"
+            )
+    
+    def _add_documentation_tab(self, tab_widget, docs_dir, tab_title, markdown_available=True):
+        """Add a tab for a documentation directory."""
+        try:
+            import os
+            
+            # Create tab and layout
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            
+            # Create a list of available documentation
+            docs_list = QListWidget()
+            tab_layout.addWidget(QLabel(f"<h2>{tab_title} Documentation</h2>"))
+            tab_layout.addWidget(docs_list)
+            
+            # Content display
+            docs_content = QTextEdit()
+            docs_content.setReadOnly(True)
+            tab_layout.addWidget(docs_content)
+            
+            # Add to tabs
+            tab_widget.addTab(tab, tab_title)
+            
+            # Populate list with markdown files
+            md_files = [f for f in os.listdir(docs_dir) if f.endswith('.md')]
+            
+            for md_file in sorted(md_files):
+                docs_list.addItem(md_file)
+            
+            # Connect selection signal
+            docs_list.currentItemChanged.connect(
+                lambda current, previous: self._display_markdown_file(
+                    os.path.join(docs_dir, current.text()), docs_content, markdown_available
+                ) if current else None
+            )
+            
+            # Select first item if available
+            if docs_list.count() > 0:
+                docs_list.setCurrentRow(0)
+                
+        except Exception as e:
+            logger.warning(f"Error adding documentation tab: {e}")
+            
+    def _display_markdown_file(self, file_path, text_edit, markdown_available=True):
+        """Load and display a markdown file in the text edit widget."""
+        try:
+            import os
+            
+            # Check if file exists
+            if not os.path.exists(file_path):
+                text_edit.setHtml(f"<p>Error: File not found: {file_path}</p>")
+                return
+                
+            # Read file content
+            with open(file_path, 'r', encoding='utf-8') as f:
+                md_content = f.read()
+            
+            # If markdown is available, convert to HTML
+            if markdown_available:
+                try:
+                    import markdown
+                    # Convert markdown to HTML
+                    html_content = markdown.markdown(
+                        md_content, 
+                        extensions=['extra', 'codehilite', 'toc', 'smarty']
+                    )
+                    
+                    # Add CSS styling
+                    styled_html = f"""
+                    <html>
+                    <head>
+                        <style>
+                            body {{ font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }}
+                            h1, h2, h3, h4 {{ color: #2c3e50; }}
+                            h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+                            h2 {{ border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+                            code {{ background-color: #f8f8f8; padding: 2px 4px; border-radius: 3px; }}
+                            pre {{ background-color: #f8f8f8; padding: 10px; border-radius: 3px; overflow-x: auto; }}
+                            blockquote {{ background-color: #f9f9f9; border-left: 4px solid #ccc; padding: 10px; margin: 10px 0; }}
+                            img {{ max-width: 100%; }}
+                            table {{ border-collapse: collapse; width: 100%; }}
+                            th, td {{ border: 1px solid #ddd; padding: 8px; }}
+                            tr:nth-child(even) {{ background-color: #f2f2f2; }}
+                            th {{ padding-top: 12px; padding-bottom: 12px; text-align: left; background-color: #4CAF50; color: white; }}
+                        </style>
+                    </head>
+                    <body>
+                        {html_content}
+                    </body>
+                    </html>
+                    """
+                    
+                    # Set HTML content in text edit
+                    text_edit.setHtml(styled_html)
+                    
+                    # Set base URL for images and links
+                    from PyQt6.QtCore import QUrl
+                    base_url = QUrl.fromLocalFile(os.path.dirname(file_path) + os.path.sep)
+                    text_edit.document().setBaseUrl(base_url)
+                except Exception as e:
+                    logger.warning(f"Error converting markdown: {e}")
+                    # Fallback to plain text
+                    text_edit.setPlainText(md_content)
+            else:
+                # Display as plain text with a simple header
+                text_edit.setHtml(f"<h2>{os.path.basename(file_path)}</h2><pre>{md_content}</pre>")
+            
+        except Exception as e:
+            logger.exception(f"Error displaying markdown file: {e}")
+            text_edit.setHtml(f"<p>Error displaying file: {str(e)}</p>")

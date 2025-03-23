@@ -13,6 +13,7 @@ from .handlers.text_handler import TextHandler
 from .handlers.epub_handler import EPUBHandler
 from .handlers.docx_handler import DOCXHandler
 from .handlers.youtube_handler import YouTubeHandler
+from .handlers.audio_handler import AudioHandler
 
 # Database models
 from core.knowledge_base.models import Document, Category
@@ -32,6 +33,12 @@ class DocumentProcessor:
             'epub': EPUBHandler(),
             'docx': DOCXHandler(),
             'youtube': YouTubeHandler(),
+            'mp3': AudioHandler(),
+            'wav': AudioHandler(),
+            'ogg': AudioHandler(),
+            'flac': AudioHandler(),
+            'm4a': AudioHandler(),
+            'aac': AudioHandler(),
         }
     
     def import_document(self, file_path: str, category_id: Optional[int] = None) -> Optional[Document]:

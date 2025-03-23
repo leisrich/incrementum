@@ -373,6 +373,17 @@ class TagManager:
             # Handle different document types
             file_extension = os.path.splitext(document.file_path)[1].lower()
             
+            # Special handling for audio files
+            if document.content_type in ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac']:
+                # For audio files, just use minimal metadata to avoid processing huge binary data
+                metadata = f"Audio file: {document.title}\nArtist: {document.author or 'Unknown'}\n"
+                if hasattr(document, 'duration') and document.duration:
+                    metadata += f"Duration: {document.duration} seconds\n"
+                
+                # Add some generic audio-related terms to improve tag suggestions
+                metadata += "Keywords: audio, sound, music, podcast, listening, recording"
+                return metadata
+            
             if file_extension == '.pdf':
                 # Process PDF
                 import fitz  # PyMuPDF

@@ -62,6 +62,12 @@ class NLPExtractor:
         Returns:
             List of dictionaries with key concepts information
         """
+        # Check text length to avoid spaCy memory issues
+        max_text_length = 500000  # 500K chars should be safe for most systems
+        if len(text) > max_text_length:
+            logger.warning(f"Text length ({len(text)}) exceeds maximum ({max_text_length}). Truncating for processing.")
+            text = text[:max_text_length]
+        
         # Process text with spaCy
         doc = self.nlp(text)
         

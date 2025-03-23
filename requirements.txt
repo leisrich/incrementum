@@ -3,6 +3,7 @@
 # Core dependencies
 PyQt6==6.5.0        # UI framework with good Linux support
 PyQt6-WebEngine==6.5.0
+PyQt6-Multimedia==6.5.0  # For audio playback
 SQLAlchemy==2.0.15  # ORM for database operations
 alembic==1.11.1     # Database migrations
 
@@ -60,3 +61,6 @@ transformers==4.30.2
 regex==2023.6.3
 tqdm==4.65.0
 youtube-transcript-api==0.6.1
+
+# System dependencies
+# ffmpeg - Required for audio file handling (install via system package manager)
