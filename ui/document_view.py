@@ -16,9 +16,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
-    QTabWidget, QLineEdit, QSizePolicy, QCheckBox
+    QTabWidget, QLineEdit, QSizePolicy, QCheckBox, QSlider
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray
+from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QKeyEvent, QIntValidator
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtWebEngineCore import QWebEngineSettings
@@ -26,10 +27,10 @@ try:
     HAS_WEBENGINE = True
 except ImportError:
     HAS_WEBENGINE = False
-from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QKeyEvent
 
 from core.knowledge_base.models import Document, Extract
 from core.content_extractor.extractor import ContentExtractor
+from core.document_processor.handlers.epub_handler import EPUBHandler
 from .document_extracts_view import DocumentExtractsView
 from .load_epub_helper import setup_epub_webview
 from .load_youtube_helper import setup_youtube_webview, extract_video_id_from_document
@@ -38,16 +39,37 @@ from .youtube_transcript_view import YouTubeTranscriptView
 logger = logging.getLogger(__name__)
 
 class WebViewCallback(QObject):
-    """Class to handle callbacks from JavaScript in QWebEngineView."""
+    """Callback handler for JavaScript communication with WebView."""
     
     def __init__(self, document_view):
+        """Initialize with document view reference."""
         super().__init__()
         self.document_view = document_view
     
     @pyqtSlot(str)
     def selectionChanged(self, text):
-        """Handle selection change from JavaScript."""
-        self.document_view._handle_webview_selection(text)
+        """Handle text selection changes from WebView."""
+        if self.document_view:
+            self.document_view._handle_webview_selection(text)
+    
+    @pyqtSlot(str)
+    def extractText(self, text):
+        """Handle text extraction requests from WebView."""
+        if self.document_view and text:
+            self.document_view._handle_sm_extract_result(text)
+    
+    @pyqtSlot(str)
+    def createCloze(self, text):
+        """Handle cloze creation requests from WebView."""
+        if self.document_view and text:
+            self.document_view._handle_sm_cloze_result(text)
+    
+    @pyqtSlot()
+    def skipItem(self):
+        """Handle skip item requests from WebView."""
+        if self.document_view:
+            # This would connect to review scheduling
+            pass
 
 class VimKeyHandler:
     """Helper class for handling Vim-like key bindings."""
@@ -1412,7 +1434,7 @@ window.addEventListener('load', function() {
             if doc_type == "youtube":
                 self._load_youtube()
             elif doc_type == "epub":
-                self._load_epub()
+                self._load_epub(self.db_session, self.document)
             elif doc_type == "pdf":
                 self._load_pdf()
             elif doc_type == "html" or doc_type == "htm":
@@ -1542,62 +1564,89 @@ window.addEventListener('load', function() {
             label = QLabel(f"Error loading PDF: {str(e)}")
             self.content_layout.addWidget(label)
 
-    def _load_epub(self):
-        """Load and display an EPUB document."""
+    def _load_epub(self, db_session, document):
+        """
+        Load document in EPUB format.
+        
+        Args:
+            db_session: SQLAlchemy session
+            document: Document object
+            
+        Returns:
+            bool: True if document was loaded successfully
+        """
         try:
             if not HAS_WEBENGINE:
-                raise ImportError("EPUB viewing requires QWebEngineView")
+                raise Exception("Web engine not available.")
             
-            # Create a web view for the EPUB content
-            webview = QWebEngineView()
+            # Create the web view
+            content_edit = QWebEngineView()
             
-            # Load the EPUB as HTML (using a specialized EPUB handler)
-            from core.document_processor.handlers.epub_handler import EPUBHandler
-            epub_handler = EPUBHandler()
-            
-            # IMPORTANT: Fixed the AttributeError: 'EPUBHandler' object has no attribute 'extract_html_content'
-            # by using extract_content() method which returns a dict with 'html' key instead
-            content_results = epub_handler.extract_content(self.document.file_path)
-            html_content = content_results['html']
-            
-            # Check for JavaScript libraries that might be needed
-            libs_to_check = ['mermaid', 'katex', 'plotly', 'markdown', 'three.js']
-            detected_libs = []
-            
-            for lib in libs_to_check:
-                if lib in html_content.lower():
-                    detected_libs.append(lib)
-                    
-            if detected_libs:
-                logger.info(f"Detected potential JavaScript libraries in EPUB: {', '.join(detected_libs)}")
-                # Process HTML content to add libraries
-                html_content = self._inject_javascript_libraries(html_content)
-            
-            # Set base URL for resources
-            base_url = QUrl.fromLocalFile(os.path.dirname(self.document.file_path) + os.path.sep)
-            
-            # Set content to web view with proper base path
-            webview.setHtml(html_content, base_url)
-            
-            # Set up EPUB-specific tracking
-            setup_epub_webview(self.document, webview, self.db_session)
-            
-            # Add to layout
-            self.content_layout.addWidget(webview)
-            
-            # Store for later use
-            self.content_edit = webview
-            self.web_view = webview  # Keep reference for _save_position
-            self.content_text = content_results['text']
-        
-        except ImportError as e:
-            logger.error(f"EPUB viewing requires QWebEngineView: {e}")
-            label = QLabel("EPUB viewing requires QWebEngineView which is not available.")
-            self.content_layout.addWidget(label)
+            # Load the EPUB into the handler
+            try:
+                epub_handler = EPUBHandler()
+                # Load the file data and prepare it for the webview
+                content_results = epub_handler.extract_content(document.file_path)
+                html_content = content_results['html']
+                
+                # Check if we can detect any JS libraries in the HTML content
+                # For better display with certain EPUB formats
+                has_jquery = "jquery" in html_content.lower()
+                
+                # Apply jQuery from resources if not already in the HTML
+                if not has_jquery:
+                    logger.debug("EPUB does not contain jQuery, will inject if needed")
+                    # Handled via injectScriptTag in later methods
+                
+                # Set the EPUB content to the view
+                content_edit.setHtml(html_content, QUrl.fromLocalFile(document.file_path))
+                
+                # Set up position tracking
+                from ui.load_epub_helper import setup_epub_webview
+                from core.utils.theme_manager import ThemeManager
+                
+                # Get theme manager from MainWindow or create a new instance
+                app = QApplication.instance()
+                main_window = None
+                for widget in app.topLevelWidgets():
+                    if widget.__class__.__name__ == "MainWindow":
+                        main_window = widget
+                        break
+                
+                theme_manager = None
+                if main_window and hasattr(main_window, 'theme_manager'):
+                    theme_manager = main_window.theme_manager
+                else:
+                    # Create a new instance if not available
+                    from core.settings.settings_manager import SettingsManager
+                    settings_manager = SettingsManager()
+                    theme_manager = ThemeManager(settings_manager)
+                
+                # Add SuperMemo SM-18 style incremental reading capabilities
+                self._add_supermemo_features(content_edit)
+                
+                # Set up the EPUB view with theme
+                setup_epub_webview(document, content_edit, db_session, restore_position=True, theme_manager=theme_manager)
+                
+                # Add it to our layout
+                self.content_layout.addWidget(content_edit)
+                
+                # Store content for later use
+                self.content_edit = content_edit
+                self.content_text = content_results['text']
+                
+                return True
+                
+            except Exception as e:
+                logger.exception(f"Failed to load EPUB document: {e}")
+                content_edit.setHtml(f"<h1>Error loading EPUB</h1><p>{str(e)}</p>")
+                self.content_layout.addWidget(content_edit)
+                return False
+                
         except Exception as e:
-            logger.exception(f"Error loading EPUB: {e}")
-            label = QLabel(f"Error loading EPUB: {str(e)}")
-            self.content_layout.addWidget(label)
+            logger.exception(f"Error setting up EPUB view: {e}")
+            self._set_error_message(f"Could not load EPUB document: {e}")
+            return False
     
     def _load_text(self):
         """Load and display a text document."""
@@ -2517,5 +2566,469 @@ window.addEventListener('load', function() {
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid position value: {e}")
 
+    def _set_error_message(self, message):
+        """
+        Display an error message in the content area.
+        
+        Args:
+            message: Error message to display
+        """
+        # Clear the content layout
+        self._clear_content_layout()
+        
+        # Create error label
+        error_widget = QLabel(message)
+        error_widget.setWordWrap(True)
+        error_widget.setStyleSheet("color: red; padding: 20px;")
+        
+        # Add to layout
+        self.content_layout.addWidget(error_widget)
+        
+        logger.error(message)
+
+    def _add_supermemo_features(self, web_view):
+        """
+        Add SuperMemo SM-18 style incremental reading features to web view.
+        
+        Args:
+            web_view: QWebEngineView instance
+        """
+        if not HAS_WEBENGINE or not isinstance(web_view, QWebEngineView):
+            return
+            
+        logger.info("Adding SuperMemo incremental reading features to EPUB view")
+        
+        # Add SuperMemo toolbar
+        toolbar = QToolBar("SuperMemo Features")
+        toolbar.setObjectName("superMemoToolbar")
+        
+        # Extract action
+        extract_action = QAction("Extract Selection", self)
+        extract_action.setToolTip("Extract selected text to create a new learning item (Ctrl+Alt+E)")
+        extract_action.setShortcut("Ctrl+Alt+E")
+        extract_action.triggered.connect(self._on_sm_extract)
+        
+        # Cloze deletion action
+        cloze_action = QAction("Cloze Deletion", self)
+        cloze_action.setToolTip("Create cloze deletion from selected text (Ctrl+Alt+C)")
+        cloze_action.setShortcut("Ctrl+Alt+C")
+        cloze_action.triggered.connect(self._on_sm_cloze)
+        
+        # Priority tools
+        priority_action = QAction("Set Priority", self)
+        priority_action.setToolTip("Set learning priority for this item (Ctrl+Alt+P)")
+        priority_action.setShortcut("Ctrl+Alt+P")
+        priority_action.triggered.connect(self._on_sm_priority)
+        
+        # Highlighting tools with SuperMemo color scheme
+        highlight_menu = QMenu("Highlight", self)
+        
+        # SM-18 style color highlighting
+        colors = [
+            ("Most Important", "#FF0000", "Ctrl+Alt+1"),  # Red
+            ("Very Important", "#FF7F00", "Ctrl+Alt+2"),  # Orange
+            ("Important", "#FFFF00", "Ctrl+Alt+3"),       # Yellow
+            ("Less Important", "#00FF00", "Ctrl+Alt+4"),  # Green
+            ("Least Important", "#0000FF", "Ctrl+Alt+5")  # Blue
+        ]
+        
+        for name, color, shortcut in colors:
+            action = QAction(name, self)
+            action.setData(color)
+            action.setShortcut(shortcut)
+            action.triggered.connect(lambda checked, c=color: self._on_sm_highlight(c))
+            highlight_menu.addAction(action)
+        
+        # Schedule review actions
+        schedule_action = QAction("Schedule Review", self)
+        schedule_action.setToolTip("Schedule this item for review (Ctrl+Alt+S)")
+        schedule_action.setShortcut("Ctrl+Alt+S")
+        schedule_action.triggered.connect(self._on_sm_schedule)
+        
+        # Add actions to toolbar
+        toolbar.addAction(extract_action)
+        toolbar.addAction(cloze_action)
+        toolbar.addAction(priority_action)
+        toolbar.addSeparator()
+        toolbar.addAction(schedule_action)
+        toolbar.addSeparator()
+        
+        # Add highlight menu button
+        highlight_button = QPushButton("Highlight")
+        highlight_button.setMenu(highlight_menu)
+        toolbar.addWidget(highlight_button)
+        
+        # Add spacing
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+        
+        # Add toolbar to layout before the web view
+        if hasattr(self, 'content_layout'):
+            # Insert the toolbar at the top
+            self.content_layout.insertWidget(0, toolbar)
+        
+        # Add JavaScript for SuperMemo features
+        js_code = """
+        (function() {
+            // SuperMemo Incremental Reading Enhancements
+            document.addEventListener('keydown', function(e) {
+                // Ctrl+Alt+Z - Fast forward (skip current item)
+                if (e.ctrlKey && e.altKey && e.code === 'KeyZ') {
+                    window.superMemo.skipItem();
+                }
+            });
+            
+            // Make text easier to process in chunks
+            const style = document.createElement('style');
+            style.textContent = `
+                p, li { 
+                    margin-bottom: 1em; 
+                    line-height: 1.5;
+                }
+                .sm-highlight-red { background-color: rgba(255,0,0,0.3); }
+                .sm-highlight-orange { background-color: rgba(255,127,0,0.3); }
+                .sm-highlight-yellow { background-color: rgba(255,255,0,0.3); }
+                .sm-highlight-green { background-color: rgba(0,255,0,0.3); }
+                .sm-highlight-blue { background-color: rgba(0,0,255,0.3); }
+                .sm-extracted { border-left: 3px solid #0078D7; padding-left: 10px; }
+            `;
+            document.head.appendChild(style);
+            
+            window.superMemo = {
+                highlight: function(color) {
+                    const selection = window.getSelection();
+                    if (selection.rangeCount > 0) {
+                        const range = selection.getRangeAt(0);
+                        const span = document.createElement('span');
+                        span.className = 'sm-highlight-' + color;
+                        range.surroundContents(span);
+                    }
+                },
+                
+                extract: function() {
+                    const selection = window.getSelection();
+                    if (selection.rangeCount > 0) {
+                        const range = selection.getRangeAt(0);
+                        const div = document.createElement('div');
+                        div.className = 'sm-extracted';
+                        range.surroundContents(div);
+                        return selection.toString();
+                    }
+                    return '';
+                },
+                
+                skipItem: function() {
+                    // This would be connected to the review system
+                    console.log('Item skipped for later review');
+                }
+            };
+        })();
+        """
+        
+        # Inject the SuperMemo JavaScript
+        web_view.page().runJavaScript(js_code)
+        
+        # Connect JavaScript bridge for communication
+        self.sm_channel = QWebChannel()
+        self.sm_callback = WebViewCallback(self)
+        self.sm_channel.registerObject("superMemoHandler", self.sm_callback)
+        web_view.page().setWebChannel(self.sm_channel)
+        
+        # Keep references alive
+        self.keep_alive(toolbar)
+        self.keep_alive(self.sm_channel)
+        self.keep_alive(self.sm_callback)
+    
+    @pyqtSlot()
+    def _on_sm_extract(self):
+        """Create a SuperMemo-style extract from selected text."""
+        if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWebEngineView):
+            # Get selected text via JavaScript
+            self.content_edit.page().runJavaScript(
+                "window.superMemo.extract();",
+                self._handle_sm_extract_result
+            )
+    
+    def _handle_sm_extract_result(self, selected_text):
+        """Handle the extract creation from selected text."""
+        if not selected_text:
+            return
+            
+        try:
+            # Create a new extract with SuperMemo metadata
+            from core.knowledge_base.models import Extract
+            
+            # Include SuperMemo priority and scheduling data
+            extract = Extract(
+                document_id=self.document.id,
+                content=selected_text,
+                source_page=getattr(self.document, 'current_page', 0),
+                created_at=datetime.now(),
+                metadata={
+                    "sm_priority": 50,  # Default priority (0-100)
+                    "sm_interval": 1,   # Days until next review
+                    "sm_ease_factor": 2.5,  # SuperMemo ease factor
+                    "sm_extract_type": "topic"  # SuperMemo concept
+                }
+            )
+            
+            # Save to database
+            self.db_session.add(extract)
+            self.db_session.commit()
+            
+            # Show confirmation
+            QApplication.instance().beep()
+            
+            # Notify about the new extract
+            if hasattr(self, 'extractCreated'):
+                self.extractCreated.emit(extract.id)
+                
+            logger.info(f"Created SuperMemo extract {extract.id} with priority 50")
+            
+        except Exception as e:
+            logger.exception(f"Error creating SuperMemo extract: {e}")
+    
+    @pyqtSlot()
+    def _on_sm_cloze(self):
+        """Create a SuperMemo-style cloze deletion from selected text."""
+        if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWebEngineView):
+            # Get selected text via JavaScript
+            self.content_edit.page().runJavaScript(
+                "window.getSelection().toString();",
+                self._handle_sm_cloze_result
+            )
+    
+    def _handle_sm_cloze_result(self, selected_text):
+        """Handle the cloze deletion creation from selected text."""
+        if not selected_text:
+            return
+            
+        try:
+            # Create a new learning item with cloze deletion
+            from core.knowledge_base.models import LearningItem
+            
+            # Create cloze format: text with [...] replacing the selection
+            content = self.content_text
+            cloze_text = content.replace(selected_text, f"[...]")
+            
+            # Create the learning item with SuperMemo properties
+            item = LearningItem(
+                content=cloze_text,
+                answer=selected_text,
+                item_type="cloze",
+                document_id=self.document.id,
+                metadata={
+                    "sm_priority": 60,  # Default priority for cloze (0-100)
+                    "sm_interval": 1,   # Days until next review
+                    "sm_ease_factor": 2.5,  # SuperMemo ease factor
+                    "sm_repetitions": 0  # Number of reviews
+                }
+            )
+            
+            # Save to database
+            self.db_session.add(item)
+            self.db_session.commit()
+            
+            # Show confirmation
+            QApplication.instance().beep()
+            
+            logger.info(f"Created SuperMemo cloze item {item.id} with priority 60")
+            
+        except Exception as e:
+            logger.exception(f"Error creating SuperMemo cloze: {e}")
+    
+    @pyqtSlot()
+    def _on_sm_priority(self):
+        """Set SuperMemo priority for the current document or selection."""
+        # Create a dialog for setting priority
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set SuperMemo Priority")
+        layout = QVBoxLayout()
+        
+        # Slider for priority (0-100)
+        priority_slider = QSlider(Qt.Orientation.Horizontal)
+        priority_slider.setMinimum(0)
+        priority_slider.setMaximum(100)
+        priority_slider.setValue(50)  # Default
+        priority_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        priority_slider.setTickInterval(10)
+        
+        # Label to show value
+        value_label = QLabel("Priority: 50")
+        priority_slider.valueChanged.connect(lambda v: value_label.setText(f"Priority: {v}"))
+        
+        # Add to layout
+        layout.addWidget(QLabel("Set learning priority (0-100):"))
+        layout.addWidget(priority_slider)
+        layout.addWidget(value_label)
+        
+        # Buttons
+        buttons = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        
+        ok_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        
+        buttons.addWidget(ok_button)
+        buttons.addWidget(cancel_button)
+        
+        layout.addLayout(buttons)
+        dialog.setLayout(layout)
+        
+        # Show dialog and process result
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            priority = priority_slider.value()
+            
+            # Update document metadata with SuperMemo priority
+            if hasattr(self, 'document') and self.document:
+                metadata = self.document.metadata or {}
+                metadata['sm_priority'] = priority
+                self.document.metadata = metadata
+                
+                # Save changes
+                self.db_session.commit()
+                
+                logger.info(f"Set SuperMemo priority {priority} for document {self.document.id}")
+    
+    @pyqtSlot(str)
+    def _on_sm_highlight(self, color):
+        """Apply SuperMemo-style highlighting to selected text."""
+        if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWebEngineView):
+            # Map the color to a color name for JavaScript
+            color_map = {
+                "#FF0000": "red",     # Red
+                "#FF7F00": "orange",  # Orange
+                "#FFFF00": "yellow",  # Yellow
+                "#00FF00": "green",   # Green
+                "#0000FF": "blue"     # Blue
+            }
+            
+            color_name = color_map.get(color, "yellow")
+            
+            # Apply the highlight via JavaScript
+            self.content_edit.page().runJavaScript(
+                f"window.superMemo.highlight('{color_name}');"
+            )
+            
+            logger.debug(f"Applied SuperMemo {color_name} highlight")
+    
+    @pyqtSlot()
+    def _on_sm_schedule(self):
+        """Schedule the current document for SuperMemo-style review."""
+        # Create dialog for scheduling
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Schedule Review")
+        layout = QVBoxLayout()
+        
+        # Days until next review
+        days_spinner = QLineEdit()
+        days_spinner.setText("1")  # Default: tomorrow
+        days_spinner.setValidator(QIntValidator(1, 365))
+        
+        # Add to layout
+        layout.addWidget(QLabel("Days until next review:"))
+        layout.addWidget(days_spinner)
+        
+        # Add SuperMemo Algorithm options
+        algorithm_checkbox = QCheckBox("Use SuperMemo SM-18 algorithm")
+        algorithm_checkbox.setChecked(True)
+        layout.addWidget(algorithm_checkbox)
+        
+        # Buttons
+        buttons = QHBoxLayout()
+        ok_button = QPushButton("Schedule")
+        cancel_button = QPushButton("Cancel")
+        
+        ok_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        
+        buttons.addWidget(ok_button)
+        buttons.addWidget(cancel_button)
+        
+        layout.addLayout(buttons)
+        dialog.setLayout(layout)
+        
+        # Show dialog and process result
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            try:
+                days = int(days_spinner.text())
+                use_sm_algorithm = algorithm_checkbox.isChecked()
+                
+                # Update document metadata with scheduling information
+                if hasattr(self, 'document') and self.document:
+                    metadata = self.document.metadata or {}
+                    
+                    # Calculate next review date
+                    from datetime import datetime, timedelta
+                    next_review = datetime.now() + timedelta(days=days)
+                    
+                    # Update metadata
+                    metadata['sm_next_review'] = next_review.isoformat()
+                    metadata['sm_interval'] = days
+                    
+                    if use_sm_algorithm:
+                        # Apply SuperMemo SM-18 algorithm factors
+                        metadata['sm_ease_factor'] = metadata.get('sm_ease_factor', 2.5)
+                        metadata['sm_repetitions'] = metadata.get('sm_repetitions', 0) + 1
+                    
+                    self.document.metadata = metadata
+                    self.document.last_reviewed = datetime.now()
+                    
+                    # Save changes
+                    self.db_session.commit()
+                    
+                    logger.info(f"Scheduled document {self.document.id} for review in {days} days")
+                    
+                    # Show confirmation
+                    QMessageBox.information(
+                        self,
+                        "Review Scheduled",
+                        f"Document scheduled for review in {days} days."
+                    )
+                    
+            except Exception as e:
+                logger.exception(f"Error scheduling review: {e}")
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    f"Could not schedule review: {str(e)}"
+                )
+
     # Import necessary module to avoid error
     from datetime import datetime
+
+    def _update_theme(self):
+        """Update the theme for this document view."""
+        try:
+            # Apply theme to the content if it's a web view
+            if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWebEngineView):
+                # Get the theme manager
+                from core.utils.theme_manager import ThemeManager
+                from PyQt6.QtWidgets import QApplication
+                
+                # Get or create theme manager
+                app = QApplication.instance()
+                main_window = None
+                for widget in app.topLevelWidgets():
+                    if widget.__class__.__name__ == "MainWindow":
+                        main_window = widget
+                        break
+                
+                theme_manager = None
+                if main_window and hasattr(main_window, 'theme_manager'):
+                    theme_manager = main_window.theme_manager
+                else:
+                    # Create a new instance if not available
+                    from core.settings.settings_manager import SettingsManager
+                    settings_manager = SettingsManager()
+                    theme_manager = ThemeManager(settings_manager)
+                
+                # Apply theme to the web content
+                from ui.load_epub_helper import apply_theme_background
+                apply_theme_background(self.content_edit, theme_manager)
+                
+                logger.debug("Updated theme for document view")
+        except Exception as e:
+            logger.exception(f"Error updating theme: {e}")
