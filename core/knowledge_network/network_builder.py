@@ -435,6 +435,24 @@ class KnowledgeNetworkBuilder:
         
         return (word_length_score * 0.5) + (sentence_length_score * 0.5)
 
+    def _populate_categories(self):
+        """Populate the category combo box."""
+        try:
+            from core.utils.category_helper import populate_category_combo
+            populate_category_combo(self.category_combo, self.db_session)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to populate categories: {e}")
+            
+            # Fallback: Get categories directly from database
+            self.category_combo.clear()
+            self.category_combo.addItem("All Categories", None)
+            
+            categories = self.db_session.query(Category).order_by(Category.name).all()
+            for category in categories:
+                self.category_combo.addItem(category.name, category.id)
+
 
 # ui/network_view.py
 
@@ -526,11 +544,22 @@ class NetworkView(QWidget):
         self._on_generate_graph()
     
     def _populate_categories(self):
-        """Populate the category selector."""
-        categories = self.db_session.query(Category).all()
-        
-        for category in categories:
-            self.category_combo.addItem(category.name, category.id)
+        """Populate the category combo box."""
+        try:
+            from core.utils.category_helper import populate_category_combo
+            populate_category_combo(self.category_combo, self.db_session)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to populate categories: {e}")
+            
+            # Fallback: Get categories directly from database
+            self.category_combo.clear()
+            self.category_combo.addItem("All Categories", None)
+            
+            categories = self.db_session.query(Category).order_by(Category.name).all()
+            for category in categories:
+                self.category_combo.addItem(category.name, category.id)
     
     @pyqtSlot(int)
     def _on_graph_type_changed(self, index):

@@ -367,10 +367,243 @@ class LearningItemEditor(QDialog):
     
     def _generate_with_ai(self, count, api_config):
         """Generate items using AI with the specified configuration."""
-        if self.qa_radio.isChecked():
+        # Get selected item type
+        item_type = self.item_type_combo.currentData()
+        
+        if not self.extract:
+            logger.error("No extract available for AI generation")
+            return []
+            
+        try:
+            # For mixed items, distribute the count among different item types
+            if item_type == "mixed":
+                # Create a variety of item types
+                items = []
+                types = ["qa", "cloze", "analogy", "concept"]
+                
+                # Calculate how many of each type to generate
+                per_type = max(1, count // len(types))
+                remaining = count
+                
+                for t in types:
+                    if remaining <= 0:
+                        break
+                    count_for_type = min(per_type, remaining)
+                    remaining -= count_for_type
+                    
+                    items.extend(self._generate_specific_ai_items(t, count_for_type, api_config))
+                    
+                return items
+            else:
+                # Generate specific type
+                return self._generate_specific_ai_items(item_type, count, api_config)
+                
+        except Exception as e:
+            logger.exception(f"Error in AI generation: {e}")
+            # Fall back to template generation
+            if self.qa_radio.isChecked():
+                return self._generate_template_qa(count)
+            else:
+                return self._generate_template_cloze(count)
+    
+    def _generate_specific_ai_items(self, item_type, count, api_config):
+        """Generate specific type of learning items using AI."""
+        if item_type == "qa":
             return self.nlp_extractor.generate_qa_pairs(self.extract_id, max_pairs=count, ai_config=api_config)
-        else:
+        elif item_type == "cloze":
             return self.nlp_extractor.generate_cloze_deletions(self.extract_id, max_items=count, ai_config=api_config)
+        elif item_type == "analogy":
+            # Generate analogies using AI
+            return self._generate_ai_analogies(count, api_config)
+        elif item_type == "concept":
+            # Generate concept definitions using AI
+            return self._generate_ai_concepts(count, api_config)
+        else:
+            # Default to QA pairs if type is unknown
+            return self.nlp_extractor.generate_qa_pairs(self.extract_id, max_pairs=count, ai_config=api_config)
+    
+    def _generate_ai_analogies(self, count, api_config):
+        """Generate analogy-based learning items using AI."""
+        from datetime import datetime
+        
+        if not self.extract:
+            return []
+            
+        provider = api_config.get('provider', 'openai')
+        api_key = api_config.get('api_key')
+        model = api_config.get('model')
+        
+        if not api_key:
+            raise ValueError("No API key provided")
+            
+        # Create a prompt for generating analogies
+        prompt = f"""
+        Create {count} analogy-based learning items from the following text. 
+        Each analogy should help understand a concept by comparing it to something familiar.
+        Format each as a question and answer pair where:
+        - The question asks for an analogy that explains a concept
+        - The answer provides a clear, intuitive analogy
+        
+        TEXT:
+        {self.extract.content}
+        
+        OUTPUT FORMAT:
+        - Question: [Question]
+        - Answer: [Answer]
+        """
+        
+        # Generate the analogies using appropriate API
+        try:
+            from core.document_processor.summarizer import DocumentSummarizer
+            summarizer = DocumentSummarizer(self.db_session, api_config=api_config)
+            if provider == 'openai':
+                response = summarizer._openai_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'anthropic':
+                response = summarizer._anthropic_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'openrouter':
+                response = summarizer._openrouter_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'google':
+                response = summarizer._google_summarize(prompt, "", api_key, model, 2000)
+            else:
+                raise ValueError(f"Unsupported provider: {provider}")
+                
+            # Parse the response to extract question-answer pairs
+            items = []
+            current_question = None
+            current_answer = None
+            
+            for line in response.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('- Question:') or line.startswith('Question:'):
+                    # Save previous item if exists
+                    if current_question and current_answer:
+                        item = LearningItem(
+                            extract_id=self.extract_id,
+                            item_type='qa',
+                            question=current_question,
+                            answer=current_answer,
+                            priority=self.extract.priority,
+                            created_date=datetime.utcnow()
+                        )
+                        self.db_session.add(item)
+                        items.append(item)
+                    
+                    # Start new item
+                    current_question = line.split(':', 1)[1].strip()
+                    current_answer = None
+                elif line.startswith('- Answer:') or line.startswith('Answer:'):
+                    current_answer = line.split(':', 1)[1].strip()
+            
+            # Add the last item
+            if current_question and current_answer:
+                item = LearningItem(
+                    extract_id=self.extract_id,
+                    item_type='qa',
+                    question=current_question,
+                    answer=current_answer,
+                    priority=self.extract.priority,
+                    created_date=datetime.utcnow()
+                )
+                self.db_session.add(item)
+                items.append(item)
+                
+            self.db_session.commit()
+            return items
+            
+        except Exception as e:
+            logger.exception(f"Error generating analogies: {e}")
+            return []
+    
+    def _generate_ai_concepts(self, count, api_config):
+        """Generate concept definition learning items using AI."""
+        from datetime import datetime
+        
+        if not self.extract:
+            return []
+            
+        provider = api_config.get('provider', 'openai')
+        api_key = api_config.get('api_key')
+        model = api_config.get('model')
+        
+        if not api_key:
+            raise ValueError("No API key provided")
+            
+        # Create a prompt for generating concept definitions
+        prompt = f"""
+        Extract {count} key concepts from the following text and create learning items.
+        For each concept:
+        - The question should ask for a definition or explanation of the concept
+        - The answer should provide a clear, concise definition
+        
+        TEXT:
+        {self.extract.content}
+        
+        OUTPUT FORMAT:
+        - Question: What is [concept]? OR How does [concept] work? OR Define [concept].
+        - Answer: [Clear, concise definition or explanation]
+        """
+        
+        # Generate the concepts using appropriate API
+        try:
+            from core.document_processor.summarizer import DocumentSummarizer
+            summarizer = DocumentSummarizer(self.db_session, api_config=api_config)
+            if provider == 'openai':
+                response = summarizer._openai_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'anthropic':
+                response = summarizer._anthropic_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'openrouter':
+                response = summarizer._openrouter_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'google':
+                response = summarizer._google_summarize(prompt, "", api_key, model, 2000)
+            else:
+                raise ValueError(f"Unsupported provider: {provider}")
+                
+            # Parse the response to extract question-answer pairs
+            items = []
+            current_question = None
+            current_answer = None
+            
+            for line in response.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('- Question:') or line.startswith('Question:'):
+                    # Save previous item if exists
+                    if current_question and current_answer:
+                        item = LearningItem(
+                            extract_id=self.extract_id,
+                            item_type='qa',
+                            question=current_question,
+                            answer=current_answer,
+                            priority=self.extract.priority,
+                            created_date=datetime.utcnow()
+                        )
+                        self.db_session.add(item)
+                        items.append(item)
+                    
+                    # Start new item
+                    current_question = line.split(':', 1)[1].strip()
+                    current_answer = None
+                elif line.startswith('- Answer:') or line.startswith('Answer:'):
+                    current_answer = line.split(':', 1)[1].strip()
+            
+            # Add the last item
+            if current_question and current_answer:
+                item = LearningItem(
+                    extract_id=self.extract_id,
+                    item_type='qa',
+                    question=current_question,
+                    answer=current_answer,
+                    priority=self.extract.priority,
+                    created_date=datetime.utcnow()
+                )
+                self.db_session.add(item)
+                items.append(item)
+                
+            self.db_session.commit()
+            return items
+            
+        except Exception as e:
+            logger.exception(f"Error generating concept definitions: {e}")
+            return []
     
     def _generate_with_templates(self, count):
         """Generate items using templates."""
@@ -1101,27 +1334,26 @@ class LearningItemEditor(QDialog):
             
             main_layout.addWidget(extract_group)
         
-        # Item type selection (only for new items)
-        if not self.item:
-            type_group = QGroupBox("Item Type")
-            type_layout = QHBoxLayout(type_group)
-            
-            self.type_group = QButtonGroup(self)
-            
-            self.qa_radio = QRadioButton("Question-Answer")
-            self.qa_radio.setChecked(True)
-            self.type_group.addButton(self.qa_radio)
-            type_layout.addWidget(self.qa_radio)
-            
-            self.cloze_radio = QRadioButton("Cloze Deletion")
-            self.type_group.addButton(self.cloze_radio)
-            type_layout.addWidget(self.cloze_radio)
-            
-            # Connect signals
-            self.qa_radio.toggled.connect(self._on_type_changed)
-            self.cloze_radio.toggled.connect(self._on_type_changed)
-            
-            main_layout.addWidget(type_group)
+        # Item type selection
+        type_group = QGroupBox("Item Type")
+        type_layout = QHBoxLayout(type_group)
+        
+        self.type_group = QButtonGroup(self)
+        
+        self.qa_radio = QRadioButton("Question-Answer")
+        self.qa_radio.setChecked(True)
+        self.type_group.addButton(self.qa_radio)
+        type_layout.addWidget(self.qa_radio)
+        
+        self.cloze_radio = QRadioButton("Cloze Deletion")
+        self.type_group.addButton(self.cloze_radio)
+        type_layout.addWidget(self.cloze_radio)
+        
+        # Connect signals
+        self.qa_radio.toggled.connect(self._on_type_changed)
+        self.cloze_radio.toggled.connect(self._on_type_changed)
+        
+        main_layout.addWidget(type_group)
         
         # Item content
         content_tabs = QTabWidget()
@@ -1190,6 +1422,19 @@ class LearningItemEditor(QDialog):
         provider_layout.addWidget(self.provider_combo)
         provider_layout.addWidget(self.api_settings_btn)
         auto_layout.addWidget(self.provider_container)
+        
+        # Item type selection
+        item_type_layout = QHBoxLayout()
+        item_type_label = QLabel("Learning Item Types:")
+        self.item_type_combo = QComboBox()
+        self.item_type_combo.addItem("Mixed (Variety)", "mixed")
+        self.item_type_combo.addItem("Question-Answer", "qa")
+        self.item_type_combo.addItem("Cloze Deletion", "cloze")
+        self.item_type_combo.addItem("Analogy", "analogy")
+        self.item_type_combo.addItem("Concept Definition", "concept")
+        item_type_layout.addWidget(item_type_label)
+        item_type_layout.addWidget(self.item_type_combo)
+        auto_layout.addLayout(item_type_layout)
         
         # Populate providers from AI_PROVIDERS
         try:
@@ -1269,7 +1514,6 @@ class LearningItemEditor(QDialog):
         main_layout.addLayout(button_layout)
         
         # Connect signals
-        self.qa_radio.toggled.connect(self._on_type_changed)
         self.auto_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.generate_btn.clicked.connect(self._on_generate)
         self.add_selected_btn.clicked.connect(self._on_generate_more)

@@ -84,7 +84,12 @@ class DocumentSummarizer:
                         Dictionary with keys: provider, api_key, model
         """
         self.db_session = db_session
-        self.api_config = api_config or {}
+        
+        # If api_config is a SettingsManager, retrieve the API configuration
+        if api_config and hasattr(api_config, 'get_setting'):
+            self.api_config = self._get_api_config(api_config)
+        else:
+            self.api_config = api_config or {}
         
         # Initialize handlers
         self.handlers = {
@@ -107,6 +112,57 @@ class DocumentSummarizer:
                       "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"],
         }
         
+    def _get_api_config(self, settings_manager):
+        """
+        Get API configuration from the settings manager.
+        
+        Args:
+            settings_manager: The settings manager instance
+            
+        Returns:
+            Dictionary with API configuration
+        """
+        try:
+            # Get provider setting
+            provider = settings_manager.get_setting("ai", "provider", "openai")
+            
+            # Validate provider
+            if provider not in AI_PROVIDERS:
+                provider = "openai"  # Default to OpenAI if invalid
+            
+            # Get the correct API key based on the provider
+            if provider == "openai":
+                api_key = settings_manager.get_setting("api", "openai_api_key", "")
+                model = settings_manager.get_setting("api", "openai_model", "gpt-3.5-turbo")
+            elif provider == "anthropic":
+                api_key = settings_manager.get_setting("api", "claude_api_key", "")
+                model = settings_manager.get_setting("api", "claude_model", "claude-3-5-sonnet-20241022")
+            elif provider == "google":
+                api_key = settings_manager.get_setting("api", "gemini_api_key", "")
+                model = settings_manager.get_setting("api", "gemini_model", "gemini-1.5-pro")
+            elif provider == "openrouter":
+                api_key = settings_manager.get_setting("api", "openrouter_api_key", "")
+                model = settings_manager.get_setting("api", "openrouter_model", "openai/gpt-3.5-turbo")
+            elif provider == "ollama":
+                api_key = settings_manager.get_setting("api", "ollama_host", "http://localhost:11434")
+                model = settings_manager.get_setting("api", "ollama_model", "llama2")
+                # If no host is set, use the default localhost
+                if not api_key or api_key == "":
+                    api_key = "http://localhost:11434"
+            else:
+                api_key = ""
+                model = ""
+                
+            # Build the API config
+            return {
+                "provider": provider,
+                "api_key": api_key,
+                "model": model
+            }
+        except Exception as e:
+            logger.error(f"Error getting API config: {e}")
+            return {}
+    
     def summarize_document(self, document_id: int, level: str = 'medium', 
                            use_ai: bool = True) -> Dict[str, Any]:
         """
@@ -1185,6 +1241,8 @@ class SummarizeDialog(QDialog):
         self.setFont(font)
         
         # Get API configuration from settings
+        from core.utils.settings_manager import SettingsManager
+        self.settings_manager = SettingsManager()
         self.api_config = self._get_api_config()
         
         # Create layout
@@ -1317,72 +1375,6 @@ class SummarizeDialog(QDialog):
         # Initialize UI with first provider's models
         self._update_model_combo()
     
-    def _get_api_config(self):
-        """Get API configuration from settings."""
-        try:
-            # Try to import settings manager
-            from core.utils.settings_manager import SettingsManager
-            settings = SettingsManager()
-            
-            # Get provider setting
-            provider = settings.get_setting("ai", "provider", "openai")
-            
-            # Validate provider
-            if provider not in AI_PROVIDERS:
-                provider = "openai"  # Default to OpenAI if invalid
-            
-            # Get API key for selected provider - each provider has its own setting key
-            setting_key = AI_PROVIDERS[provider]["setting_key"]
-            
-            # Get the correct API key based on the provider
-            if provider == "openai":
-                api_key = settings.get_setting("api", "openai_api_key", "")
-            elif provider == "anthropic":
-                api_key = settings.get_setting("api", "claude_api_key", "")
-            elif provider == "google":
-                api_key = settings.get_setting("api", "gemini_api_key", "")
-            elif provider == "openrouter":
-                api_key = settings.get_setting("api", "openrouter_api_key", "")
-            elif provider == "ollama":
-                api_key = settings.get_setting("api", "ollama_host", "http://localhost:11434")
-                # If no host is set, use the default localhost
-                if not api_key or api_key == "":
-                    api_key = "http://localhost:11434"
-            else:
-                api_key = ""
-                
-            # Get model for the provider
-            if provider == "openai":
-                model = settings.get_setting("api", "openai_model", "gpt-3.5-turbo")
-            elif provider == "anthropic":
-                model = settings.get_setting("api", "claude_model", "claude-3-5-sonnet-20241022")
-            elif provider == "google":
-                model = settings.get_setting("api", "gemini_model", "gemini-1.5-pro")
-            elif provider == "openrouter":
-                model = settings.get_setting("api", "openrouter_model", "openai/gpt-3.5-turbo")
-            elif provider == "ollama":
-                model = settings.get_setting("api", "ollama_model", "llama3")
-            else:
-                # Default to first model if available
-                available_models = AI_PROVIDERS[provider].get("models", [])
-                model = available_models[0] if available_models else ""
-            
-            # Log selected provider and model
-            logger.info(f"Using provider '{provider}' with model '{model}'")
-            if provider == "ollama":
-                logger.info(f"Ollama host set to: {api_key}")
-            
-            # Build config dictionary
-            return {
-                "provider": provider,
-                "api_key": api_key,
-                "model": model
-            }
-            
-        except Exception as e:
-            logger.exception(f"Error getting API configuration: {e}")
-            return {}
-    
     def _update_model_combo(self):
         """Update the model combo box based on selected provider."""
         # Get the provider ID from the current item's data
@@ -1474,6 +1466,49 @@ class SummarizeDialog(QDialog):
             elif current_text and current_text.strip():
                 # If we had a custom text previously, restore it
                 self.model_combo.setCurrentText(current_text)
+
+    def _get_api_config(self):
+        """Get API configuration from settings."""
+        try:
+            # Get provider setting
+            provider = self.settings_manager.get_setting("ai", "provider", "openai")
+            
+            # Validate provider
+            if provider not in AI_PROVIDERS:
+                provider = "openai"  # Default to OpenAI if invalid
+            
+            # Get the correct API key based on the provider
+            if provider == "openai":
+                api_key = self.settings_manager.get_setting("api", "openai_api_key", "")
+                model = self.settings_manager.get_setting("api", "openai_model", "gpt-3.5-turbo")
+            elif provider == "anthropic":
+                api_key = self.settings_manager.get_setting("api", "claude_api_key", "")
+                model = self.settings_manager.get_setting("api", "claude_model", "claude-3-5-sonnet-20241022")
+            elif provider == "google":
+                api_key = self.settings_manager.get_setting("api", "gemini_api_key", "")
+                model = self.settings_manager.get_setting("api", "gemini_model", "gemini-1.5-pro")
+            elif provider == "openrouter":
+                api_key = self.settings_manager.get_setting("api", "openrouter_api_key", "")
+                model = self.settings_manager.get_setting("api", "openrouter_model", "openai/gpt-3.5-turbo")
+            elif provider == "ollama":
+                api_key = self.settings_manager.get_setting("api", "ollama_host", "http://localhost:11434")
+                model = self.settings_manager.get_setting("api", "ollama_model", "llama2")
+                # If no host is set, use the default localhost
+                if not api_key or api_key == "":
+                    api_key = "http://localhost:11434"
+            else:
+                api_key = ""
+                model = ""
+                
+            # Build the API config
+            return {
+                "provider": provider,
+                "api_key": api_key,
+                "model": model
+            }
+        except Exception as e:
+            logger.error(f"Error getting API config: {e}")
+            return {}
 
     def _on_generate_summary(self):
         """Handle generate summary button click."""

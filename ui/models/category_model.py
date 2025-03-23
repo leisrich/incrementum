@@ -140,4 +140,13 @@ class CategoryModel(QAbstractItemModel):
         self.category_map = {category.id: i for i, category in enumerate(self.categories)}
         self.parent_map = {category.id: category.parent_id for category in self.categories}
         
+        # Update user categories in settings
+        try:
+            from core.utils.category_helper import update_user_categories
+            update_user_categories(self.db_session)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to update user categories in settings: {e}")
+        
         self.endResetModel()

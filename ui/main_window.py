@@ -905,8 +905,7 @@ class MainWindow(QMainWindow):
         category_widget = QWidget()
         category_layout = QVBoxLayout(category_widget)
         
-        # Category tree
-        self.category_label = QLabel("Categories")
+        # Category tree (remove the redundant label)
         self.category_tree = QTreeView()
         self.category_model = CategoryModel(self.db_session)
         self.category_tree.setModel(self.category_model)
@@ -924,7 +923,6 @@ class MainWindow(QMainWindow):
         self.documents_list.customContextMenuRequested.connect(self._on_document_context_menu)
         
         # Add widgets to category layout
-        category_layout.addWidget(self.category_label)
         category_layout.addWidget(self.category_tree)
         category_layout.addWidget(self.document_label)
         category_layout.addWidget(self.documents_list)
@@ -2009,17 +2007,18 @@ class MainWindow(QMainWindow):
         )
         
         if ok and name:
-            # Create category
-            category = Category(
-                name=name,
-                parent_id=parent_id
-            )
-            
-            self.db_session.add(category)
-            self.db_session.commit()
-            
-            # Reload category model
-            self.category_model._reload_categories()
+            try:
+                # Create category using the helper function
+                from core.utils.category_helper import create_category
+                create_category(self.db_session, name, parent_id)
+                
+                # Reload category model
+                self.category_model._reload_categories()
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Failed to create category: {e}")
+                QMessageBox.warning(self, "Error", f"Error creating category: {str(e)}")
     
     @pyqtSlot(int)
     def _on_rename_category(self, category_id):
@@ -2035,12 +2034,18 @@ class MainWindow(QMainWindow):
         )
         
         if ok and name:
-            # Update category
-            category.name = name
-            self.db_session.commit()
-            
-            # Reload category model
-            self.category_model._reload_categories()
+            try:
+                # Rename category using the helper function
+                from core.utils.category_helper import rename_category
+                rename_category(self.db_session, category_id, name)
+                
+                # Reload category model
+                self.category_model._reload_categories()
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Failed to rename category: {e}")
+                QMessageBox.warning(self, "Error", f"Error renaming category: {str(e)}")
     
     @pyqtSlot(int)
     def _on_delete_category(self, category_id):
@@ -2049,44 +2054,43 @@ class MainWindow(QMainWindow):
         if not category:
             return
         
-        # Check if category has children
-        children_count = self.db_session.query(Category).filter(Category.parent_id == category_id).count()
-        
-        if children_count > 0:
-            QMessageBox.warning(
-                self, "Cannot Delete", 
-                "Cannot delete category with subcategories."
+        try:
+            # Check for child categories
+            children_count = self.db_session.query(Category).filter(Category.parent_id == category_id).count()
+            
+            # Check for documents
+            from core.knowledge_base.models import Document
+            documents_count = self.db_session.query(Document).filter(Document.category_id == category_id).count()
+            
+            # Build confirmation message
+            msg = f"Are you sure you want to delete the category '{category.name}'?"
+            
+            if children_count > 0:
+                msg += f"\n\nThis will also delete {children_count} subcategories."
+                
+            if documents_count > 0:
+                msg += f"\n\nThis will remove the category from {documents_count} documents."
+            
+            # Confirm deletion
+            reply = QMessageBox.question(
+                self, "Confirm Delete", msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
             )
-            return
-        
-        # Check if category has documents
-        documents_count = self.db_session.query(Document).filter(Document.category_id == category_id).count()
-        
-        # Confirmation
-        msg = f"Are you sure you want to delete category '{category.name}'?"
-        
-        if documents_count > 0:
-            msg += f"\n\nThis will remove the category from {documents_count} documents."
-        
-        reply = QMessageBox.question(
-            self, "Confirm Delete", 
-            msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            # Update documents to remove category
-            self.db_session.query(Document).filter(
-                Document.category_id == category_id
-            ).update({Document.category_id: None})
             
-            # Delete category
-            self.db_session.delete(category)
-            self.db_session.commit()
-            
-            # Reload category model
-            self.category_model._reload_categories()
+            if reply == QMessageBox.StandardButton.Yes:
+                # Delete category using the helper function
+                from core.utils.category_helper import delete_category
+                delete_category(self.db_session, category_id, force=True)
+                
+                # Reload category model
+                self.category_model._reload_categories()
+                
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to delete category: {e}")
+            QMessageBox.warning(self, "Error", f"Error deleting category: {str(e)}")
     
     @pyqtSlot(QModelIndex)
     def _on_document_activated(self, index):

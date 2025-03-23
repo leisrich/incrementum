@@ -368,13 +368,14 @@ class NLPExtractor:
         
         return result
     
-    def generate_qa_pairs(self, extract_id: int, max_pairs: int = 5) -> List[LearningItem]:
+    def generate_qa_pairs(self, extract_id: int, max_pairs: int = 5, ai_config: Optional[Dict[str, Any]] = None) -> List[LearningItem]:
         """
         Generate question-answer pairs from an extract using NLP.
         
         Args:
             extract_id: ID of the extract
             max_pairs: Maximum number of pairs to generate
+            ai_config: Optional AI configuration for using external AI services
             
         Returns:
             List of LearningItem objects
@@ -384,18 +385,24 @@ class NLPExtractor:
             logger.error(f"Extract not found: {extract_id}")
             return []
         
-        # Process text with spaCy
-        doc = self.nlp(extract.content)
-        
         qa_pairs = []
         
-        # Generate factoid questions from named entities
-        entity_pairs = self._generate_entity_questions(doc)
-        qa_pairs.extend(entity_pairs[:max_pairs//2])
+        # If AI config is provided and has necessary keys, use AI to generate Q&A
+        if ai_config and ai_config.get('api_key') and ai_config.get('provider'):
+            qa_pairs = self._generate_qa_with_ai(extract, max_pairs, ai_config)
         
-        # Generate questions from key sentences
-        sentence_pairs = self._generate_sentence_questions(doc)
-        qa_pairs.extend(sentence_pairs[:max_pairs - len(qa_pairs)])
+        # If AI generation failed or wasn't attempted, fall back to rule-based
+        if not qa_pairs:
+            # Process text with spaCy
+            doc = self.nlp(extract.content)
+            
+            # Generate factoid questions from named entities
+            entity_pairs = self._generate_entity_questions(doc)
+            qa_pairs.extend(entity_pairs[:max_pairs//2])
+            
+            # Generate questions from key sentences
+            sentence_pairs = self._generate_sentence_questions(doc)
+            qa_pairs.extend(sentence_pairs[:max_pairs - len(qa_pairs)])
         
         # Create learning items
         learning_items = []
@@ -415,6 +422,95 @@ class NLPExtractor:
         
         self.db_session.commit()
         return learning_items
+        
+    def _generate_qa_with_ai(self, extract: Extract, max_pairs: int, ai_config: Dict[str, Any]) -> List[Dict[str, str]]:
+        """
+        Generate Q&A pairs using AI services.
+        
+        Args:
+            extract: Extract object containing the content
+            max_pairs: Maximum number of pairs to generate
+            ai_config: AI configuration dictionary with provider, api_key, etc.
+            
+        Returns:
+            List of dictionaries with question and answer
+        """
+        provider = ai_config.get('provider', 'openai')
+        api_key = ai_config.get('api_key')
+        model = ai_config.get('model')
+        
+        if not api_key:
+            logger.error("No API key provided for AI generation")
+            return []
+        
+        # Create prompt for generating Q&A pairs
+        prompt = f"""
+        Generate {max_pairs} question-answer pairs from the following text. 
+        The questions should test understanding of key concepts and information.
+        Create diverse types of questions:
+        - Factual questions about key information
+        - Conceptual questions about relationships and processes
+        - Application questions that test deeper understanding
+        
+        TEXT:
+        {extract.content}
+        
+        OUTPUT FORMAT:
+        - Question: [Clear, concise question]
+        - Answer: [Complete, accurate answer]
+        """
+        
+        try:
+            # Import summarizer for API calls
+            from core.document_processor.summarizer import DocumentSummarizer
+            summarizer = DocumentSummarizer(self.db_session, api_config=ai_config)
+            
+            # Call appropriate API based on provider
+            if provider == 'openai':
+                response = summarizer._openai_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'anthropic':
+                response = summarizer._anthropic_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'openrouter':
+                response = summarizer._openrouter_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'google':
+                response = summarizer._google_summarize(prompt, "", api_key, model, 2000)
+            else:
+                logger.error(f"Unsupported AI provider: {provider}")
+                return []
+            
+            # Parse response to extract question-answer pairs
+            pairs = []
+            current_question = None
+            current_answer = None
+            
+            for line in response.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('- Question:') or line.startswith('Question:'):
+                    # Save previous item if exists
+                    if current_question and current_answer:
+                        pairs.append({
+                            'question': current_question,
+                            'answer': current_answer
+                        })
+                    
+                    # Start new item
+                    current_question = line.split(':', 1)[1].strip()
+                    current_answer = None
+                elif line.startswith('- Answer:') or line.startswith('Answer:'):
+                    current_answer = line.split(':', 1)[1].strip()
+            
+            # Add the last item
+            if current_question and current_answer:
+                pairs.append({
+                    'question': current_question,
+                    'answer': current_answer
+                })
+                
+            return pairs
+            
+        except Exception as e:
+            logger.exception(f"Error in AI Q&A generation: {e}")
+            return []
     
     def _generate_entity_questions(self, doc) -> List[Dict[str, str]]:
         """Generate questions from named entities."""
@@ -515,13 +611,14 @@ class NLPExtractor:
         
         return qa_pairs
     
-    def generate_cloze_deletions(self, extract_id: int, max_items: int = 5) -> List[LearningItem]:
+    def generate_cloze_deletions(self, extract_id: int, max_items: int = 5, ai_config: Optional[Dict[str, Any]] = None) -> List[LearningItem]:
         """
-        Generate cloze deletion items from an extract using NLP.
+        Generate cloze deletion items from an extract.
         
         Args:
             extract_id: ID of the extract
             max_items: Maximum number of items to generate
+            ai_config: Optional AI configuration for using external AI services
             
         Returns:
             List of LearningItem objects
@@ -531,38 +628,144 @@ class NLPExtractor:
             logger.error(f"Extract not found: {extract_id}")
             return []
         
-        # Process text with spaCy
-        doc = self.nlp(extract.content)
+        # If AI config is provided and has necessary keys, use AI
+        cloze_items = []
+        if ai_config and ai_config.get('api_key') and ai_config.get('provider'):
+            cloze_items = self._generate_cloze_with_ai(extract, max_items, ai_config)
+            
+        # If AI generation failed or wasn't attempted, use rule-based approach
+        if not cloze_items:
+            # Process with spaCy
+            doc = self.nlp(extract.content)
+            
+            # Identify key concepts
+            concepts = self.identify_key_concepts(extract.content, num_concepts=max_items * 2)
+            
+            # Create cloze deletions
+            cloze_items = []
+            
+            for concept in concepts[:max_items]:
+                # Find context for this concept
+                context = self._find_concept_context(doc, concept['text'])
+                
+                if not context:
+                    continue
+                
+                # Create cloze by replacing concept with [...]
+                cloze_text = context.replace(concept['text'], '[...]')
+                
+                cloze_items.append({
+                    'question': cloze_text,
+                    'answer': concept['text']
+                })
         
-        # Find key concepts
-        key_concepts = self.identify_key_concepts(extract.content, num_concepts=max_items)
-        
-        # Create cloze deletions
+        # Create learning items
         learning_items = []
         
-        for concept in key_concepts:
-            # Find the sentence containing this concept
-            context = self._find_concept_context(doc, concept['text'])
+        for item in cloze_items:
+            learning_item = LearningItem(
+                extract_id=extract_id,
+                item_type='cloze',
+                question=item['question'],
+                answer=item['answer'],
+                priority=extract.priority,
+                created_date=datetime.utcnow()
+            )
             
-            if context:
-                # Create cloze deletion by replacing the concept with [...]
-                cloze_text = context.replace(concept['text'], "[...]")
-                
-                # Create learning item
-                item = LearningItem(
-                    extract_id=extract_id,
-                    item_type='cloze',
-                    question=cloze_text,
-                    answer=concept['text'],
-                    priority=extract.priority,
-                    created_date=datetime.utcnow()
-                )
-                
-                self.db_session.add(item)
-                learning_items.append(item)
+            self.db_session.add(learning_item)
+            learning_items.append(learning_item)
         
         self.db_session.commit()
         return learning_items
+        
+    def _generate_cloze_with_ai(self, extract: Extract, max_items: int, ai_config: Dict[str, Any]) -> List[Dict[str, str]]:
+        """
+        Generate cloze deletion items using AI services.
+        
+        Args:
+            extract: Extract object containing the content
+            max_items: Maximum number of items to generate
+            ai_config: AI configuration dictionary with provider, api_key, etc.
+            
+        Returns:
+            List of dictionaries with question and answer
+        """
+        provider = ai_config.get('provider', 'openai')
+        api_key = ai_config.get('api_key')
+        model = ai_config.get('model')
+        
+        if not api_key:
+            logger.error("No API key provided for AI generation")
+            return []
+        
+        # Create prompt for generating cloze deletions
+        prompt = f"""
+        Generate {max_items} cloze deletion items from the following text.
+        A cloze deletion is a sentence with a key term removed and replaced with [...].
+        The removed term is the answer.
+        
+        Choose important, meaningful terms to remove - focus on key concepts, technical terms, 
+        and important facts that would be worth memorizing.
+        
+        TEXT:
+        {extract.content}
+        
+        OUTPUT FORMAT:
+        - Question: [Sentence with [...] replacing the key term]
+        - Answer: [The removed term]
+        """
+        
+        try:
+            # Import summarizer for API calls
+            from core.document_processor.summarizer import DocumentSummarizer
+            summarizer = DocumentSummarizer(self.db_session, api_config=ai_config)
+            
+            # Call appropriate API based on provider
+            if provider == 'openai':
+                response = summarizer._openai_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'anthropic':
+                response = summarizer._anthropic_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'openrouter':
+                response = summarizer._openrouter_summarize(prompt, "", api_key, model, 2000)
+            elif provider == 'google':
+                response = summarizer._google_summarize(prompt, "", api_key, model, 2000)
+            else:
+                logger.error(f"Unsupported AI provider: {provider}")
+                return []
+            
+            # Parse response to extract cloze items
+            items = []
+            current_question = None
+            current_answer = None
+            
+            for line in response.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('- Question:') or line.startswith('Question:'):
+                    # Save previous item if exists
+                    if current_question and current_answer:
+                        items.append({
+                            'question': current_question,
+                            'answer': current_answer
+                        })
+                    
+                    # Start new item
+                    current_question = line.split(':', 1)[1].strip()
+                    current_answer = None
+                elif line.startswith('- Answer:') or line.startswith('Answer:'):
+                    current_answer = line.split(':', 1)[1].strip()
+            
+            # Add the last item
+            if current_question and current_answer:
+                items.append({
+                    'question': current_question,
+                    'answer': current_answer
+                })
+                
+            return items
+            
+        except Exception as e:
+            logger.exception(f"Error in AI cloze generation: {e}")
+            return []
     
     def _find_concept_context(self, doc, concept_text: str) -> str:
         """Find the sentence containing a concept."""

@@ -15,6 +15,7 @@ from PyQt6.QtGui import QAction
 
 from core.knowledge_base.models import RSSFeed, Category, RSSFeedEntry
 from core.utils.rss_feed_manager import RSSFeedManager
+from core.utils.category_helper import get_all_categories, populate_category_combo
 
 logger = logging.getLogger(__name__)
 
@@ -108,10 +109,19 @@ class AddEditFeedDialog(QDialog):
     
     def _populate_categories(self):
         """Populate the category combo box."""
-        categories = self.db_session.query(Category).order_by(Category.name).all()
-        
-        for category in categories:
-            self.category_combo.addItem(category.name, category.id)
+        try:
+            from core.utils.category_helper import populate_category_combo
+            # No "All Categories" option for RSS feed dialog
+            populate_category_combo(self.category_combo, self.db_session, include_all_option=False)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to populate categories: {e}")
+            
+            # Fallback: Get categories directly from database
+            categories = self.db_session.query(Category).order_by(Category.name).all()
+            for category in categories:
+                self.category_combo.addItem(category.name, category.id)
     
     def _load_feed_data(self):
         """Load data from the feed being edited."""

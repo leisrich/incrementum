@@ -20,6 +20,7 @@ from core.knowledge_base.models import (
     Document, Extract, LearningItem, ReviewLog, Category
 )
 from core.spaced_repetition import FSRSAlgorithm
+from core.utils.category_helper import get_all_categories, populate_category_combo
 
 logger = logging.getLogger(__name__)
 
@@ -198,11 +199,21 @@ class StatisticsWidget(QWidget):
         layout.addWidget(self.distribution_chart_view)
     
     def _populate_categories(self):
-        """Populate the category selector."""
-        categories = self.db_session.query(Category).all()
-        
-        for category in categories:
-            self.category_combo.addItem(category.name, category.id)
+        """Populate the category combo box."""
+        try:
+            populate_category_combo(self.category_combo, self.db_session)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to populate categories: {e}")
+            
+            # Fallback: Get categories directly from database
+            # Clear current items (except "All Categories")
+            while self.category_combo.count() > 1:
+                self.category_combo.removeItem(1)
+                
+            categories = self.db_session.query(Category).order_by(Category.name).all()
+            for category in categories:
+                self.category_combo.addItem(category.name, category.id)
     
     def _load_data(self):
         """Load statistics data."""

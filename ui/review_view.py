@@ -7,12 +7,13 @@ from datetime import datetime, timedelta
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QTextEdit, QProgressBar, QFrame,
-    QRadioButton, QButtonGroup, QGroupBox
+    QRadioButton, QButtonGroup, QGroupBox, QTabWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 
 from core.knowledge_base.models import LearningItem, Extract
 from core.spaced_repetition import FSRSAlgorithm
+from core.utils.settings_manager import SettingsManager
 
 logger = logging.getLogger(__name__)
 
@@ -266,3 +267,57 @@ class ReviewView(QWidget):
         """End the review session."""
         # Show session summary
         self._show_session_complete()
+        
+        # Log session progress
+        self._log_session_progress()
+        
+        # Find parent tab widget to navigate back
+        parent = self.parent()
+        while parent and not isinstance(parent, QTabWidget):
+            parent = parent.parent()
+            
+        if parent:
+            # Get current tab index
+            current_index = parent.currentIndex()
+            
+            # If there's a tab to the left, go there
+            if current_index > 0:
+                parent.setCurrentIndex(current_index - 1)
+            elif parent.count() > 1:
+                # If there's no tab to the left but other tabs exist, go to the first tab
+                parent.setCurrentIndex(0)
+                
+            # Close this tab (delayed to prevent issues)
+            QTimer.singleShot(100, lambda: parent.removeTab(parent.indexOf(self)))
+    
+    def _log_session_progress(self):
+        """Log the user's progress for the completed session."""
+        try:
+            from datetime import datetime
+            
+            # Create a progress log entry
+            total_time = datetime.now() - self.stats['start_time']
+            avg_response_time = sum(self.stats['response_times']) / max(1, len(self.stats['response_times']))
+            
+            # Log to console
+            logger.info(f"Review session completed: {self.stats['completed']} items, "
+                       f"{self.stats['correct']} correct ({self.stats['correct'] / max(1, self.stats['total']) * 100:.1f}%), "
+                       f"avg response time: {avg_response_time:.1f}s")
+            
+            # Could also save to a database table if needed
+            # This would require creating a new model for tracking progress over time
+            
+            # Update "last_review_date" for user preferences
+            try:
+                settings = SettingsManager()
+                settings.set_setting("user", "last_review_date", datetime.now().isoformat())
+                settings.set_setting("stats", "total_items_reviewed", 
+                                   settings.get_setting("stats", "total_items_reviewed", 0) + self.stats['completed'])
+                settings.set_setting("stats", "total_correct_answers", 
+                                   settings.get_setting("stats", "total_correct_answers", 0) + self.stats['correct'])
+                settings.save_settings()
+            except Exception as e:
+                logger.error(f"Failed to update review statistics: {e}")
+                
+        except Exception as e:
+            logger.error(f"Error logging session progress: {e}")

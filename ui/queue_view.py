@@ -18,6 +18,7 @@ from core.knowledge_base.models import Document, Category, Extract
 from core.spaced_repetition import FSRSAlgorithm
 from core.utils.settings_manager import SettingsManager
 from core.utils.shortcuts import ShortcutManager
+from core.utils.category_helper import get_all_categories, populate_category_combo
 
 logger = logging.getLogger(__name__)
 
@@ -264,11 +265,21 @@ class QueueView(QWidget):
         self.queue_tabs.addTab(calendar_tab, "Calendar View")
     
     def _populate_categories(self):
-        """Populate the category selector."""
-        categories = self.db_session.query(Category).all()
-        
-        for category in categories:
-            self.category_combo.addItem(category.name, category.id)
+        """Populate the category combo box."""
+        try:
+            populate_category_combo(self.category_combo, self.db_session)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to populate categories: {e}")
+            
+            # Fallback: Get categories directly from database
+            # Clear current items (except "All Categories")
+            while self.category_combo.count() > 1:
+                self.category_combo.removeItem(1)
+                
+            categories = self.db_session.query(Category).order_by(Category.name).all()
+            for category in categories:
+                self.category_combo.addItem(category.name, category.id)
     
     def _load_queue_data(self):
         """Load queue data based on current filters."""

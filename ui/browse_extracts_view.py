@@ -237,16 +237,22 @@ class BrowseExtractsView(QWidget):
     
     def _populate_categories(self):
         """Populate the category combo box."""
-        # Clear current items (except "All Categories")
-        while self.category_combo.count() > 1:
-            self.category_combo.removeItem(1)
-        
-        # Get categories
-        categories = self.db_session.query(Category).order_by(Category.name).all()
-        
-        # Add to combo box
-        for category in categories:
-            self.category_combo.addItem(category.name, category.id)
+        try:
+            from core.utils.category_helper import populate_category_combo
+            populate_category_combo(self.category_combo, self.db_session)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to populate categories: {e}")
+            
+            # Fallback: Get categories directly from database
+            # Clear current items (except "All Categories")
+            while self.category_combo.count() > 1:
+                self.category_combo.removeItem(1)
+                
+            categories = self.db_session.query(Category).order_by(Category.name).all()
+            for category in categories:
+                self.category_combo.addItem(category.name, category.id)
     
     def _load_extracts(self):
         """Load extracts based on current filters."""

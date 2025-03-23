@@ -20,7 +20,8 @@ class SettingsManager:
             "auto_save_interval": 5,  # minutes
             "max_recent_documents": 10,
             "default_category_id": None,
-            "startup_show_statistics": False
+            "startup_show_statistics": False,
+            "user_categories": []  # Track user-created categories
         },
         
         # UI settings

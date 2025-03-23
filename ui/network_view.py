@@ -28,6 +28,7 @@ except ImportError:
 
 from core.knowledge_base.models import Category
 from core.knowledge_network.network_builder import KnowledgeNetworkBuilder
+from core.utils.category_helper import get_all_categories, populate_category_combo
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +113,21 @@ class NetworkView(QWidget):
         self._on_graph_type_changed(0)
     
     def _populate_categories(self):
-        """Populate the category selector."""
-        categories = self.db_session.query(Category).all()
-        
-        for category in categories:
-            self.category_combo.addItem(category.name, category.id)
+        """Populate the category combo box."""
+        try:
+            populate_category_combo(self.category_combo, self.db_session)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to populate categories: {e}")
+            
+            # Fallback: Get categories directly from database
+            # Clear current items (except "All Categories")
+            while self.category_combo.count() > 1:
+                self.category_combo.removeItem(1)
+                
+            categories = self.db_session.query(Category).order_by(Category.name).all()
+            for category in categories:
+                self.category_combo.addItem(category.name, category.id)
     
     @pyqtSlot(int)
     def _on_graph_type_changed(self, index):
@@ -492,11 +503,21 @@ class SimpleNetworkView(QWidget):
         main_layout.addWidget(self.status_label)
     
     def _populate_categories(self):
-        """Populate the category selector."""
-        categories = self.db_session.query(Category).all()
-        
-        for category in categories:
-            self.category_combo.addItem(category.name, category.id)
+        """Populate the category combo box."""
+        try:
+            populate_category_combo(self.category_combo, self.db_session)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to populate categories: {e}")
+            
+            # Fallback: Get categories directly from database
+            # Clear current items (except "All Categories")
+            while self.category_combo.count() > 1:
+                self.category_combo.removeItem(1)
+                
+            categories = self.db_session.query(Category).order_by(Category.name).all()
+            for category in categories:
+                self.category_combo.addItem(category.name, category.id)
     
     @pyqtSlot()
     def _on_generate_graph(self):

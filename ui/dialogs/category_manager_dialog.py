@@ -214,6 +214,15 @@ class CategoryManagerDialog(QDialog):
             # Expand all items
             self.category_tree.expandAll()
             
+            # Update user categories in settings
+            try:
+                from core.utils.category_helper import update_user_categories
+                update_user_categories(self.db_session)
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Failed to update user categories in settings: {e}")
+            
         except Exception as e:
             logger.exception(f"Error loading categories: {e}")
             QMessageBox.warning(self, "Error", f"Error loading categories: {str(e)}")
@@ -370,10 +379,9 @@ class CategoryManagerDialog(QDialog):
         name, ok = QInputDialog.getText(self, "New Root Category", "Category name:")
         if ok and name.strip():
             try:
-                # Create new category
-                category = Category(name=name.strip(), parent_id=None)
-                self.db_session.add(category)
-                self.db_session.commit()
+                # Create new category using helper function
+                from core.utils.category_helper import create_category
+                create_category(self.db_session, name.strip())
                 
                 # Reload categories
                 self._load_categories()
@@ -400,10 +408,9 @@ class CategoryManagerDialog(QDialog):
         
         if ok and name.strip():
             try:
-                # Create new subcategory
-                category = Category(name=name.strip(), parent_id=parent_id)
-                self.db_session.add(category)
-                self.db_session.commit()
+                # Create new subcategory using helper function
+                from core.utils.category_helper import create_category
+                create_category(self.db_session, name.strip(), parent_id)
                 
                 # Reload categories
                 self._load_categories()
@@ -440,13 +447,9 @@ class CategoryManagerDialog(QDialog):
         
         if ok and name.strip():
             try:
-                # Update category name
-                category = self.db_session.execute(
-                    select(Category).where(Category.id == category_id)
-                ).scalar_one()
-                
-                category.name = name.strip()
-                self.db_session.commit()
+                # Rename category using helper function
+                from core.utils.category_helper import rename_category
+                rename_category(self.db_session, category_id, name.strip())
                 
                 # Reload categories
                 self._load_categories()
@@ -503,43 +506,34 @@ class CategoryManagerDialog(QDialog):
         item = items[0]
         category_id = item.data(0, Qt.ItemDataRole.UserRole)
         
-        # Check if category has documents or extracts
-        doc_count = int(item.text(1))
-        extract_count = int(item.text(2))
-        
-        if doc_count > 0 or extract_count > 0:
-            QMessageBox.warning(
-                self, "Cannot Delete", 
-                f"This category contains {doc_count} documents and {extract_count} extracts.\n"
-                "Please move or delete these items before deleting the category."
-            )
-            return
+        try:
+            # Check if category has documents or extracts
+            doc_count = int(item.text(1))
+            extract_count = int(item.text(2))
             
-        # Check if category has subcategories
-        if item.childCount() > 0:
-            QMessageBox.warning(
-                self, "Cannot Delete", 
-                "This category has subcategories. Please delete or move these first."
-            )
-            return
+            # Check if category has subcategories
+            child_count = item.childCount()
             
-        # Confirm deletion
-        reply = QMessageBox.question(
-            self, "Confirm Deletion", 
-            f"Are you sure you want to delete the category '{item.text(0)}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            try:
-                # Delete category
-                category = self.db_session.execute(
-                    select(Category).where(Category.id == category_id)
-                ).scalar_one()
+            # Build confirmation message
+            msg = f"Are you sure you want to delete the category '{item.text(0)}'?"
+            
+            if child_count > 0:
+                msg += f"\n\nThis will also delete {child_count} subcategories."
                 
-                self.db_session.delete(category)
-                self.db_session.commit()
+            if doc_count > 0 or extract_count > 0:
+                msg += f"\n\nThis will remove the category from {doc_count} documents and {extract_count} extracts."
+            
+            # Confirm deletion
+            reply = QMessageBox.question(
+                self, "Confirm Deletion", msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # Delete category using helper function
+                from core.utils.category_helper import delete_category
+                delete_category(self.db_session, category_id, force=True)
                 
                 # Reload categories
                 self._load_categories()
@@ -548,10 +542,10 @@ class CategoryManagerDialog(QDialog):
                 self.details_widget.setEnabled(False)
                 self.modified = True
                 
-            except Exception as e:
-                self.db_session.rollback()
-                logger.exception(f"Error deleting category: {e}")
-                QMessageBox.warning(self, "Error", f"Error deleting category: {str(e)}")
+        except Exception as e:
+            self.db_session.rollback()
+            logger.exception(f"Error deleting category: {e}")
+            QMessageBox.warning(self, "Error", f"Error deleting category: {str(e)}")
     
     def _on_move_category_up(self):
         """Move a category up one level in the hierarchy."""
