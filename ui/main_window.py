@@ -2255,7 +2255,7 @@ class MainWindow(QMainWindow):
         # Update the session state
         self._save_session()
     
-    @pyqtSlot()
+    @pyqtSlot(int)
     def _on_tab_close_requested(self, index):
         """Handle tab close request."""
         widget = self.content_tabs.widget(index)
