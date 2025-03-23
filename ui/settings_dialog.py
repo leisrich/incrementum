@@ -874,11 +874,19 @@ class SettingsDialog(QDialog):
     def _save_settings(self) -> bool:
         """Save settings from UI elements to settings manager."""
         try:
-            # General tab
-            self.settings_manager.set_setting(
-                "ui", "theme", self.theme_combo.currentText()
-            )
+            # UI Theme settings
+            theme_data = self.theme_combo.currentData()
+            self.settings_manager.set_setting("ui", "theme", theme_data)
             
+            # Check if it's a custom theme
+            is_custom = theme_data not in ["light", "dark", "system"]
+            self.settings_manager.set_setting("ui", "custom_theme", is_custom)
+            
+            # Save custom theme path if applicable
+            if is_custom:
+                self.settings_manager.set_setting("ui", "theme_file", self.theme_file_path.text())
+            
+            # General tab settings
             self.settings_manager.set_setting(
                 "general", "startup_show_statistics", self.startup_show_statistics.isChecked()
             )
@@ -1121,6 +1129,18 @@ class SettingsDialog(QDialog):
             # Reload settings
             self._load_settings()
     
+    def _update_theme_combo(self, theme_name):
+        """Update the theme combo box to select the newly created theme."""
+        # Check if the theme is already in the combo box
+        index = self.theme_combo.findData(theme_name)
+        if index >= 0:
+            # Select it if it exists
+            self.theme_combo.setCurrentIndex(index)
+        else:
+            # Add it if it doesn't exist
+            self.theme_combo.addItem(f"Custom: {theme_name}", theme_name)
+            self.theme_combo.setCurrentIndex(self.theme_combo.count() - 1)
+
     def _on_browse_theme(self):
         """Browse for a custom theme file."""
         try:
@@ -1151,11 +1171,38 @@ class SettingsDialog(QDialog):
                         
                     # Create template
                     if self.theme_manager.create_theme_template(file_path):
+                        # Get theme name from file path
+                        theme_name = os.path.basename(file_path)
+                        if theme_name.lower().endswith('.json'):
+                            theme_name = theme_name[:-5]  # Remove .json extension
+                            
                         self.theme_file_path.setText(file_path)
+                        
+                        # Apply the new theme immediately
+                        app = QApplication.instance()
+                        if app:
+                            # Save settings for custom theme
+                            self.settings_manager.set_setting("ui", "custom_theme", True)
+                            self.settings_manager.set_setting("ui", "theme_file", file_path)
+                            self.settings_manager.set_setting("ui", "theme", theme_name)
+                            
+                            # Apply the theme
+                            self.theme_manager.apply_theme(app, theme_name=theme_name, 
+                                                        custom_theme_path=file_path)
+                            
+                            # Save settings
+                            self.settings_manager.save_settings()
+                            
+                            # Update theme combo box to select the new theme
+                            self._update_theme_combo(theme_name)
+                            
+                            # Emit signal to notify application
+                            self.settingsChanged.emit()
+                        
                         QMessageBox.information(
-                            self, "Theme Template Created", 
-                            f"A new theme template has been created at {file_path}.\n\n"
-                            "You can edit this file with a text editor to customize your theme."
+                            self, "Theme Created and Applied", 
+                            f"A new theme has been created and applied from {file_path}.\n\n"
+                            "You can edit this file with a text editor to further customize your theme."
                         )
                 
             else:
@@ -1168,64 +1215,49 @@ class SettingsDialog(QDialog):
                 )
                 
                 if file_path:
+                    # Get theme name from file path
+                    theme_name = os.path.basename(file_path)
+                    if theme_name.lower().endswith('.json'):
+                        theme_name = theme_name[:-5]  # Remove .json extension
+                    elif theme_name.lower().endswith('.qss'):
+                        theme_name = theme_name[:-4]  # Remove .qss extension
+                        
                     self.theme_file_path.setText(file_path)
                     
-                    # Show a preview of the theme
-                    preview_ok = self._preview_theme(file_path)
-                    
-                    if preview_ok:
-                        QMessageBox.information(
-                            self, "Theme Preview", 
-                            "Theme preview applied. Click OK to continue customizing settings.\n\n"
-                            "The theme will be fully applied when you click Apply or OK."
-                        )
+                    # Apply the theme immediately
+                    app = QApplication.instance()
+                    if app:
+                        # Save settings for custom theme
+                        self.settings_manager.set_setting("ui", "custom_theme", True)
+                        self.settings_manager.set_setting("ui", "theme_file", file_path)
+                        self.settings_manager.set_setting("ui", "theme", theme_name)
+                        
+                        # Apply the theme
+                        success = self.theme_manager.apply_theme(app, theme_name=theme_name, 
+                                                                custom_theme_path=file_path)
+                        
+                        # Save settings
+                        self.settings_manager.save_settings()
+                        
+                        # Update theme combo box to select the new theme
+                        self._update_theme_combo(theme_name)
+                        
+                        # Emit signal to notify application
+                        self.settingsChanged.emit()
+                        
+                        if success:
+                            QMessageBox.information(
+                                self, "Theme Applied", 
+                                f"The theme has been applied from {file_path}."
+                            )
                         
         except Exception as e:
             logger.exception(f"Error browsing for theme: {e}")
             QMessageBox.warning(
                 self, "Error", 
-                f"An error occurred while browsing for theme: {str(e)}"
+                f"Error browsing for or applying theme: {str(e)}"
             )
             
-    def _preview_theme(self, theme_path):
-        """Preview the selected theme."""
-        try:
-            # Get application instance
-            app = QApplication.instance()
-            if not app:
-                return False
-                
-            # Get current palette for backup
-            self._original_palette = app.palette()
-            self._original_stylesheet = app.styleSheet()
-            
-            # Apply theme temporarily
-            self.theme_manager.apply_theme(app, custom_theme_path=theme_path)
-            
-            # Schedule restoration of original theme when dialog closes
-            self.finished.connect(self._restore_original_theme)
-            
-            return True
-            
-        except Exception as e:
-            logger.exception(f"Error previewing theme: {e}")
-            return False
-            
-    def _restore_original_theme(self):
-        """Restore the original theme after preview."""
-        try:
-            # Get application instance
-            app = QApplication.instance()
-            if not app or not hasattr(self, '_original_palette'):
-                return
-                
-            # Restore original palette and stylesheet
-            app.setPalette(self._original_palette)
-            app.setStyleSheet(self._original_stylesheet)
-            
-        except Exception as e:
-            logger.exception(f"Error restoring original theme: {e}")
-
     def _on_theme_changed(self, index):
         """Handle theme selection changes."""
         try:
@@ -1241,26 +1273,45 @@ class SettingsDialog(QDialog):
                 theme_path = self.theme_manager.get_theme_path(selected_theme)
                 if theme_path and os.path.exists(theme_path):
                     self.theme_file_path.setText(theme_path)
-                    
-            # Preview the theme if exists
-            theme_path = self.theme_file_path.text() if is_custom else None
-            if is_custom and theme_path:
-                self._preview_theme(theme_path)
-            else:
-                # Apply built-in theme preview
-                app = QApplication.instance()
-                if app:
-                    # Backup original theme
-                    if not hasattr(self, '_original_palette'):
-                        self._original_palette = app.palette()
-                        self._original_stylesheet = app.styleSheet()
-                    
-                    # Apply preview of selected theme
+            
+            # Apply the theme immediately
+            app = QApplication.instance()
+            if app:
+                if is_custom:
+                    # For custom themes
+                    custom_path = self.theme_file_path.text()
+                    if custom_path and os.path.exists(custom_path):
+                        # Save settings for custom theme
+                        self.settings_manager.set_setting("ui", "custom_theme", True)
+                        self.settings_manager.set_setting("ui", "theme_file", custom_path)
+                        self.settings_manager.set_setting("ui", "theme", selected_theme)
+                        
+                        # Apply the theme
+                        self.theme_manager.apply_theme(app, theme_name=selected_theme, 
+                                                    custom_theme_path=custom_path)
+                    else:
+                        logger.warning(f"Custom theme path not valid: {custom_path}")
+                else:
+                    # For built-in themes
+                    self.settings_manager.set_setting("ui", "theme", selected_theme)
+                    self.settings_manager.set_setting("ui", "custom_theme", False)
+                    self.settings_manager.set_setting("ui", "theme_file", "")  # Clear custom theme path
                     self.theme_manager.apply_theme(app, theme_name=selected_theme)
-                    self.finished.connect(self._restore_original_theme)
-                    
+                
+                # Save the settings
+                self.settings_manager.save_settings()
+                
+                # Inform the application that settings changed
+                self.settingsChanged.emit()
+                
+                logger.info(f"Theme applied: {selected_theme}")
+                
         except Exception as e:
             logger.exception(f"Error changing theme: {e}")
+            QMessageBox.warning(
+                self, "Theme Error", 
+                f"Failed to apply theme: {str(e)}"
+            )
 
     def _on_manage_feeds(self):
         """Open the RSS feed management dialog."""

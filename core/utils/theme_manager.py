@@ -166,45 +166,71 @@ class ThemeManager:
             app: QApplication instance
             theme_name: Name of the theme (light, dark, system, or custom)
             custom_theme_path: Path to a custom theme file
+            
+        Returns:
+            bool: True if theme was successfully applied, False otherwise
         """
-        # Get theme from settings if not specified
-        if theme_name is None and self.settings_manager:
-            theme_name = self.settings_manager.get_setting("ui", "theme", "light")
-            
-        # Check for dark mode setting if using built-in dark mode
-        if theme_name == "dark" or (self.settings_manager and 
-                                   self.settings_manager.get_setting("ui", "dark_mode", False)):
-            theme_name = "dark"
-            
-        # Check for custom theme
-        use_custom_theme = self.settings_manager and self.settings_manager.get_setting("ui", "custom_theme", False)
-        if use_custom_theme:
-            if custom_theme_path is None and self.settings_manager:
-                custom_theme_path = self.settings_manager.get_setting("ui", "theme_file", "")
+        try:
+            # Get theme from settings if not specified
+            if theme_name is None and self.settings_manager:
+                theme_name = self.settings_manager.get_setting("ui", "theme", "light")
+                logger.debug(f"No theme_name provided, using from settings: {theme_name}")
+            else:
+                logger.debug(f"Using provided theme_name: {theme_name}")
                 
-            if custom_theme_path and os.path.exists(custom_theme_path):
-                self._apply_custom_theme(app, custom_theme_path)
-                self.current_theme = "custom"
-                self.custom_theme_path = custom_theme_path
-                return
+            # Check for dark mode setting if using built-in dark mode
+            if theme_name == "dark" or (self.settings_manager and 
+                                       self.settings_manager.get_setting("ui", "dark_mode", False)):
+                theme_name = "dark"
+                logger.debug("Using dark theme due to dark_mode setting")
                 
-        # Apply built-in theme
-        if theme_name == "dark":
-            self._apply_dark_theme(app)
-            self.current_theme = "dark"
-        elif theme_name == "system":
-            self._apply_system_theme(app)
-            self.current_theme = "system"
-        else:
-            self._apply_light_theme(app)
-            self.current_theme = "light"
+            # Check for custom theme
+            use_custom_theme = self.settings_manager and self.settings_manager.get_setting("ui", "custom_theme", False)
+            logger.debug(f"Custom theme enabled in settings: {use_custom_theme}")
             
+            if use_custom_theme:
+                if custom_theme_path is None and self.settings_manager:
+                    custom_theme_path = self.settings_manager.get_setting("ui", "theme_file", "")
+                    logger.debug(f"Using custom theme path from settings: {custom_theme_path}")
+                else:
+                    logger.debug(f"Using provided custom theme path: {custom_theme_path}")
+                    
+                if custom_theme_path and os.path.exists(custom_theme_path):
+                    logger.debug(f"Applying custom theme from: {custom_theme_path}")
+                    success = self._apply_custom_theme(app, custom_theme_path)
+                    self.current_theme = "custom"
+                    self.custom_theme_path = custom_theme_path
+                    return success
+                else:
+                    logger.warning(f"Custom theme path not found: {custom_theme_path}")
+                    
+            # Apply built-in theme
+            logger.debug(f"Applying built-in theme: {theme_name}")
+            if theme_name == "dark":
+                self._apply_dark_theme(app)
+                self.current_theme = "dark"
+            elif theme_name == "system":
+                self._apply_system_theme(app)
+                self.current_theme = "system"
+            else:
+                self._apply_light_theme(app)
+                self.current_theme = "light"
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error applying theme: {e}")
+            return False
+    
     def _apply_dark_theme(self, app: QApplication):
         """
         Apply dark theme to the application.
         
         Args:
             app: QApplication instance
+            
+        Returns:
+            bool: True if theme was successfully applied
         """
         # Load the dark theme file
         theme_path = self.theme_dir / "dark.json"
@@ -213,7 +239,7 @@ class ThemeManager:
             if theme_data:
                 self._apply_palette_colors(app, theme_data)
                 logger.info("Applied dark theme from file")
-                return
+                return True
         
         # Fallback to default dark theme
         self._apply_palette_colors(app, self.DEFAULT_DARK_COLORS)
@@ -225,12 +251,17 @@ class ThemeManager:
             qss = self._load_qss_from_file(str(qss_path))
             app.setStyleSheet(qss)
             
+        return True
+    
     def _apply_light_theme(self, app: QApplication):
         """
         Apply light theme to the application.
         
         Args:
             app: QApplication instance
+            
+        Returns:
+            bool: True if theme was successfully applied
         """
         # Load the light theme file
         theme_path = self.theme_dir / "light.json"
@@ -239,7 +270,7 @@ class ThemeManager:
             if theme_data:
                 self._apply_palette_colors(app, theme_data)
                 logger.info("Applied light theme from file")
-                return
+                return True
                 
         # Fallback to default light theme
         self._apply_palette_colors(app, self.DEFAULT_LIGHT_COLORS)
@@ -250,22 +281,26 @@ class ThemeManager:
         if qss_path.exists():
             qss = self._load_qss_from_file(str(qss_path))
             app.setStyleSheet(qss)
-        else:
-            # Reset stylesheet
-            app.setStyleSheet("")
-            
+        
+        return True
+    
     def _apply_system_theme(self, app: QApplication):
         """
         Apply system theme to the application.
         
         Args:
             app: QApplication instance
+            
+        Returns:
+            bool: True if theme was successfully applied
         """
-        # Use the system palette
+        # Reset to system style
+        app.setStyle(app.style().objectName())
         app.setPalette(app.style().standardPalette())
         app.setStyleSheet("")
         logger.info("Applied system theme")
-        
+        return True
+    
     def _apply_custom_theme(self, app: QApplication, theme_path: str):
         """
         Apply a custom theme to the application.
@@ -287,17 +322,18 @@ class ThemeManager:
                     qss = self._load_qss_from_file(qss_path)
                     app.setStyleSheet(qss)
                     
-                return
+                return True
         
         # Check for QSS theme file
         elif theme_path.lower().endswith('.qss'):
             qss = self._load_qss_from_file(theme_path)
             app.setStyleSheet(qss)
             logger.info(f"Applied custom QSS theme from {theme_path}")
-            return
+            return True
             
         # If we got here, the theme couldn't be applied
         logger.error(f"Failed to apply custom theme from {theme_path}")
+        return False
         
     def _apply_palette_colors(self, app: QApplication, colors: dict):
         """
@@ -391,20 +427,26 @@ class ThemeManager:
             str: Path to the theme file, or None if not found
         """
         try:
-            # First check if it's a built-in theme
-            if theme_name in ["light", "dark"]:
-                return str(Path(__file__).parent / f"{theme_name}.json")
-                
-            # Check in themes directory
+            # First check in themes directory for a JSON file
             theme_path = self.theme_dir / f"{theme_name}.json"
             if theme_path.exists():
+                logger.debug(f"Found theme at: {theme_path}")
                 return str(theme_path)
                 
             # Check for QSS file
             qss_path = self.theme_dir / f"{theme_name}.qss"
             if qss_path.exists():
+                logger.debug(f"Found QSS theme at: {qss_path}")
                 return str(qss_path)
                 
+            # If it's a built-in theme, return its path
+            if theme_name in ["light", "dark"]:
+                built_in_path = self.theme_dir / f"{theme_name}.json"
+                if built_in_path.exists():
+                    logger.debug(f"Using built-in theme: {built_in_path}")
+                    return str(built_in_path)
+                
+            logger.warning(f"Could not find theme path for: {theme_name}")
             return None
         except Exception as e:
             logger.error(f"Error getting theme path: {e}")
