@@ -504,16 +504,22 @@ class SettingsDialog(QDialog):
         
         # OpenAI model selection
         self.openai_model = QComboBox()
-        self.openai_model.addItems(["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"])
+        self.openai_model.addItems([
+            "gpt-4o",
+            "gpt-4o-mini", 
+            "gpt-4-turbo", 
+            "gpt-4", 
+            "gpt-3.5-turbo"
+        ])
         openai_layout.addRow("Model:", self.openai_model)
         
         api_tabs.addTab(openai_tab, "OpenAI")
         
-        # Gemini tab
+        # Google Gemini settings
         gemini_tab = QWidget()
         gemini_layout = QFormLayout(gemini_tab)
         
-        # Gemini API key
+        # Google Gemini API key
         gemini_key_layout = QHBoxLayout()
         self.gemini_api_key = QLineEdit()
         self.gemini_api_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -526,9 +532,15 @@ class SettingsDialog(QDialog):
         
         gemini_layout.addRow("API Key:", gemini_key_layout)
         
-        # Gemini model selection
+        # Google Gemini model selection
         self.gemini_model = QComboBox()
-        self.gemini_model.addItems(["gemini-pro", "gemini-1.5-pro"])
+        self.gemini_model.addItems([
+            "gemini-2.0-pro-exp-02-05",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+        ])
         gemini_layout.addRow("Model:", self.gemini_model)
         
         api_tabs.addTab(gemini_tab, "Gemini")
@@ -552,7 +564,14 @@ class SettingsDialog(QDialog):
         
         # Claude model selection
         self.claude_model = QComboBox()
-        self.claude_model.addItems(["claude-3-haiku-20240307", "claude-3-sonnet-20240229", "claude-3-opus-20240229"])
+        self.claude_model.addItems([
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-3-opus-20240229",
+            "claude-3-sonnet-20240229",
+            "claude-3-haiku-20240307"
+        ])
         claude_layout.addRow("Model:", self.claude_model)
         
         api_tabs.addTab(claude_tab, "Claude")
@@ -575,13 +594,22 @@ class SettingsDialog(QDialog):
         openrouter_layout.addRow("API Key:", openrouter_key_layout)
         
         # OpenRouter model selection
-        self.openrouter_model = QLineEdit("openai/gpt-3.5-turbo")
-        openrouter_layout.addRow("Model:", self.openrouter_model)
+        openrouter_model_layout = QHBoxLayout()
+        self.openrouter_model = QComboBox()
+        self.openrouter_model.addItem("openai/gpt-3.5-turbo")
+        openrouter_model_layout.addWidget(self.openrouter_model)
+        
+        # Add refresh button to fetch models
+        refresh_openrouter_button = QPushButton("Fetch Available Models")
+        refresh_openrouter_button.clicked.connect(self._fetch_openrouter_models)
+        openrouter_model_layout.addWidget(refresh_openrouter_button)
+        
+        openrouter_layout.addRow("Model:", openrouter_model_layout)
         
         # Add description
         openrouter_info = QLabel(
             "OpenRouter provides access to many LLMs through a single API.\n"
-            "Model format is provider/model-name (e.g., anthropic/claude-3-opus)"
+            "Click 'Fetch Available Models' to get the current list of available models."
         )
         openrouter_info.setWordWrap(True)
         openrouter_layout.addRow("", openrouter_info)
@@ -597,8 +625,17 @@ class SettingsDialog(QDialog):
         ollama_layout.addRow("Host:", self.ollama_host)
         
         # Ollama model selection
-        self.ollama_model = QLineEdit("llama3")
-        ollama_layout.addRow("Model:", self.ollama_model)
+        ollama_model_layout = QHBoxLayout()
+        self.ollama_model = QComboBox()
+        self.ollama_model.addItem("llama3")
+        ollama_model_layout.addWidget(self.ollama_model)
+        
+        # Add refresh button to fetch models
+        refresh_ollama_button = QPushButton("Fetch Local Models")
+        refresh_ollama_button.clicked.connect(self._fetch_ollama_models)
+        ollama_model_layout.addWidget(refresh_ollama_button)
+        
+        ollama_layout.addRow("Model:", ollama_model_layout)
         
         # Test connection button
         test_ollama_button = QPushButton("Test Connection")
@@ -778,6 +815,18 @@ class SettingsDialog(QDialog):
             self.settings_manager.get_setting("learning", "target_retention", 0.9)
         )
         
+        self.allow_overdue_items.setChecked(
+            self.settings_manager.get_setting("learning", "allow_overdue_items", False)
+        )
+        
+        self.prioritize_older_items.setChecked(
+            self.settings_manager.get_setting("learning", "prioritize_older_items", False)
+        )
+        
+        self.load_balance_reviews.setChecked(
+            self.settings_manager.get_setting("learning", "load_balance_reviews", False)
+        )
+        
         # Algorithm tab
         self.minimum_interval.setValue(
             self.settings_manager.get_setting("algorithm", "minimum_interval", 1)
@@ -839,7 +888,7 @@ class SettingsDialog(QDialog):
         self.gemini_api_key.setText(
             self.settings_manager.get_setting("api", "gemini_api_key", "")
         )
-        gemini_model = self.settings_manager.get_setting("api", "gemini_model", "gemini-pro")
+        gemini_model = self.settings_manager.get_setting("api", "gemini_model", "gemini-1.5-pro")
         index = self.gemini_model.findText(gemini_model)
         if index >= 0:
             self.gemini_model.setCurrentIndex(index)
@@ -855,16 +904,22 @@ class SettingsDialog(QDialog):
         self.openrouter_api_key.setText(
             self.settings_manager.get_setting("api", "openrouter_api_key", "")
         )
-        self.openrouter_model.setText(
-            self.settings_manager.get_setting("api", "openrouter_model", "openai/gpt-3.5-turbo")
-        )
+        
+        # Handle openrouter_model as a QComboBox
+        openrouter_model = self.settings_manager.get_setting("api", "openrouter_model", "openai/gpt-3.5-turbo")
+        if self.openrouter_model.findText(openrouter_model) < 0:
+            self.openrouter_model.addItem(openrouter_model)
+        self.openrouter_model.setCurrentText(openrouter_model)
         
         self.ollama_host.setText(
             self.settings_manager.get_setting("api", "ollama_host", "http://localhost:11434")
         )
-        self.ollama_model.setText(
-            self.settings_manager.get_setting("api", "ollama_model", "llama3")
-        )
+        
+        # Handle ollama_model as a QComboBox
+        ollama_model = self.settings_manager.get_setting("api", "ollama_model", "llama3")
+        if self.ollama_model.findText(ollama_model) < 0:
+            self.ollama_model.addItem(ollama_model)
+        self.ollama_model.setCurrentText(ollama_model)
         
         default_llm = self.settings_manager.get_setting("api", "default_llm_service", "OpenAI")
         index = self.default_llm_service.findText(default_llm)
@@ -941,6 +996,18 @@ class SettingsDialog(QDialog):
                 "learning", "target_retention", self.target_retention.value()
             )
             
+            self.settings_manager.set_setting(
+                "learning", "allow_overdue_items", self.allow_overdue_items.isChecked()
+            )
+            
+            self.settings_manager.set_setting(
+                "learning", "prioritize_older_items", self.prioritize_older_items.isChecked()
+            )
+            
+            self.settings_manager.set_setting(
+                "learning", "load_balance_reviews", self.load_balance_reviews.isChecked()
+            )
+            
             # Algorithm tab
             self.settings_manager.set_setting(
                 "algorithm", "minimum_interval", self.minimum_interval.value()
@@ -998,9 +1065,9 @@ class SettingsDialog(QDialog):
             self.settings_manager.set_setting("api", "claude_api_key", self.claude_api_key.text())
             self.settings_manager.set_setting("api", "claude_model", self.claude_model.currentText())
             self.settings_manager.set_setting("api", "openrouter_api_key", self.openrouter_api_key.text())
-            self.settings_manager.set_setting("api", "openrouter_model", self.openrouter_model.text())
+            self.settings_manager.set_setting("api", "openrouter_model", self.openrouter_model.currentText())
             self.settings_manager.set_setting("api", "ollama_host", self.ollama_host.text())
-            self.settings_manager.set_setting("api", "ollama_model", self.ollama_model.text())
+            self.settings_manager.set_setting("api", "ollama_model", self.ollama_model.currentText())
             self.settings_manager.set_setting("api", "default_llm_service", self.default_llm_service.currentText())
             
             # Save to file
@@ -1332,3 +1399,82 @@ class SettingsDialog(QDialog):
         
         # Refresh settings in case any were changed
         self._load_settings()
+
+    def _fetch_openrouter_models(self):
+        """Fetch available OpenRouter models."""
+        from core.ai_services.llm_service import OpenRouterService
+        import json
+        import requests
+        from PyQt5.QtWidgets import QMessageBox
+
+        # Get API key
+        api_key = self.openrouter_api_key.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "API Key Required", 
+                                "Please enter an OpenRouter API key to fetch available models.")
+            return
+
+        try:
+            # Use OpenRouter's models endpoint
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            response = requests.get("https://openrouter.ai/api/v1/models", headers=headers)
+            
+            if response.status_code == 200:
+                models_data = response.json()
+                self.openrouter_model.clear()
+                
+                # Add models to dropdown
+                for model in models_data.get("data", []):
+                    model_id = model.get("id")
+                    if model_id:
+                        self.openrouter_model.addItem(model_id)
+                
+                QMessageBox.information(self, "Success", 
+                                      f"Successfully fetched {self.openrouter_model.count()} models.")
+            else:
+                QMessageBox.warning(self, "Error", 
+                                  f"Failed to fetch models: {response.status_code} {response.text}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error fetching models: {str(e)}")
+
+    def _fetch_ollama_models(self):
+        """Fetch available Ollama models."""
+        import requests
+        from PyQt5.QtWidgets import QMessageBox
+
+        try:
+            # Get Ollama URL
+            base_url = self.ollama_host.text().strip()
+            if not base_url:
+                base_url = "http://localhost:11434"  # Default Ollama URL
+            
+            # Ensure URL has the right format
+            if not base_url.startswith("http"):
+                base_url = "http://" + base_url
+                
+            # Remove trailing slash if exists
+            base_url = base_url.rstrip("/")
+            
+            # Use Ollama's API to list models
+            response = requests.get(f"{base_url}/api/tags")
+            
+            if response.status_code == 200:
+                models_data = response.json()
+                self.ollama_model.clear()
+                
+                # Add models to dropdown
+                for model in models_data.get("models", []):
+                    model_name = model.get("name")
+                    if model_name:
+                        self.ollama_model.addItem(model_name)
+                
+                QMessageBox.information(self, "Success", 
+                                      f"Successfully fetched {self.ollama_model.count()} models.")
+            else:
+                QMessageBox.warning(self, "Error", 
+                                  f"Failed to fetch models: {response.status_code} {response.text}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error fetching models: {str(e)}")

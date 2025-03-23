@@ -57,6 +57,8 @@ from .queue_view import QueueView
 from ui.dialogs.url_import_dialog import URLImportDialog
 from ui.dialogs.content_processor_dialog import ContentProcessorDialog
 from ui.dialogs.rss_feed_dialog import RSSFeedDialog
+from .rss_view import RSSView
+from .incremental_reading_view import IncrementalReadingView
 
 logger = logging.getLogger(__name__)
 
@@ -1268,8 +1270,16 @@ class MainWindow(QMainWindow):
             )
             return
             
-        # Get the widget and check if it's a document
+        # Get the widget and check if it's a document view
         widget = self.content_tabs.widget(current_tab_idx)
+        
+        # First try to use the document_view's summarize method if available
+        # This is especially useful for web content that needs to extract text from the webview
+        if hasattr(widget, 'summarize_current_content'):
+            widget.summarize_current_content()
+            return
+            
+        # Fallback to the traditional method for regular documents
         if hasattr(widget, 'document') and widget.document:
             self._show_document_summary(widget.document.id)
         else:
@@ -2668,3 +2678,37 @@ class MainWindow(QMainWindow):
         
         # Show dialog
         dialog.exec()
+
+    def _create_menus(self):
+        """Create and return menu bar with menus."""
+        menubar = QMenuBar()
+
+        # File menu
+        file_menu = menubar.addMenu("&File")
+        
+        # Add arxiv import action
+        self.action_import_arxiv = QAction("Import from Arxiv...", self)
+        self.action_import_arxiv.triggered.connect(self._on_import_arxiv)
+        file_menu.addAction(self.action_import_arxiv)
+        
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_import_knowledge)
+        file_menu.addAction(self.action_export_knowledge)
+        
+        # Add export all data action
+        self.action_export_all_data = QAction("Export All Data...", self)
+        self.action_export_all_data.triggered.connect(self._on_export_all_data)
+        file_menu.addAction(self.action_export_all_data)
+        
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_save)
+        file_menu.addSeparator()
+        
+        # Recent documents submenu
+        self.recent_menu = QMenu("Recent Documents", self)
+        file_menu.addMenu(self.recent_menu)
+        
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_exit)
+        
+        # Edit menu

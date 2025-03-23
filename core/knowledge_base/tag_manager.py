@@ -3,11 +3,13 @@
 import logging
 from typing import Dict, Any, List, Tuple, Optional, Set
 import re
+import os
 
 from sqlalchemy import func, and_, or_
 from sqlalchemy.orm import Session
 from core.knowledge_base.models import Document, Extract, LearningItem, Tag
 from core.content_extractor.nlp_extractor import NLPExtractor
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -361,22 +363,34 @@ class TagManager:
         return extracts
     
     def _get_document_content(self, document: Document) -> str:
-        """Get the full text content of a document."""
+        """Get the text content of a document."""
         try:
-            if document.content_type == 'pdf':
-                from pdfminer.high_level import extract_text
-                return extract_text(document.file_path)
+            # Check if the file exists
+            if not os.path.exists(document.file_path):
+                logger.error(f"Document file not found: {document.file_path}")
+                return f"[File not found: {document.file_path}]"
+                
+            # Handle different document types
+            file_extension = os.path.splitext(document.file_path)[1].lower()
             
-            elif document.content_type in ['html', 'htm']:
-                from bs4 import BeautifulSoup
-                # Try different encodings for HTML files
-                for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
-                    try:
-                        with open(document.file_path, 'r', encoding=encoding) as f:
-                            soup = BeautifulSoup(f.read(), 'lxml')
-                            return soup.get_text(separator='\n')
-                    except UnicodeDecodeError:
-                        continue
+            if file_extension == '.pdf':
+                # Process PDF
+                import fitz  # PyMuPDF
+                
+                with fitz.open(document.file_path) as pdf:
+                    text = ""
+                    for page in pdf:
+                        text += page.get_text()
+                    return text
+                
+            elif file_extension in ['.html', '.htm']:
+                # Process HTML
+                try:
+                    with open(document.file_path, 'r', encoding='utf-8') as f:
+                        soup = BeautifulSoup(f.read(), 'lxml')
+                        return soup.get_text(separator='\n')
+                except UnicodeDecodeError:
+                    pass
                 
                 # Fallback to latin-1 if all else fails
                 with open(document.file_path, 'r', encoding='latin-1', errors='replace') as f:
@@ -398,7 +412,7 @@ class TagManager:
                     
         except Exception as e:
             logger.exception(f"Error reading document content: {e}")
-            return ""
+            return f"[Error reading document content: {str(e)}]"
     
     def _normalize_tag_name(self, text: str) -> str:
         """

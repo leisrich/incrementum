@@ -7,8 +7,8 @@ from typing import Dict, Any, List, Tuple, Optional, Union
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_, and_, desc, asc
-from sqlalchemy.orm import Session
-from core.knowledge_base.models import Document, Category, Extract, LearningItem, ReviewLog, Tag
+from sqlalchemy.orm import Session, object_session
+from core.knowledge_base.models import Document, Category, Extract, LearningItem, ReviewLog, Tag, WebHighlight, Highlight
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,19 @@ class FSRSAlgorithm:
         "MAX_INTERVAL": 3650,  # 10 years
         # scaling factor for priority
         "PRIORITY_WEIGHT": 0.5,
+        # Incrementum A-Factor for items
+        "A_FACTOR": 1.3,
+        # Incrementum forgetting curve parameters
+        "SM_FORGETTING_PARAMS": {
+            "interval_modifier": 1.0,
+            "initial_ease": 2.5,
+            "easy_bonus": 1.3,
+            "hard_penalty": 0.8
+        },
+        # Incrementum priority parameters
+        "PRIORITY_DECAY": 0.01,  # Daily priority decay for items in the queue
+        "PRIORITY_BOOST_HIGHLIGHT": 5,  # Priority boost for highlighted items
+        "PRIORITY_BOOST_EXTRACT": 8,  # Priority boost for extracted items
     }
     
     def __init__(self, db_session: Session, params: Dict[str, Any] = None):
@@ -123,6 +136,15 @@ class FSRSAlgorithm:
         item.interval = result['interval']
         item.last_reviewed = now
         item.next_review = result['next_review']
+        
+        # Apply Incrementum-style ease factor update
+        sm_params = self.params["SM_FORGETTING_PARAMS"]
+        if item.easiness is None:
+            item.easiness = sm_params["initial_ease"]
+        
+        # Update easiness based on rating (Incrementum style)
+        ease_update = 0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02)
+        item.easiness = max(1.3, item.easiness + ease_update)
         
         # Commit changes
         self.db_session.commit()
@@ -520,3 +542,153 @@ class FSRSAlgorithm:
             logger.error(f"Error updating document priority: {e}")
             self.db_session.rollback()
             return False 
+    
+    def detect_leeches(self, threshold: int = 5) -> List[LearningItem]:
+        """
+        Detect leech items (items with many failures) that need special attention.
+        
+        Args:
+            threshold: Number of failures to consider an item a leech
+            
+        Returns:
+            List of leech items
+        """
+        leech_items = []
+        
+        # Get all learning items
+        items = self.db_session.query(LearningItem).all()
+        
+        for item in items:
+            # Count "Again" ratings (1) in review history
+            failure_count = self.db_session.query(ReviewLog)\
+                .filter(ReviewLog.learning_item_id == item.id)\
+                .filter(ReviewLog.grade == 1)\
+                .count()
+            
+            if failure_count >= threshold:
+                leech_items.append(item)
+        
+        return leech_items
+    
+    def get_incremental_reading_queue(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Get a prioritized queue for incremental reading, combining documents and extracts.
+        
+        This is inspired by Incrementum's incremental reading queue, which interleaves 
+        documents and extracts based on priority.
+        
+        Args:
+            limit: Maximum number of items to return
+            
+        Returns:
+            List of dictionaries with item info and type
+        """
+        now = datetime.utcnow()
+        queue = []
+        
+        # Get due documents
+        due_docs = self.db_session.query(Document)\
+            .filter(or_(Document.next_reading_date <= now, Document.next_reading_date == None))\
+            .order_by(desc(Document.priority))\
+            .limit(limit).all()
+        
+        for doc in due_docs:
+            queue.append({
+                'type': 'document',
+                'id': doc.id,
+                'title': doc.title,
+                'priority': doc.priority,
+                'content_type': doc.content_type
+            })
+        
+        # Get extracts with high priority
+        extracts = self.db_session.query(Extract)\
+            .order_by(desc(Extract.priority))\
+            .limit(limit).all()
+        
+        for extract in extracts:
+            queue.append({
+                'type': 'extract',
+                'id': extract.id,
+                'content': extract.content[:100] + '...' if len(extract.content) > 100 else extract.content,
+                'priority': extract.priority,
+                'document_id': extract.document_id
+            })
+        
+        # Sort combined queue by priority
+        queue.sort(key=lambda x: x['priority'], reverse=True)
+        
+        return queue[:limit]
+    
+    def update_priorities_based_on_activity(self):
+        """
+        Update priorities of documents and extracts based on user activity.
+        
+        This implements Incrementum-style priority decay and boosts:
+        - Items lose priority over time unless interacted with
+        - Highlighted content gets a priority boost
+        - Extracted content gets a priority boost
+        """
+        now = datetime.utcnow()
+        decay = self.params["PRIORITY_DECAY"]
+        
+        # Update document priorities
+        docs = self.db_session.query(Document).all()
+        for doc in docs:
+            # Apply priority decay based on time since last access
+            if doc.last_accessed:
+                days_since_access = (now - doc.last_accessed).days
+                priority_decay = days_since_access * decay
+                doc.priority = max(1, doc.priority - priority_decay)
+            
+            # Boost priority for documents with recent highlights
+            recent_highlights_count = self.db_session.query(Highlight)\
+                .filter(Highlight.document_id == doc.id)\
+                .filter(Highlight.created_date >= now - timedelta(days=7))\
+                .count()
+            
+            recent_web_highlights_count = self.db_session.query(WebHighlight)\
+                .filter(WebHighlight.document_id == doc.id)\
+                .filter(WebHighlight.created_date >= now - timedelta(days=7))\
+                .count()
+            
+            highlight_boost = (recent_highlights_count + recent_web_highlights_count) * self.params["PRIORITY_BOOST_HIGHLIGHT"]
+            doc.priority = min(100, doc.priority + highlight_boost)
+            
+            # Boost priority for documents with recent extracts
+            recent_extracts_count = self.db_session.query(Extract)\
+                .filter(Extract.document_id == doc.id)\
+                .filter(Extract.created_date >= now - timedelta(days=7))\
+                .count()
+            
+            extract_boost = recent_extracts_count * self.params["PRIORITY_BOOST_EXTRACT"]
+            doc.priority = min(100, doc.priority + extract_boost)
+        
+        # Commit changes
+        self.db_session.commit()
+        
+        logger.info("Updated priorities based on user activity") 
+
+    def _ensure_document_exists(self):
+        """Ensure document exists for the current web page."""
+        if not self.current_url or self.current_url == "about:blank":
+            logger.warning("Cannot create document: No valid URL")
+            return
+        
+        # Check if the document already exists for this URL
+        document = self.db_session.query(Document).filter(Document.source_url == self.current_url).first()
+        
+        if not document:
+            # Create a new document
+            logger.info(f"Created document for web page: {self.current_url}")
+            document = Document(
+                title=self.current_title,
+                source_url=self.current_url,
+                import_date=datetime.utcnow(),
+                last_accessed=datetime.utcnow(),
+                source_type="web",
+            )
+            self.db_session.add(document)
+            self.db_session.commit()
+        
+        self.document_id = document.id 

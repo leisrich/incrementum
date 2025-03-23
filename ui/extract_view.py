@@ -460,7 +460,7 @@ class ExtractView(QWidget):
     @pyqtSlot()
     def _on_generate_items(self):
         """Generate learning items."""
-        # Ask for type
+        # Create dialog with all components at once to avoid issues
         dialog = QDialog(self)
         dialog.setWindowTitle("Generate Learning Items")
         dialog.setMinimumWidth(300)
@@ -507,19 +507,48 @@ class ExtractView(QWidget):
         
         layout.addLayout(button_layout)
         
-        # Show dialog
-        if not dialog.exec():
+        # Show dialog and capture results immediately
+        dialog_result = dialog.exec()
+        if not dialog_result:
             return
-        
+            
+        # Immediately capture all widget values before proceeding
+        try:
+            generate_qa = qa_radio.isChecked()
+            item_count = count_spin.value()
+            open_after_generate = open_check.isChecked()
+        except RuntimeError as e:
+            logger.error(f"Widget access error during generation: {e}")
+            QMessageBox.warning(
+                self, "Interface Error", 
+                "An error occurred accessing dialog components. Please try again."
+            )
+            return
+        except Exception as e:
+            logger.exception(f"Unexpected error capturing dialog values: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An unexpected error occurred: {str(e)}"
+            )
+            return
+            
+        # Now we have the values safely stored, we can proceed with generation
         try:
             # Generate items
-            if qa_radio.isChecked():
+            if generate_qa:
                 # Generate QA items
-                items = self.nlp_extractor.generate_qa_pairs(self.extract.id, max_pairs=count_spin.value())
+                items = self.nlp_extractor.generate_qa_pairs(self.extract.id, max_pairs=item_count)
             else:
                 # Generate cloze items
-                items = self.nlp_extractor.generate_cloze_deletions(self.extract.id, max_items=count_spin.value())
+                items = self.nlp_extractor.generate_cloze_deletions(self.extract.id, max_items=item_count)
             
+            if not items:
+                QMessageBox.warning(
+                    self, "Generation Failed", 
+                    "No learning items could be generated from this extract."
+                )
+                return
+                
             # Mark extract as processed
             self.extract.processed = True
             self.db_session.commit()
@@ -534,7 +563,7 @@ class ExtractView(QWidget):
             )
             
             # Open first item if requested
-            if open_check.isChecked() and items:
+            if open_after_generate and items:
                 self._open_learning_item(items[0].id)
             
         except Exception as e:

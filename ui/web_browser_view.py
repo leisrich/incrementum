@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QToolBar, 
     QLineEdit, QPushButton, QSplitter, QMessageBox,
     QStatusBar, QProgressBar, QMenu, QLabel, QSizePolicy,
-    QApplication
+    QApplication, QFileDialog
 )
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot, QObject
 try:
@@ -418,184 +418,266 @@ class WebBrowserView(QWidget):
             )
     
     def _on_save_page(self):
-        """Save the current page as a document with all images and styling intact."""
+        """Save the current page as a self-contained HTML document with all resources embedded."""
         try:
-            # Get the page HTML content and save it with resources
-            self.web_view.page().runJavaScript("document.documentElement.outerHTML;", self._save_page_with_resources)
+            # Show status
+            self.status_label.setText("Preparing to save page...")
+            
+            # Inject script to serialize the page with all resources embedded
+            serialize_script = """
+            (function() {
+                // Helper function to convert URLs to data URLs
+                async function resourceToDataURL(resourceURL, resourceType) {
+                    try {
+                        // Handle relative URLs
+                        const absoluteURL = new URL(resourceURL, document.baseURI).href;
+                        const response = await fetch(absoluteURL, { cache: 'force-cache' });
+                        if (!response.ok) return null;
+                        
+                        const blob = await response.blob();
+                        return new Promise((resolve) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                        });
+                    } catch (error) {
+                        console.error('Error processing resource', resourceURL, error);
+                        return null;
+                    }
+                }
+                
+                // Process all images
+                async function processImages() {
+                    const images = document.querySelectorAll('img');
+                    for (const img of images) {
+                        if (img.src && !img.src.startsWith('data:')) {
+                            const dataURL = await resourceToDataURL(img.src, 'image');
+                            if (dataURL) img.src = dataURL;
+                        }
+                        // Also check srcset attribute
+                        if (img.srcset) {
+                            img.removeAttribute('srcset');
+                        }
+                    }
+                }
+                
+                // Process all CSS
+                async function processCSS() {
+                    const styles = document.querySelectorAll('link[rel="stylesheet"]');
+                    for (const style of styles) {
+                        try {
+                            if (style.href) {
+                                const response = await fetch(style.href);
+                                if (response.ok) {
+                                    const cssText = await response.text();
+                                    // Create a new style element
+                                    const inlineStyle = document.createElement('style');
+                                    inlineStyle.textContent = cssText;
+                                    // Replace the link with the inline style
+                                    style.parentNode.replaceChild(inlineStyle, style);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Error processing CSS', style.href, error);
+                        }
+                    }
+                    
+                    // Process inline styles with background-image
+                    const elementsWithStyle = document.querySelectorAll('[style*="background"]');
+                    for (const el of elementsWithStyle) {
+                        const style = getComputedStyle(el);
+                        if (style.backgroundImage && style.backgroundImage !== 'none' && !style.backgroundImage.startsWith('data:')) {
+                            try {
+                                // Extract URL from background-image
+                                const urlMatch = /url\\(['"](.*?)['"]*\\)/g.exec(style.backgroundImage);
+                                if (urlMatch && urlMatch[1]) {
+                                    const dataURL = await resourceToDataURL(urlMatch[1], 'image');
+                                    if (dataURL) {
+                                        // Update style attribute with data URL
+                                        const newBgImage = `background-image: url(${dataURL})`;
+                                        const currentStyle = el.getAttribute('style') || '';
+                                        const newStyle = currentStyle.replace(/background-image:[^;]+;?/g, '') + newBgImage;
+                                        el.setAttribute('style', newStyle);
+                                    }
+                                }
+                            } catch (error) {
+                                console.error('Error processing background image', error);
+                            }
+                        }
+                    }
+                }
+                
+                // Process all scripts
+                async function processScripts() {
+                    const scripts = document.querySelectorAll('script[src]');
+                    for (const script of scripts) {
+                        try {
+                            if (script.src) {
+                                const response = await fetch(script.src);
+                                if (response.ok) {
+                                    const jsText = await response.text();
+                                    // Create a new script element
+                                    const inlineScript = document.createElement('script');
+                                    inlineScript.textContent = jsText;
+                                    // Copy any attributes except src
+                                    for (const attr of script.attributes) {
+                                        if (attr.name !== 'src') {
+                                            inlineScript.setAttribute(attr.name, attr.value);
+                                        }
+                                    }
+                                    // Replace the original script
+                                    script.parentNode.replaceChild(inlineScript, script);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Error processing script', script.src, error);
+                        }
+                    }
+                }
+                
+                // Process fonts and other resources
+                async function processFonts() {
+                    // Handle CSS @font-face rules and other external resources
+                    // This is a simplified approach
+                    const styleSheets = document.styleSheets;
+                    for (const sheet of styleSheets) {
+                        try {
+                            // Skip if it's a CSSStyleSheet we can't access (e.g., cross-origin)
+                            if (!sheet.cssRules) continue;
+                            
+                            for (let i = 0; i < sheet.cssRules.length; i++) {
+                                const rule = sheet.cssRules[i];
+                                // Handle @import rules
+                                if (rule.type === CSSRule.IMPORT_RULE && rule.href) {
+                                    try {
+                                        const response = await fetch(rule.href);
+                                        if (response.ok) {
+                                            const cssText = await response.text();
+                                            // Create a style element with this CSS
+                                            const style = document.createElement('style');
+                                            style.textContent = cssText;
+                                            document.head.appendChild(style);
+                                        }
+                                    } catch (error) {
+                                        console.error('Error processing @import', rule.href, error);
+                                    }
+                                }
+                            }
+                        } catch (error) {
+                            // Security error, probably cross-origin stylesheet
+                            console.error('Error processing stylesheet', error);
+                        }
+                    }
+                }
+                
+                // Add meta tags for standalone operation
+                function addMetaTags() {
+                    // Add charset meta tag if not exists
+                    if (!document.querySelector('meta[charset]')) {
+                        const meta = document.createElement('meta');
+                        meta.setAttribute('charset', 'UTF-8');
+                        document.head.insertBefore(meta, document.head.firstChild);
+                    }
+                    
+                    // Add viewport meta tag if not exists
+                    if (!document.querySelector('meta[name="viewport"]')) {
+                        const meta = document.createElement('meta');
+                        meta.setAttribute('name', 'viewport');
+                        meta.setAttribute('content', 'width=device-width, initial-scale=1.0');
+                        document.head.appendChild(meta);
+                    }
+                    
+                    // Add info comment
+                    const infoComment = document.createComment(
+                        ' Saved with Incrementum ' + 
+                        new Date().toISOString() + 
+                        ' from ' + window.location.href + ' '
+                    );
+                    document.documentElement.insertBefore(infoComment, document.documentElement.firstChild);
+                }
+                
+                // Main function to process everything
+                async function processPage() {
+                    addMetaTags();
+                    
+                    // Process all resources in parallel
+                    await Promise.all([
+                        processImages(),
+                        processCSS(),
+                        processScripts(),
+                        processFonts()
+                    ]);
+                    
+                    // Get the processed HTML
+                    return {
+                        title: document.title,
+                        html: '<!DOCTYPE html>\\n' + document.documentElement.outerHTML
+                    };
+                }
+                
+                // Execute and return the result
+                return processPage();
+            })();
+            """
+            
+            # Execute the script to embed all resources
+            self.status_label.setText("Embedding all resources (this may take a moment)...")
+            self.web_view.page().runJavaScript(serialize_script, self._save_self_contained_page)
+            
         except Exception as e:
-            logger.exception(f"Error saving page: {e}")
+            logger.exception(f"Error preparing page for saving: {e}")
             QMessageBox.warning(
                 self, "Error", 
-                f"Failed to save page: {str(e)}"
+                f"Failed to prepare page for saving: {str(e)}"
             )
-    
-    def _save_page_with_resources(self, html_content):
-        """Save the page with all resources (images, styles) intact."""
+
+    def _save_self_contained_page(self, result):
+        """Save the self-contained HTML page with all embedded resources."""
         try:
-            import tempfile
+            if not result:
+                self.status_label.setText("Failed to process page")
+                QMessageBox.warning(
+                    self, "Error", 
+                    "Failed to process page resources"
+                )
+                return
+                
             import os
             import re
-            import time
-            import uuid
-            from urllib.parse import urlparse, urljoin
-            
-            # Create a timestamp and sanitized title for the folder name
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            safe_title = re.sub(r'[^\w\-_]', '_', self.current_title[:50])
-            document_id = str(uuid.uuid4())[:8]
-            folder_name = f"{timestamp}_{safe_title}_{document_id}"
-            
-            # Create base directory for documents
-            app_data_dir = os.path.join(os.path.expanduser("~"), ".incrementum", "saved_pages")
-            if not os.path.exists(app_data_dir):
-                os.makedirs(app_data_dir, exist_ok=True)
-            
-            # Create document folder and images subfolder
-            document_dir = os.path.join(app_data_dir, folder_name)
-            images_dir = os.path.join(document_dir, "images")
-            css_dir = os.path.join(document_dir, "css")
-            
-            os.makedirs(document_dir, exist_ok=True)
-            os.makedirs(images_dir, exist_ok=True)
-            os.makedirs(css_dir, exist_ok=True)
-            
-            # Process the HTML to find and download images
-            # This will be a two-step process:
-            # 1. First pass to identify all resources (images, CSS)
-            # 2. Second pass to replace URLs with local paths
-            resources = []
-            
-            # Find all image sources
-            img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-            for match in img_pattern.finditer(html_content):
-                src = match.group(1)
-                if src and not src.startswith('data:'):
-                    resources.append(('img', src))
-            
-            # Find all CSS links
-            css_pattern = re.compile(r'<link[^>]+href=["\']([^"\']+\.css[^"\']*)["\']', re.IGNORECASE)
-            for match in css_pattern.finditer(html_content):
-                href = match.group(1)
-                if href:
-                    resources.append(('css', href))
-            
-            # Find background images in style attributes
-            style_pattern = re.compile(r'style=["\'].*?background(?:-image)?:\s*url\(["\']?([^)]+?)["\']?\).*?["\']', re.IGNORECASE)
-            for match in style_pattern.finditer(html_content):
-                url = match.group(1)
-                if url and not url.startswith('data:'):
-                    resources.append(('background', url))
-            
-            # We'll download these resources using QWebEngineView in a separate step
-            # For now, let's prepare the HTML file with placeholders
-            
-            # Replace image sources
-            replacement_count = 0
-            modified_html = html_content
-            
-            # Create a basic progress message function
-            def show_progress(message):
-                self.status_label.setText(message)
-                QApplication.processEvents()
-            
-            # Function to download a resource
-            def download_resource(res_type, url):
-                nonlocal replacement_count
-                try:
-                    # Make the URL absolute
-                    if not url.startswith(('http://', 'https://')):
-                        base_url = self.web_view.url().toString()
-                        url = urljoin(base_url, url)
-                    
-                    # Generate a filename for the resource
-                    parsed_url = urlparse(url)
-                    path_parts = parsed_url.path.split('/')
-                    filename = path_parts[-1] if path_parts[-1] else f"resource_{replacement_count}"
-                    
-                    # Add file extension if missing
-                    if res_type == 'img' and '.' not in filename:
-                        filename += '.jpg'  # Default to jpg if no extension
-                    elif res_type == 'css' and not filename.endswith('.css'):
-                        filename += '.css'
-                    
-                    # Clean the filename
-                    filename = re.sub(r'[^\w\-_\.]', '_', filename)
-                    
-                    # Ensure uniqueness
-                    filename = f"{replacement_count}_{filename}"
-                    replacement_count += 1
-                    
-                    # Determine target directory
-                    target_dir = images_dir if res_type in ('img', 'background') else css_dir
-                    file_path = os.path.join(target_dir, filename)
-                    
-                    # Create a relative path for the HTML
-                    if res_type in ('img', 'background'):
-                        rel_path = f"images/{filename}"
-                    else:
-                        rel_path = f"css/{filename}"
-                    
-                    # Download the resource
-                    show_progress(f"Downloading: {url}")
-                    
-                    # Use a direct HTTP request for simplicity
-                    import requests
-                    response = requests.get(url, timeout=10)
-                    if response.status_code == 200:
-                        with open(file_path, 'wb') as f:
-                            f.write(response.content)
-                        return rel_path
-                    else:
-                        logger.warning(f"Failed to download {url}: {response.status_code}")
-                        return url  # Keep the original URL if download fails
-                except Exception as e:
-                    logger.exception(f"Error downloading resource {url}: {e}")
-                    return url  # Keep the original URL if download fails
-            
-            # Download all resources
-            show_progress("Processing page resources...")
-            resource_map = {}
-            for res_type, url in resources:
-                if url not in resource_map:
-                    resource_map[url] = download_resource(res_type, url)
-            
-            # Replace all resource URLs in the HTML
-            for original_url, local_path in resource_map.items():
-                # Escape special regex characters in the URL
-                escaped_url = re.escape(original_url)
+            from datetime import datetime
                 
-                # Replace img src
-                modified_html = re.sub(
-                    f'src=["\']({escaped_url})["\']', 
-                    f'src="{local_path}"', 
-                    modified_html
-                )
-                
-                # Replace CSS href
-                modified_html = re.sub(
-                    f'href=["\']({escaped_url})["\']', 
-                    f'href="{local_path}"', 
-                    modified_html
-                )
-                
-                # Replace background image URLs
-                modified_html = re.sub(
-                    f'url\\(["\']?({escaped_url})["\']?\\)', 
-                    f'url("{local_path}")', 
-                    modified_html
-                )
+            # Get page title and sanitize for filename
+            page_title = result.get('title', 'Untitled Page')
+            html_content = result.get('html', '')
             
-            # Write the HTML file
-            html_file_path = os.path.join(document_dir, "index.html")
-            with open(html_file_path, 'w', encoding='utf-8') as f:
-                f.write(modified_html)
+            # Sanitize title for use as filename
+            safe_title = re.sub(r'[^\w\-_\. ]', '_', page_title)
+            safe_title = safe_title.strip()[:50]  # Limit length
             
-            show_progress("Creating document record...")
+            # Create timestamp for unique filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{safe_title}_{timestamp}.html"
             
-            # Create document record in the database
+            # Ask user for save location
+            save_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Complete Web Page",
+                filename,
+                "HTML Files (*.html);;All Files (*.*)"
+            )
+            
+            if not save_path:
+                self.status_label.setText("Save cancelled")
+                return
+            
+            # Save the HTML content to the file
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            # Create document in the database
             document = Document(
-                title=self.current_title[:100],
-                file_path=html_file_path,
+                title=page_title[:100],
+                file_path=save_path,
                 content_type="html",
                 author="Web",
                 source_url=self._current_url,
@@ -607,26 +689,24 @@ class WebBrowserView(QWidget):
             self.db_session.add(document)
             self.db_session.commit()
             
-            # Update document ID
+            # Store the document ID
             self.current_document_id = document.id
             
-            show_progress("Ready")
-            
             # Show success message
+            self.status_label.setText(f"Page saved to {save_path}")
             QMessageBox.information(
                 self, "Page Saved", 
-                f"The page '{self.current_title}' has been saved with all resources.\n\n"
-                f"Path: {html_file_path}\n"
-                f"Resources: {len(resource_map)} files"
+                f"The web page has been saved with all resources embedded as:\n{save_path}"
             )
             
         except Exception as e:
-            logger.exception(f"Error saving page with resources: {e}")
+            logger.exception(f"Error saving self-contained page: {e}")
+            self.status_label.setText("Error saving page")
             QMessageBox.warning(
                 self, "Error", 
-                f"Failed to save page with resources: {str(e)}"
+                f"Failed to save page: {str(e)}"
             )
-    
+
     def _create_document(self, html_content, filename):
         """Create a document with the HTML content."""
         try:
@@ -655,16 +735,17 @@ class WebBrowserView(QWidget):
             self.db_session.commit()
             
             # Store document ID
-            self.current_document_id = document.id
+            document_id = document.id
+            self.current_document_id = document_id
             
-            logger.info(f"Created document for web page: {self._current_url}")
+            logger.info(f"Created document for web page directly: {self._current_url}")
             
             # If we have pending extract creation, process it now
             if hasattr(self, 'pending_extract_data') and self.pending_extract_data:
                 self._create_extract_with_data(self.pending_extract_data)
                 self.pending_extract_data = None
             
-            return document.id
+            return document_id
             
         except Exception as e:
             logger.exception(f"Error creating document: {e}")

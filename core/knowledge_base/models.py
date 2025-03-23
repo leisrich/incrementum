@@ -1,6 +1,6 @@
 # core/knowledge_base/models.py
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import (
     Column, Integer, Float, String, Text, DateTime, 
     Boolean, ForeignKey, Table, create_engine
@@ -192,6 +192,108 @@ class RSSFeedEntry(Base):
     
     def __repr__(self):
         return f"<RSSFeedEntry '{self.title}' ({self.entry_id})>"
+
+class Highlight(Base):
+    """Highlights in documents (like PDF annotations)."""
+    __tablename__ = 'highlights'
+
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=False)
+    page_number = Column(Integer, nullable=True)  # For PDFs
+    position = Column(Integer, nullable=True)  # Position information (integer position)
+    content = Column(Text, nullable=False)
+    color = Column(String(50), default='yellow')
+    created_date = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    document = relationship("Document", backref="highlights")
+    
+    def __repr__(self):
+        return f"<Highlight(id={self.id}, document_id={self.document_id}, content='{self.content[:20]}...')>"
+
+
+class WebHighlight(Base):
+    """Highlights in web documents."""
+    __tablename__ = 'web_highlights'
+
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=False)
+    content = Column(Text, nullable=False)
+    context = Column(Text, nullable=True)  # Surrounding context
+    xpath = Column(String(512), nullable=True)  # XPath to highlight location
+    url = Column(String(1024), nullable=True)  # URL of the page
+    created_date = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    document = relationship("Document", backref="web_highlights")
+    
+    def __repr__(self):
+        return f"<WebHighlight(id={self.id}, document_id={self.document_id}, content='{self.content[:20]}...')>"
+
+class IncrementalReading(Base):
+    """Tracks incremental reading progress for documents."""
+    __tablename__ = 'incremental_reading'
+
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=False)
+    current_section = Column(String(255), nullable=True)  # Current section being read
+    current_position = Column(Integer, default=0)  # Position in document
+    last_read_date = Column(DateTime, default=datetime.utcnow)
+    next_read_date = Column(DateTime, nullable=True)  # When to continue reading
+    reading_priority = Column(Float, default=50.0)  # Priority (0-100)
+    
+    # SuperMemo-specific fields
+    interval = Column(Integer, default=1)  # Days between reading sessions
+    repetitions = Column(Integer, default=0)  # Number of reading sessions
+    easiness = Column(Float, default=2.5)  # SM-2 easiness factor
+    schedule_state = Column(String(20), default="new")  # new, learning, review
+    percent_complete = Column(Float, default=0.0)  # Reading progress (0-100)
+    
+    # Relationships
+    document = relationship("Document", backref="reading_progress")
+    
+    def __repr__(self):
+        return f"<IncrementalReading(id={self.id}, document_id={self.document_id}, priority={self.reading_priority}, complete={self.percent_complete}%)>"
+    
+    def calculate_next_date(self, grade: int):
+        """
+        Calculate next reading date using SuperMemo SM-2 algorithm.
+        
+        Args:
+            grade: Quality of reading (0-5 scale)
+        """
+        # If failed completely, reset
+        if grade < 3:
+            self.repetitions = 0
+            self.interval = 1
+        else:
+            # Update easiness factor
+            self.easiness = max(1.3, self.easiness + (0.1 - (5 - grade) * (0.08 + (5 - grade) * 0.02)))
+            
+            # Update interval
+            if self.repetitions == 0:
+                self.interval = 1
+            elif self.repetitions == 1:
+                self.interval = 6
+            else:
+                self.interval = round(self.interval * self.easiness)
+                
+            # Cap interval at 365 days
+            self.interval = min(365, self.interval)
+            
+            # Increment repetitions
+            self.repetitions += 1
+            
+        # Set next reading date
+        self.next_read_date = datetime.utcnow() + timedelta(days=self.interval)
+        
+        # Update state
+        if self.repetitions == 0:
+            self.schedule_state = "new"
+        elif self.repetitions < 3:
+            self.schedule_state = "learning"
+        else:
+            self.schedule_state = "review"
 
 # Database initialization
 def init_database():

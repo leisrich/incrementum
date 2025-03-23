@@ -53,19 +53,20 @@ class SettingsManager:
         
         # AI Settings for summarization and extraction
         "ai": {
-            "provider": "openai",  # Default provider
+            "provider": "google",  # Default provider
             "use_ai_for_summarization": True,
             "use_ai_for_concept_extraction": False
         },
         
         # API keys and configuration
         "api": {
+            "jina_api_key": "",
             "openai_api_key": "",
-            "openai_model": "gpt-3.5-turbo",
-            "anthropic_api_key": "",
-            "anthropic_model": "claude-3-haiku-20240307",
-            "google_api_key": "",
-            "google_model": "gemini-pro",
+            "openai_model": "gpt-4o",
+            "gemini_api_key": "",
+            "gemini_model": "gemini-1.5-pro",
+            "claude_api_key": "",
+            "claude_model": "claude-3-5-sonnet-20241022",
             "openrouter_api_key": "",
             "openrouter_model": "openai/gpt-3.5-turbo",
             "ollama_host": "http://localhost:11434",

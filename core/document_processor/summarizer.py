@@ -38,32 +38,33 @@ AI_PROVIDERS = {
     "openai": {
         "name": "OpenAI",
         "setting_key": "openai_api_key",
-        "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o"],
+        "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
         "endpoint": "https://api.openai.com/v1/chat/completions"
     },
     "anthropic": {
-        "name": "Anthropic",
-        "setting_key": "anthropic_api_key",
-        "models": ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"],
+        "name": "Anthropic Claude",
+        "setting_key": "claude_api_key",
+        "models": ["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", 
+                  "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"],
         "endpoint": "https://api.anthropic.com/v1/messages"
     },
     "google": {
-        "name": "Google",
-        "setting_key": "google_api_key",
-        "models": ["gemini-pro", "gemini-ultra"],
-        "endpoint": "https://generativelanguage.googleapis.com/v1"
+        "name": "Google Gemini",
+        "setting_key": "gemini_api_key",
+        "models": ["gemini-2.0-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"],
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta"
     },
     "openrouter": {
         "name": "OpenRouter",
         "setting_key": "openrouter_api_key",
-        "models": ["openai/gpt-3.5-turbo", "anthropic/claude-3-opus", "google/gemini-pro", "meta/llama-3-70b"],
+        "models": ["openai/gpt-3.5-turbo", "anthropic/claude-3-haiku", "anthropic/claude-3-sonnet", "anthropic/claude-3-opus"],
         "endpoint": "https://openrouter.ai/api/v1/chat/completions"
     },
     "ollama": {
         "name": "Ollama",
         "setting_key": "ollama_host",
-        "models": ["llama3", "mistral", "mixtral", "phi3", "wizard"],
-        "endpoint": "/api/chat"
+        "models": ["llama3", "llama2", "mistral"],
+        "endpoint": "http://localhost:11434/api/generate"
     }
 }
 
@@ -97,6 +98,14 @@ class DocumentSummarizer:
         
         # Initialize NLP extractor
         self.nlp_extractor = NLPExtractor(db_session)
+        
+        # Initialize available AI models for summarization
+        self.available_models = {
+            "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
+            "google": ["gemini-2.0-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro"],
+            "anthropic": ["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", 
+                      "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"],
+        }
         
     def summarize_document(self, document_id: int, level: str = 'medium', 
                            use_ai: bool = True) -> Dict[str, Any]:
@@ -536,6 +545,11 @@ class DocumentSummarizer:
         }
         
         try:
+            # Replace legacy model names with supported ones
+            if model == "gemini-pro":
+                model = "gemini-1.5-pro"
+                logger.info(f"Replaced deprecated model 'gemini-pro' with 'gemini-1.5-pro'")
+            
             # Construct the proper endpoint for the correct model
             endpoint = f"{AI_PROVIDERS['google']['endpoint']}/models/{model}:generateContent?key={api_key}"
             logger.info(f"Using Google endpoint: {endpoint.split('?')[0]}")
@@ -910,6 +924,161 @@ class DocumentSummarizer:
         
         return None
 
+    def summarize_web_content(self, content: str, title: str = "", max_length: int = 500) -> Dict[str, Any]:
+        """
+        Summarize web content using AI.
+        
+        Args:
+            content: The web content to summarize
+            title: Optional title of the web page
+            max_length: Maximum length of the summary in words
+            
+        Returns:
+            Dictionary containing the summary and metadata
+        """
+        try:
+            logger.info(f"Summarizing web content with title: {title}")
+            
+            # Make sure we have content to summarize
+            if not content or len(content.strip()) < 100:
+                return {
+                    "success": False,
+                    "summary": "Error: The content is too short to summarize or could not be extracted.",
+                    "error": "Content is too short or empty"
+                }
+                
+            # Build context for the summary
+            context = ""
+            if title:
+                context = f"Title: {title}\n\n"
+            
+            context += f"Content length: {len(content)} characters\n\n"
+            
+            # Try to summarize with AI
+            api_config = self._get_api_config()
+            if api_config:
+                try:
+                    # Use AI to generate summary
+                    summary = self._ai_summarize_web_content(content, title, max_length, api_config)
+                    
+                    # Validate the summary
+                    if not summary or "Error:" in summary:
+                        return {
+                            "success": False,
+                            "summary": summary or "Error: Failed to generate summary with AI.",
+                            "error": "AI summary generation failed"
+                        }
+                        
+                    return {
+                        "success": True, 
+                        "summary": summary,
+                        "method": "ai"
+                    }
+                    
+                except Exception as e:
+                    logger.exception(f"Error using AI for web summarization: {e}")
+                    # Fall through to rule-based summary
+            
+            # Fallback to rule-based summary if AI is not configured or fails
+            rule_based_summary = self._rule_based_extract(content, max_length)
+            
+            return {
+                "success": True,
+                "summary": rule_based_summary,
+                "method": "rule_based"
+            }
+            
+        except Exception as e:
+            logger.exception(f"Error summarizing web content: {e}")
+            return {
+                "success": False,
+                "summary": f"Error: Failed to summarize content: {str(e)}",
+                "error": str(e)
+            }
+    
+    def _ai_summarize_web_content(self, content: str, title: str, max_length: int, api_config: Dict[str, Any]) -> str:
+        """
+        Generate a summary of web content using AI.
+        
+        Args:
+            content: The content to summarize
+            title: Title of the web page
+            max_length: Maximum length of the summary in words
+            api_config: API configuration
+            
+        Returns:
+            Generated summary
+        """
+        # Prepare content for summarization
+        content_to_summarize = content
+        
+        # Truncate if needed to fit token limits
+        if len(content) > 50000:
+            logger.info(f"Content length exceeds 50,000 characters, truncating to first 50,000 characters")
+            content_to_summarize = content[:50000]
+        
+        # Build prompt for summarization
+        prompt = self._build_web_summary_prompt(content_to_summarize, title, max_length)
+        
+        # Determine which service to use
+        service = api_config.get("service", "openai")
+        
+        if service == "openai":
+            from core.ai_services.llm_service import OpenAIService
+            llm_service = OpenAIService(api_config)
+        elif service == "gemini":
+            from core.ai_services.llm_service import GeminiService
+            llm_service = GeminiService(api_config)
+        elif service == "claude":
+            from core.ai_services.llm_service import AnthropicService
+            llm_service = AnthropicService(api_config)
+        elif service == "openrouter":
+            from core.ai_services.llm_service import OpenRouterService
+            llm_service = OpenRouterService(api_config)
+        elif service == "ollama":
+            from core.ai_services.llm_service import OllamaService
+            llm_service = OllamaService(api_config)
+        else:
+            raise ValueError(f"Unsupported LLM service: {service}")
+        
+        # Generate summary using the service
+        summary = llm_service.generate_text(prompt)
+        
+        # Post-process summary if needed
+        # (e.g., remove any unwanted prefixes like "Summary: " that the model might add)
+        summary = summary.strip()
+        
+        return summary
+    
+    def _build_web_summary_prompt(self, content: str, title: str, max_length: int) -> str:
+        """
+        Build a prompt for web content summarization.
+        
+        Args:
+            content: The content to summarize
+            title: Title of the web page
+            max_length: Maximum length of the summary in words
+            
+        Returns:
+            Prompt for the LLM
+        """
+        prompt = f"""Please summarize the following webpage content in approximately {max_length} words. 
+Focus on the main points, key information, and important conclusions.
+
+"""
+        
+        if title:
+            prompt += f"Title: {title}\n\n"
+            
+        prompt += f"Content:\n{content}\n\n"
+        
+        prompt += f"""
+Please provide a well-structured summary that covers the most important information from this webpage.
+The summary should be coherent, informative, and capture the essential points without unnecessary details.
+"""
+        
+        return prompt
+
 
 class SummarizeWorker(QObject):
     """Worker thread for document summarization."""
@@ -1169,9 +1338,9 @@ class SummarizeDialog(QDialog):
             if provider == "openai":
                 api_key = settings.get_setting("api", "openai_api_key", "")
             elif provider == "anthropic":
-                api_key = settings.get_setting("api", "anthropic_api_key", "")
+                api_key = settings.get_setting("api", "claude_api_key", "")
             elif provider == "google":
-                api_key = settings.get_setting("api", "google_api_key", "")
+                api_key = settings.get_setting("api", "gemini_api_key", "")
             elif provider == "openrouter":
                 api_key = settings.get_setting("api", "openrouter_api_key", "")
             elif provider == "ollama":
@@ -1186,9 +1355,9 @@ class SummarizeDialog(QDialog):
             if provider == "openai":
                 model = settings.get_setting("api", "openai_model", "gpt-3.5-turbo")
             elif provider == "anthropic":
-                model = settings.get_setting("api", "anthropic_model", "claude-3-haiku-20240307")
+                model = settings.get_setting("api", "claude_model", "claude-3-5-sonnet-20241022")
             elif provider == "google":
-                model = settings.get_setting("api", "google_model", "gemini-pro")
+                model = settings.get_setting("api", "gemini_model", "gemini-1.5-pro")
             elif provider == "openrouter":
                 model = settings.get_setting("api", "openrouter_model", "openai/gpt-3.5-turbo")
             elif provider == "ollama":
@@ -1680,12 +1849,12 @@ class SummarizeDialog(QDialog):
             window_title = "OpenAI API Key"
             placeholder = "sk-..."
         elif provider_id == "anthropic":
-            current_api_key = settings.get_setting("api", "anthropic_api_key", "")
+            current_api_key = settings.get_setting("api", "claude_api_key", "")
             prompt_text = "Enter your Anthropic API key:"
             window_title = "Anthropic API Key"
             placeholder = "sk-ant-..."
         elif provider_id == "google":
-            current_api_key = settings.get_setting("api", "google_api_key", "")
+            current_api_key = settings.get_setting("api", "gemini_api_key", "")
             prompt_text = "Enter your Google API key:"
             window_title = "Google API Key"
             placeholder = "AIzaSy..."
@@ -1719,9 +1888,9 @@ class SummarizeDialog(QDialog):
             if provider_id == "openai":
                 settings.set_setting("api", "openai_api_key", api_key)
             elif provider_id == "anthropic":
-                settings.set_setting("api", "anthropic_api_key", api_key)
+                settings.set_setting("api", "claude_api_key", api_key)
             elif provider_id == "google":
-                settings.set_setting("api", "google_api_key", api_key)
+                settings.set_setting("api", "gemini_api_key", api_key)
             elif provider_id == "openrouter":
                 settings.set_setting("api", "openrouter_api_key", api_key)
             elif provider_id == "ollama":
@@ -1742,9 +1911,9 @@ class SummarizeDialog(QDialog):
                 if provider_id == "openai":
                     settings.set_setting("api", "openai_model", model)
                 elif provider_id == "anthropic":
-                    settings.set_setting("api", "anthropic_model", model)
+                    settings.set_setting("api", "claude_model", model)
                 elif provider_id == "google":
-                    settings.set_setting("api", "google_model", model)
+                    settings.set_setting("api", "gemini_model", model)
                 elif provider_id == "openrouter":
                     settings.set_setting("api", "openrouter_model", model)
                 elif provider_id == "ollama":
@@ -1761,7 +1930,7 @@ class SummarizeDialog(QDialog):
                 logger.info(f"Updated Ollama host to: {api_key}")
             else:
                 logger.info(f"Updated API key for {provider_name}")
-                
+            
             # Set as default provider
             settings.set_setting("ai", "provider", provider_id)
             settings.save_settings()

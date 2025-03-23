@@ -13,7 +13,13 @@ logger = logging.getLogger(__name__)
 
 def find_db_file():
     """Find the SQLite database file by searching for it."""
-    # Common locations where the database might be
+    # Priority location - the one your app actually uses
+    priority_path = os.path.join(os.path.expanduser("~"), '.local', 'share', 'Incrementum', 'Incrementum', 'incrementum.db')
+    
+    if os.path.exists(priority_path):
+        return priority_path
+        
+    # Common locations where the database might be (fallbacks)
     home_dir = os.path.expanduser("~")
     app_data_locations = [
         os.path.join(home_dir, '.local', 'share', 'Incrementum', 'Incrementum'),
@@ -28,7 +34,7 @@ def find_db_file():
             db_path = os.path.join(location, 'incrementum.db')
             if os.path.exists(db_path):
                 return db_path
-    
+
     # If not found in common locations, do a search in the user's home directory
     logger.info("Database not found in common locations, searching home directory...")
     for root, dirs, files in os.walk(home_dir):
@@ -66,7 +72,7 @@ def migrate_database():
     cursor = conn.cursor()
     
     try:
-        # Check if priority column exists in documents table
+        # Check existing columns in documents table
         cursor.execute("PRAGMA table_info(documents)")
         columns = cursor.fetchall()
         column_names = [column[1] for column in columns]
@@ -99,6 +105,21 @@ def migrate_database():
         if 'position' not in column_names:
             logger.info("Adding position column to documents table")
             cursor.execute("ALTER TABLE documents ADD COLUMN position INTEGER")
+        
+        # Check if highlights table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='highlights'")
+        table_exists = cursor.fetchone() is not None
+        
+        if table_exists:
+            # Check columns in highlights table
+            cursor.execute("PRAGMA table_info(highlights)")
+            highlight_columns = cursor.fetchall()
+            highlight_column_names = [column[1] for column in highlight_columns]
+            
+            # Add position column to highlights if it doesn't exist
+            if 'position' not in highlight_column_names:
+                logger.info("Adding position column to highlights table")
+                cursor.execute("ALTER TABLE highlights ADD COLUMN position VARCHAR(255)")
         
         # Commit the changes
         conn.commit()

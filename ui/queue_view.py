@@ -8,10 +8,11 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QComboBox, QFormLayout, QSpinBox, QSplitter,
-    QMessageBox, QMenu, QCheckBox, QTabWidget, QTreeWidget, QTreeWidgetItem
+    QMessageBox, QMenu, QCheckBox, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex
-from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut
+from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut, QPalette
 
 from core.knowledge_base.models import Document, Category, Extract
 from core.spaced_repetition import FSRSAlgorithm
@@ -404,16 +405,45 @@ class QueueView(QWidget):
         
         return result
     
+    def _get_theme_colors(self):
+        """Get appropriate colors for the current theme."""
+        # Check if we're in dark mode by examining the application's palette
+        app = QApplication.instance()
+        if app:
+            palette = app.palette()
+            # If text color is light, we're likely in dark mode
+            is_dark_mode = palette.color(QPalette.ColorRole.WindowText).lightness() > 128
+        else:
+            is_dark_mode = False
+
+        if is_dark_mode:
+            # Dark theme colors (more subdued and visible on dark backgrounds)
+            return {
+                'overdue': QColor(120, 50, 50),  # Darker red
+                'new': QColor(40, 70, 120),      # Darker blue
+                'extract': QColor(70, 70, 70),   # Dark gray
+                'extract_child': QColor(60, 60, 60)  # Slightly darker gray
+            }
+        else:
+            # Light theme colors (original colors)
+            return {
+                'overdue': QColor(255, 200, 200),  # Light red
+                'new': QColor(200, 220, 255),      # Light blue
+                'extract': QColor(240, 240, 240),  # Light gray
+                'extract_child': QColor(245, 245, 245)  # Very light gray
+            }
+    
     def _populate_queue_table(self, doc_by_date: Dict[str, List[Document]]):
         """Populate the queue table with documents."""
         self.queue_table.clear()
         
         row = 0
+        theme_colors = self._get_theme_colors()
         
-        # Add overdue documents first with red highlight
+        # Add overdue documents first with highlight
         if "Overdue" in doc_by_date:
             for doc in doc_by_date["Overdue"]:
-                self._add_document_to_queue(doc, row, QColor(255, 200, 200))
+                self._add_document_to_queue(doc, row, theme_colors['overdue'])
                 row += 1
         
         # Add documents due by date
@@ -423,10 +453,10 @@ class QueueView(QWidget):
                     self._add_document_to_queue(doc, row)
                     row += 1
         
-        # Add new documents last with blue highlight
+        # Add new documents last with highlight
         if "New" in doc_by_date:
             for doc in doc_by_date["New"]:
-                self._add_document_to_queue(doc, row, QColor(200, 220, 255))
+                self._add_document_to_queue(doc, row, theme_colors['new'])
                 row += 1
                 
         # Ensure the table is sorted by priority and due date within each group
@@ -466,12 +496,9 @@ class QueueView(QWidget):
         # Store document ID as data
         item.setData(0, Qt.ItemDataRole.UserRole, doc.id)
         if background_color:
-            item.setBackground(0, QBrush(background_color))
-            item.setBackground(1, QBrush(background_color))
-            item.setBackground(2, QBrush(background_color))
-            item.setBackground(3, QBrush(background_color))
-            item.setBackground(4, QBrush(background_color))
-            item.setBackground(5, QBrush(background_color))
+            # Apply background color to all columns
+            for col in range(6):
+                item.setBackground(col, QBrush(background_color))
         
         # Add extracts as child items
         self._add_extracts_to_document(doc, item)
@@ -482,6 +509,7 @@ class QueueView(QWidget):
         """Add extracts as child items under the document."""
         # Get extracts for this document
         extracts = self.db_session.query(Extract).filter(Extract.document_id == doc.id).all()
+        theme_colors = self._get_theme_colors()
         
         for extract in extracts:
             extract_item = QTreeWidgetItem(parent_item)
@@ -500,8 +528,9 @@ class QueueView(QWidget):
             extract_item.setData(0, Qt.ItemDataRole.UserRole, extract.id)
             extract_item.setData(0, Qt.ItemDataRole.UserRole+1, "extract") # Type marker
             
-            # Use a different background color for extract items
-            extract_item.setBackground(0, QBrush(QColor(240, 240, 240)))
+            # Use a different background color for extract items - apply to all columns
+            for col in range(6):
+                extract_item.setBackground(col, QBrush(theme_colors['extract']))
             
             # Add any child extracts if this is a hierarchical extract
             if extract.children:
@@ -511,7 +540,9 @@ class QueueView(QWidget):
                     child_item.setText(0, child_content_preview)
                     child_item.setData(0, Qt.ItemDataRole.UserRole, child_extract.id)
                     child_item.setData(0, Qt.ItemDataRole.UserRole+1, "extract")
-                    child_item.setBackground(0, QBrush(QColor(245, 245, 245)))
+                    # Apply to all columns
+                    for col in range(6):
+                        child_item.setBackground(col, QBrush(theme_colors['extract_child']))
     
     def _populate_calendar_view(self, doc_by_date: Dict[str, List[Document]]):
         """Populate the calendar view with documents grouped by date."""
@@ -522,6 +553,7 @@ class QueueView(QWidget):
                 widget.deleteLater()
         
         self.date_tables = {}
+        theme_colors = self._get_theme_colors()
         
         # Add overdue documents
         if "Overdue" in doc_by_date and doc_by_date["Overdue"]:
@@ -537,8 +569,11 @@ class QueueView(QWidget):
             overdue_table.itemDoubleClicked.connect(lambda item, column: self._on_tree_item_selected(item, column))
             
             for i, doc in enumerate(doc_by_date["Overdue"]):
-                overdue_table.insertTopLevelItem(i, QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority), doc.next_reading_date.strftime("%Y-%m-%d") if doc.next_reading_date else "New"]))
-                overdue_table.topLevelItem(i).setBackground(0, QBrush(QColor(255, 200, 200)))
+                item = QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority), doc.next_reading_date.strftime("%Y-%m-%d") if doc.next_reading_date else "New"])
+                # Apply background color to all columns
+                for col in range(4):
+                    item.setBackground(col, QBrush(theme_colors['overdue']))
+                overdue_table.insertTopLevelItem(i, item)
             
             overdue_layout.addWidget(overdue_table)
             self.queue_tabs.widget(1).layout().addWidget(overdue_group)
@@ -559,7 +594,8 @@ class QueueView(QWidget):
                 date_table.itemDoubleClicked.connect(lambda item, column: self._on_tree_item_selected(item, column))
                 
                 for i, doc in enumerate(docs):
-                    date_table.insertTopLevelItem(i, QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority)]))
+                    item = QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority)])
+                    date_table.insertTopLevelItem(i, item)
                 
                 date_layout.addWidget(date_table)
                 self.queue_tabs.widget(1).layout().addWidget(date_group)
@@ -579,7 +615,11 @@ class QueueView(QWidget):
             new_table.itemDoubleClicked.connect(lambda item, column: self._on_tree_item_selected(item, column))
             
             for i, doc in enumerate(doc_by_date["New"]):
-                new_table.insertTopLevelItem(i, QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority)]))
+                item = QTreeWidgetItem([doc.title, doc.category.name if doc.category else "Uncategorized", str(doc.priority)])
+                # Apply background color to all columns
+                for col in range(3):
+                    item.setBackground(col, QBrush(theme_colors['new']))
+                new_table.insertTopLevelItem(i, item)
             
             new_layout.addWidget(new_table)
             self.queue_tabs.widget(1).layout().addWidget(new_group)

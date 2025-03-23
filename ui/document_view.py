@@ -1,6 +1,3 @@
-# If the patching approach doesn't work, here's a complete replacement for document_view.py
-# Save this as ui/document_view.py.new and rename it if needed
-
 import os
 import logging
 from typing import Optional, List, Dict
@@ -16,10 +13,11 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
-    QTabWidget, QLineEdit, QSizePolicy, QCheckBox, QSlider
+    QTabWidget, QLineEdit, QSizePolicy, QCheckBox, QSlider, 
+    QInputDialog, QComboBox, QStyle
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray
-from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QKeyEvent, QIntValidator
+from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QKeyEvent, QIntValidator, QIcon
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtWebEngineCore import QWebEngineSettings
@@ -28,13 +26,14 @@ try:
 except ImportError:
     HAS_WEBENGINE = False
 
-from core.knowledge_base.models import Document, Extract
+from core.knowledge_base.models import Document, Extract, WebHighlight
 from core.content_extractor.extractor import ContentExtractor
 from core.document_processor.handlers.epub_handler import EPUBHandler
 from .document_extracts_view import DocumentExtractsView
 from .load_epub_helper import setup_epub_webview
 from .load_youtube_helper import setup_youtube_webview, extract_video_id_from_document
 from .youtube_transcript_view import YouTubeTranscriptView
+from core.spaced_repetition.incremental_reading import IncrementalReadingManager
 
 logger = logging.getLogger(__name__)
 
@@ -877,33 +876,7 @@ class DocumentView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         
         # Toolbar
-        toolbar = QToolBar()
-        
-        # Document navigation actions
-        self.prev_action = QAction("Previous", self)
-        self.prev_action.triggered.connect(self._on_previous)
-        toolbar.addAction(self.prev_action)
-        
-        self.next_action = QAction("Next", self)
-        self.next_action.triggered.connect(self._on_next)
-        toolbar.addAction(self.next_action)
-        
-        toolbar.addSeparator()
-        
-        # Extract actions
-        self.create_extract_action = QAction("Create Extract", self)
-        self.create_extract_action.triggered.connect(self._on_create_extract)
-        toolbar.addAction(self.create_extract_action)
-        
-        toolbar.addSeparator()
-        
-        # Vim mode toggle
-        self.vim_toggle_action = QAction("Vim Mode", self)
-        self.vim_toggle_action.setCheckable(True)
-        self.vim_toggle_action.setChecked(self.vim_handler.vim_mode)
-        self.vim_toggle_action.triggered.connect(self._toggle_vim_mode)
-        toolbar.addAction(self.vim_toggle_action)
-        
+        toolbar = self._create_toolbar()
         layout.addWidget(toolbar)
         
         # Content splitter
@@ -958,35 +931,46 @@ class DocumentView(QWidget):
         self.vim_shortcuts_label.setStyleSheet("color: #666; font-size: 9pt;")
         vim_status_layout.addWidget(self.vim_shortcuts_label)
         
-        # Add to main layout - no stretch (keep minimal)
-        layout.addWidget(self.vim_status_widget, 0)  # Use 0 stretch factor
+        layout.addWidget(self.vim_status_widget)
+        self.vim_status_widget.setVisible(False)  # Hide by default
         
         self.setLayout(layout)
         
-        # Update Vim status bar visibility based on mode
-        self._update_vim_status_visibility()
+        # Initialize Vim key handler
+        self.vim_key_handler = VimKeyHandler(self)
+    
+    def _clear_content_layout(self):
+        """Clear the content layout by removing all widgets."""
+        if hasattr(self, 'content_layout') and self.content_layout:
+            # Remove each widget from the layout
+            while self.content_layout.count():
+                item = self.content_layout.takeAt(0)
+                widget = item.widget()
+                
+                if widget:
+                    widget.setParent(None)  # Remove parent relationship
+                    widget.deleteLater()     # Schedule for deletion
     
     def _update_vim_status_visibility(self):
-        """Update the visibility of the Vim status bar based on mode."""
-        self.vim_status_widget.setVisible(self.vim_handler.vim_mode)
-        self.vim_toggle_action.setChecked(self.vim_handler.vim_mode)
+        """Update the visibility of the Vim status bar based on Vim mode state."""
+        self.vim_status_widget.setVisible(self.vim_key_handler.vim_mode)
     
     def _toggle_vim_mode(self):
         """Toggle Vim mode on/off."""
-        is_enabled = self.vim_handler.toggle_vim_mode()
+        is_enabled = self.vim_key_handler.toggle_vim_mode()
         self.vim_toggle_action.setChecked(is_enabled)
         self._update_vim_status_visibility()
     
     def keyPressEvent(self, event):
         """Handle key press events for Vim-like navigation."""
         # Check if Vim handler wants to handle this key
-        if self.vim_handler.handle_key_event(event):
+        if self.vim_key_handler.handle_key_event(event):
             # Update command display if in command mode
-            if self.vim_handler.command_mode:
+            if self.vim_key_handler.command_mode:
                 self.vim_status_label.setText("Vim Mode: Command")
-                self.vim_command_label.setText(":" + self.vim_handler.current_command)
+                self.vim_command_label.setText(":" + self.vim_key_handler.current_command)
                 self.vim_visual_label.setText("")
-            elif self.vim_handler.visual_mode:
+            elif self.vim_key_handler.visual_mode:
                 self.vim_status_label.setText("Vim Mode: Visual")
                 self.vim_command_label.setText("")
                 self.vim_visual_label.setText("[Selection Mode]")
@@ -994,8 +978,8 @@ class DocumentView(QWidget):
                 self.vim_status_label.setText("Vim Mode: Normal")
                 self.vim_visual_label.setText("")
                 # Show count prefix if any
-                if self.vim_handler.count_prefix:
-                    self.vim_command_label.setText(self.vim_handler.count_prefix)
+                if self.vim_key_handler.count_prefix:
+                    self.vim_command_label.setText(self.vim_key_handler.count_prefix)
                 else:
                     self.vim_command_label.setText("")
             
@@ -1564,6 +1548,84 @@ window.addEventListener('load', function() {
             label = QLabel(f"Error loading PDF: {str(e)}")
             self.content_layout.addWidget(label)
 
+    def _load_youtube(self):
+        """Load and display a YouTube video document."""
+        try:
+            if not HAS_WEBENGINE:
+                raise Exception("WebEngine not available. YouTube viewing requires PyQt6 WebEngine.")
+            
+            # Extract video ID from document content or URL
+            video_id = extract_video_id_from_document(self.document)
+            
+            if not video_id:
+                raise ValueError("Could not extract YouTube video ID from document")
+            
+            # Create a QWebEngineView for embedding YouTube
+            web_view = QWebEngineView()
+            web_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Create a callback handler for communication with the player
+            self.youtube_callback = WebViewCallback(self)
+            
+            # Configure the YouTube player with our load_youtube_helper
+            # Get the target position from the document if available
+            target_position = getattr(self.document, 'position', 0)
+            
+            # Use the proper setup_youtube_webview function with all required parameters
+            success, callback = setup_youtube_webview(
+                web_view, 
+                self.document, 
+                video_id, 
+                target_position=target_position,
+                db_session=self.db_session
+            )
+            
+            if not success:
+                raise ValueError(f"Failed to set up YouTube player for video ID: {video_id}")
+                
+            # Store the enhanced callback
+            self.youtube_enhanced_callback = callback
+            
+            # Add to layout
+            self.content_layout.addWidget(web_view)
+            
+            # Store references
+            self.web_view = web_view
+            self.content_edit = web_view
+            
+            # Add transcript view if available
+            try:
+                # Create a transcript view widget
+                transcript_view = YouTubeTranscriptView(video_id, self.db_session)
+                transcript_view.setMaximumHeight(200)  # Limit height
+                
+                # Connect transcript navigation signals if available
+                if hasattr(transcript_view, 'seekToTime'):
+                    transcript_view.seekToTime.connect(
+                        lambda time_sec: web_view.page().runJavaScript(
+                            f"if(typeof player !== 'undefined' && player) {{ player.seekTo({time_sec}, true); }}"
+                        )
+                    )
+                
+                # Add to layout below the video
+                self.content_layout.addWidget(transcript_view)
+                
+                # Store reference
+                self.transcript_view = transcript_view
+                
+            except Exception as e:
+                logger.warning(f"Could not load YouTube transcript: {e}")
+                # Continue without transcript
+            
+            logger.info(f"Loaded YouTube video: {video_id}")
+            
+        except Exception as e:
+            logger.exception(f"Error loading YouTube video: {e}")
+            error_widget = QLabel(f"Error loading YouTube video: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_widget)
+
     def _load_epub(self, db_session, document):
         """
         Load document in EPUB format.
@@ -1658,6 +1720,16 @@ window.addEventListener('load', function() {
             # Set size policy to expand
             text_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             
+            # Check if file exists
+            if not os.path.exists(self.document.file_path):
+                logger.error(f"Text file does not exist: {self.document.file_path}")
+                error_message = f"File not found: {os.path.basename(self.document.file_path)}\n\nThis may happen if the file was a temporary web page that has been removed."
+                text_edit.setPlainText(error_message)
+                self.content_layout.addWidget(text_edit, 1)
+                self.content_edit = text_edit
+                self.content_text = error_message
+                return
+            
             # Read file content
             with open(self.document.file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -1683,1352 +1755,1333 @@ window.addEventListener('load', function() {
     def _load_html(self):
         """Load and display an HTML document."""
         try:
-            # Log file info
-            logger.info(f"Loading HTML document from {self.document.file_path}")
-            file_size = os.path.getsize(self.document.file_path) if os.path.exists(self.document.file_path) else 0
-            logger.info(f"HTML file size: {file_size} bytes")
-            
-            # Check if file exists and is not empty
+            # Check if file exists
             if not os.path.exists(self.document.file_path):
                 logger.error(f"HTML file does not exist: {self.document.file_path}")
-                label = QLabel(f"HTML file not found: {os.path.basename(self.document.file_path)}")
-                self.content_layout.addWidget(label)
-                return
+                error_message = f"File not found: {os.path.basename(self.document.file_path)}"
                 
-            if file_size == 0:
-                logger.error(f"HTML file is empty: {self.document.file_path}")
-                label = QLabel("The HTML file is empty. No content to display.")
-                self.content_layout.addWidget(label)
-                return
-            
-            # Read HTML file
-            try:
-                with open(self.document.file_path, 'r', encoding='utf-8') as f:
-                    html_content = f.read()
-            except UnicodeDecodeError:
-                # Try with a different encoding if UTF-8 fails
-                logger.warning(f"UTF-8 decoding failed, trying with ISO-8859-1")
-                with open(self.document.file_path, 'r', encoding='ISO-8859-1') as f:
-                    html_content = f.read()
-                    
-            # Log content preview for debugging
-            content_preview = html_content[:200] + "..." if len(html_content) > 200 else html_content
-            logger.debug(f"HTML content preview: {content_preview}")
-            
-            if not html_content.strip():
-                logger.error("HTML content is empty after reading")
-                label = QLabel("The HTML file contains no content.")
-                self.content_layout.addWidget(label)
-                return
-            
-            # Parse with BeautifulSoup to extract text
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            # Check if there's any meaningful content
-            body_content = soup.body.get_text().strip() if soup.body else ""
-            self.content_text = soup.get_text()
-            
-            if not body_content:
-                logger.warning("HTML document contains no visible text content")
+                # Display error in a QLabel
+                error_label = QLabel(error_message)
+                error_label.setWordWrap(True)
+                error_label.setStyleSheet("color: red; padding: 20px;")
+                self.content_layout.addWidget(error_label)
                 
-                # Try to display the raw HTML instead
-                text_edit = QTextEdit()
-                text_edit.setReadOnly(True)
-                text_edit.setPlainText(html_content)
-                text_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-                self.content_layout.addWidget(text_edit, 1)  # Add stretch factor
-                self.content_edit = text_edit
-                logger.info("Displaying raw HTML content instead")
                 return
             
-            # Set up base URL for loading resources
-            base_url = QUrl.fromLocalFile(os.path.dirname(self.document.file_path) + os.path.sep)
+            # Read HTML content
+            with open(self.document.file_path, 'r', encoding='utf-8', errors='replace') as f:
+                html_content = f.read()
             
-            # Log which JavaScript libraries might be needed
-            libs_to_check = ['mermaid', 'katex', 'plotly', 'markdown', 'three.js']
-            detected_libs = []
+            # Get base URL for resources (images, stylesheets)
+            base_url = QUrl.fromLocalFile(os.path.dirname(self.document.file_path) + os.sep)
             
-            for lib in libs_to_check:
-                if lib in html_content.lower():
-                    detected_libs.append(lib)
-                    
-            if detected_libs:
-                logger.info(f"Detected potential JavaScript libraries in HTML: {', '.join(detected_libs)}")
+            # Create WebView with the HTML content
+            web_view = self._create_webview_and_setup(html_content, base_url)
             
-            # Create web view with libraries injected as needed
-            webview = self._create_webview_and_setup(html_content, base_url)
+            # Add to layout
+            self.content_layout.addWidget(web_view)
             
-            # Set size policy to expand
-            if HAS_WEBENGINE and isinstance(webview, QWebEngineView):
-                webview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            # Store references for later use
+            self.web_view = web_view
+            self.content_edit = web_view
+            self.content_text = html_content
             
-            # Add to layout with stretch
-            self.content_layout.addWidget(webview, 1)
+            # Add SuperMemo-style incremental reading capabilities
+            self._add_supermemo_features(web_view)
             
-            # Store for later use
-            self.content_edit = webview
-            self.web_view = webview  # Keep reference for _save_position
+            # Restore previous reading position if available
+            self._restore_position()
             
-            # Set up position tracking similar to EPUB
-            setup_epub_webview(self.document, webview, self.db_session)
-            
-            logger.info("HTML document loaded successfully")
+            logger.info(f"Loaded HTML document: {self.document.file_path}")
             
         except Exception as e:
             logger.exception(f"Error loading HTML document: {e}")
-            label = QLabel(f"Error loading HTML document: {str(e)}")
-            self.content_layout.addWidget(label)
-    
-    def _load_docx(self):
-        """Load and display a DOCX document."""
-        try:
-            # Use python-docx to extract text
-            import docx
-            
-            doc = docx.Document(self.document.file_path)
-            content = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-            
-            # Create text edit
-            text_edit = QTextEdit()
-            text_edit.setReadOnly(True)
-            text_edit.setPlainText(content)
-            
-            # Add to layout
-            self.content_layout.addWidget(text_edit)
-            
-            # Store for later use
-            self.content_edit = text_edit
-            self.content_text = content
-            
-            # Restore position
-            self._restore_position()
-            
-        except ImportError:
-            logger.error("DOCX viewing requires python-docx library")
-            label = QLabel("DOCX viewing requires additional libraries that are not installed.")
-            self.content_layout.addWidget(label)
-        except Exception as e:
-            logger.exception(f"Error loading DOCX document: {e}")
-            label = QLabel(f"Error loading DOCX document: {str(e)}")
-            self.content_layout.addWidget(label)
+            error_label = QLabel(f"Error loading HTML document: {str(e)}")
+            error_label.setWordWrap(True)
+            error_label.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_label)
 
-    def _load_youtube(self):
-        """Load YouTube video content."""
+    def summarize_current_content(self):
+        """Summarize the current document content using AI."""
         try:
-            # Import required widgets here to ensure they're in scope
-            from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit, QSplitter, QSizePolicy
-            from PyQt6.QtWebEngineWidgets import QWebEngineView
-            from PyQt6.QtCore import Qt
+            from core.document_processor.summarizer import DocumentSummarizer
+            from core.utils.settings_manager import SettingsManager
+            import tempfile
+            import os
             
-            if not HAS_WEBENGINE:
-                raise ImportError("YouTube videos require QWebEngineView which is not available")
+            # Get the document content
+            document_id = getattr(self, 'document_id', None)
+            
+            if not document_id:
+                logger.warning("No document loaded to summarize")
+                QMessageBox.warning(
+                    self, "Summarization Error", 
+                    "Please load a document before trying to summarize content."
+                )
+                return
                 
-            # Clear any existing content from the layout
-            self._clear_content_layout()
+            # Create summarizer
+            settings_manager = SettingsManager()
+            summarizer = DocumentSummarizer(self.db_session, settings_manager)
             
-            # Get video ID
-            video_id = extract_video_id_from_document(self.document)
-            
-            if not video_id:
-                logger.error("Could not extract YouTube video ID")
-                raise ValueError("Could not extract YouTube video ID from document")
-            
-            # Create a splitter to hold both the video and transcript
-            self.content_splitter = QSplitter(Qt.Orientation.Vertical)
-            self.content_splitter.setChildrenCollapsible(False)  # Prevent sections from being fully collapsed
-            
-            # Create a container for the video
-            video_container = QWidget()
-            video_layout = QVBoxLayout(video_container)
-            video_layout.setContentsMargins(0, 0, 0, 0)
-            video_layout.setSpacing(5)
-            
-            # Create a WebView and make it expand to fill available space
-            self.webview = QWebEngineView()
-            self.webview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)  # Allow expansion
-            video_layout.addWidget(self.webview, stretch=1)  # Add stretch to prioritize video
-            
-            # Get the target position (if available)
-            target_position = 0
-            if hasattr(self.document, 'position') and self.document.position:
-                target_position = self.document.position
+            # For web content, extract directly from the web view if available
+            if hasattr(self, 'web_view') and self.web_view:
+                # Check if it's a web document from URL
+                document = self.db_session.query(Document).get(document_id)
+                if document and document.content_type == 'web':
+                    # Get content from the webview
+                    self.web_view.page().toHtml(self._on_html_extracted_for_summary)
+                    return
+                    
+                # Alternatively, get the content as text from the webview
+                self.web_view.page().toPlainText(self._on_text_extracted_for_summary)
+                return
                 
-            # Add controls widget with more compact layout
-            controls_widget = QWidget()
-            timestamp_layout = QHBoxLayout(controls_widget)
-            timestamp_layout.setContentsMargins(5, 2, 5, 2)
-            timestamp_layout.setSpacing(2)
+            # For non-web documents, use the existing summarize_document method
+            result = summarizer.summarize_document(document_id)
             
-            # Add position label
-            self.position_label = QLabel(f"Position: {target_position}s")
-            timestamp_layout.addWidget(self.position_label)
-            
-            # Add spacer between position and seek controls
-            timestamp_layout.addStretch(1)
-            
-            # Add seek label
-            timestamp_label = QLabel("Seek to:")
-            timestamp_layout.addWidget(timestamp_label)
-            
-            # Add input field for timestamp
-            self.seek_time_input = QLineEdit()
-            self.seek_time_input.setPlaceholderText("Enter time in seconds or MM:SS")
-            self.seek_time_input.setText(str(target_position))
-            timestamp_layout.addWidget(self.seek_time_input)
-            
-            # Add seek button
-            seek_button = QPushButton("Seek")
-            seek_button.clicked.connect(self._on_seek_youtube_position)
-            timestamp_layout.addWidget(seek_button)
-            
-            # Add a save button for manual saving of position
-            save_button = QPushButton("Save Position")
-            save_button.clicked.connect(self._on_save_youtube_position)
-            timestamp_layout.addWidget(save_button)
-            
-            # Add controls to video container (no stretch, keep it compact)
-            video_layout.addWidget(controls_widget)
-            
-            # Add video container to the splitter
-            self.content_splitter.addWidget(video_container)
-            
-            # Set up the webview with the YouTube player
-            success, callback = setup_youtube_webview(
-                self.webview, 
-                self.document, 
-                video_id, 
-                target_position,
-                self.db_session
-            )
-            
-            if success and callback:
-                # Store references for later use
-                self.youtube_callback = callback
-                self.web_view = self.webview
-            
+            if result and result.get('success', False):
+                summary = result.get('summary', 'No summary generated')
                 
-                # Check for transcript in metadata
-                if hasattr(self.document, 'file_path') and self.document.file_path and os.path.exists(self.document.file_path):
-                    try:
-                        with open(self.document.file_path, 'r', encoding='utf-8') as f:
-                            metadata = json.load(f)
-                            if 'transcript' in metadata and metadata['transcript']:
-                                # Create transcript view
-                                self.transcript_view = YouTubeTranscriptView(
-                                    self.db_session,
-                                    document_id=self.document_id,
-                                    metadata_file=self.document.file_path
-                                )
-                                self.transcript_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-                                
-                                # Connect extract created signal
-                                self.transcript_view.extractCreated.connect(self.extractCreated)
-                                
-                                # Add to splitter
-                                self.content_splitter.addWidget(self.transcript_view)
-                                
-                                # Set initial sizes (70% video, 30% transcript)
-                                self.content_splitter.setSizes([700, 300])
-                                
-                                # Connect transcript seek signals
-                                self.transcript_view.seek_to_time.connect(self._on_seek_youtube_position)
-                            else:
-                                # No transcript, show message
-                                no_transcript_widget = QWidget()
-                                no_transcript_layout = QVBoxLayout(no_transcript_widget)
-                                no_transcript_layout.setContentsMargins(10, 10, 10, 10)  # Smaller margins
-                                no_transcript_layout.setSpacing(5)  # Reduce spacing between widgets
-                                
-                                # Create a compact message layout
-                                message_widget = QWidget()
-                                message_layout = QHBoxLayout(message_widget)
-                                message_layout.setContentsMargins(5, 5, 5, 5)
-                                
-                                # Create the reimport button
-                                reimport_button = QPushButton("Reimport Video with Transcript")
-                                reimport_button.clicked.connect(self._on_reimport_youtube)
-                                reimport_button.setMinimumWidth(200)
-                                reimport_button.setMaximumWidth(250)
-                                
-                                # Create the info label with more compact text
-                                no_transcript_label = QLabel(
-                                    "No transcript available. Possible reasons: "
-                                    "• Disabled by creator • No captions "
-                                    "• Age-restricted video • Private content"
-                                )
-                                no_transcript_label.setWordWrap(True)
-                                no_transcript_label.setStyleSheet("color: #555; font-size: 11px; background-color: #f7f7f7; padding: 8px; border-radius: 3px;")
-                                
-                                # Add widgets to message layout
-                                message_layout.addWidget(reimport_button)
-                                message_layout.addWidget(no_transcript_label, 1)  # Give label stretch priority
-                                
-                                # Add message widget to main layout
-                                no_transcript_layout.addWidget(message_widget)
-                                
-                                # Add a spacer to push content to the top
-                                no_transcript_layout.addStretch(1)
-                                
-                                # Add to splitter
-                                self.content_splitter.addWidget(no_transcript_widget)
-                                
-                                # Set initial sizes (85% video, 15% message)
-                                self.content_splitter.setSizes([850, 150])
-                    except Exception as e:
-                        logger.warning(f"Could not load transcript metadata: {e}")
+                # Show the summary
+                self._show_summary_dialog(summary)
                 
-                # Add the splitter to the main layout and make it expand
-                self.content_layout.addWidget(self.content_splitter, stretch=1)
-                
-                logger.info(f"Loaded YouTube video: {video_id}")
-                return True
             else:
-                error_msg = f"Failed to set up YouTube player for video {video_id}"
-                self.youtube_status.setText(error_msg)
-                self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
-                logger.error(error_msg)
-                
-                # Add the container to the main layout anyway to show the error
-                self.content_layout.addWidget(self.content_splitter, stretch=1)
-                return False
+                error = result.get('error', 'Unknown error')
+                QMessageBox.warning(
+                    self, "Summarization Failed", 
+                    f"Failed to summarize document: {error}"
+                )
                 
         except Exception as e:
-            logger.exception(f"Error loading YouTube content: {e}")
-            from PyQt6.QtWidgets import QLabel
-            error_widget = QLabel(f"Error loading YouTube video: {str(e)}")
-            error_widget.setStyleSheet("color: red; padding: 20px;")
-            error_widget.setWordWrap(True)
-            self.content_layout.addWidget(error_widget)
-            return False
-    
-    def _center_widget(self, widget):
-        """Helper method to center a widget horizontally."""
-        hbox = QHBoxLayout()
-        hbox.addStretch(1)
-        hbox.addWidget(widget)
-        hbox.addStretch(1)
-        return hbox
+            logger.exception(f"Error summarizing content: {e}")
+            QMessageBox.warning(
+                self, "Summarization Error", 
+                f"An error occurred while trying to summarize the content: {str(e)}"
+            )
 
-    def _clear_content_layout(self):
-        """Clear all widgets from the content layout."""
-        if hasattr(self, 'content_layout'):
-            # Remove all widgets from the layout
-            while self.content_layout.count():
-                item = self.content_layout.takeAt(0)
-                widget = item.widget()
-                if widget:
-                    widget.setParent(None)
-                    widget.deleteLater()
-
-    def _handle_webview_selection(self, selected_text):
-        """Handle text selection from web view."""
-        if selected_text and selected_text.strip():
-            self.selected_text = selected_text.strip()
-    
-    @pyqtSlot(QPoint)
-    def _on_content_menu(self, pos):
-        """Show context menu for document content."""
-        # Create menu
-        menu = QMenu(self)
-        
-        # Add actions
-        if hasattr(self, 'selected_text') and self.selected_text:
-            create_extract_action = menu.addAction("Create Extract")
-            create_extract_action.triggered.connect(self._on_create_extract)
-        
-        # Show menu
-        menu.exec(self.mapToGlobal(pos))
-    
-    @pyqtSlot()
-    def _on_previous(self):
-        """Navigate to previous page/section."""
-        # Implementation depends on document type
-        pass
-    
-    @pyqtSlot()
-    def _on_next(self):
-        """Navigate to next page/section."""
-        # Implementation depends on document type
-        pass
-    
     @pyqtSlot(int)
     def _on_extract_selected(self, extract_id):
         """Handle extract selection from extract view."""
         self.extractCreated.emit(extract_id)
-    
-    @pyqtSlot()
-    def _on_create_extract(self):
-        """Create an extract from selected text."""
-        if not self.selected_text:
-            return
-        
-        # Different handling based on the type of content editor
-        if HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
-            # For QWebEngineView, we already have the selected text from _handle_webview_selection
-            # We need to get context differently since we don't have textCursor
+                
+    def _on_html_extracted_for_summary(self, html_content):
+        """Process extracted HTML content for summarization."""
+        try:
+            from core.document_processor.summarizer import DocumentSummarizer
+            from core.utils.settings_manager import SettingsManager
+            from bs4 import BeautifulSoup
             
-            # Special handling for YouTube videos
-            if hasattr(self, 'document') and self.document and self.document.content_type == 'youtube':
-                # For YouTube, use the content_text which should have video info
-                context = self.content_text
-                position = "youtube"
-                if hasattr(self, 'youtube_callback') and self.youtube_callback:
-                    # Include current position in the video if available
-                    if hasattr(self.youtube_callback, 'current_position'):
-                        position = f"youtube:{self.youtube_callback.current_position}"
-            # Regular WebView (EPUB, HTML)
-            elif self.content_text:
-                # Try to find the selection in the content_text to get proper context
-                selection_index = self.content_text.find(self.selected_text)
-                if selection_index >= 0:
-                    # Get surrounding context
-                    start_pos = max(0, selection_index - 100)
-                    end_pos = min(len(self.content_text), selection_index + len(self.selected_text) + 100)
-                    context = self.content_text[start_pos:end_pos]
-                    position = f"pos:{selection_index}"
-                else:
-                    # Fallback if we can't find the exact text
-                    context = self.selected_text
-                    position = "unknown"
+            soup = BeautifulSoup(html_content, 'lxml')
+            text_content = soup.get_text(separator='\n')
+            
+            # Get document title if available
+            document = self.db_session.query(Document).get(self.document_id)
+            title = document.title if document else ""
+            
+            # Create summarizer
+            settings_manager = SettingsManager()
+            summarizer = DocumentSummarizer(self.db_session, settings_manager)
+            
+            # Use the new web-specific summarization method
+            result = summarizer.summarize_web_content(text_content, title)
+            
+            if result and result.get('success', False):
+                summary = result.get('summary', 'No summary generated')
+                
+                # Show the summary
+                self._show_summary_dialog(summary)
+                
             else:
-                context = self.selected_text
-                position = "unknown"
-        else:
-            # For QTextEdit and similar widgets, use the textCursor to get context
-            cursor = self.content_edit.textCursor()
-            position = cursor.position()
+                error = result.get('error', 'Unknown error')
+                QMessageBox.warning(
+                    self, "Summarization Failed", 
+                    f"Failed to summarize web content: {error}"
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error summarizing HTML content: {e}")
+            QMessageBox.warning(
+                self, "Summarization Error", 
+                f"An error occurred while summarizing HTML content: {str(e)}"
+            )
             
-            # Try to get some context before and after selection
-            start_pos = max(0, position - 100)
-            end_pos = min(len(self.content_text), position + 100)
+    def _on_text_extracted_for_summary(self, text_content):
+        """Process extracted text content for summarization."""
+        try:
+            from core.document_processor.summarizer import DocumentSummarizer
+            from core.utils.settings_manager import SettingsManager
             
-            context = self.content_text[start_pos:end_pos]
-            position = f"pos:{position}"
+            # Get document title if available
+            document = self.db_session.query(Document).get(self.document_id)
+            title = document.title if document else ""
+            
+            # Create summarizer
+            settings_manager = SettingsManager()
+            summarizer = DocumentSummarizer(self.db_session, settings_manager)
+            
+            # Use the new web-specific summarization method
+            result = summarizer.summarize_web_content(text_content, title)
+            
+            if result and result.get('success', False):
+                summary = result.get('summary', 'No summary generated')
+                
+                # Show the summary
+                self._show_summary_dialog(summary)
+                
+            else:
+                error = result.get('error', 'Unknown error')
+                QMessageBox.warning(
+                    self, "Summarization Failed", 
+                    f"Failed to summarize content: {error}"
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error summarizing text content: {e}")
+            QMessageBox.warning(
+                self, "Summarization Error", 
+                f"An error occurred while summarizing text content: {str(e)}"
+            )
+            
+    def _show_summary_dialog(self, summary):
+        """Show a dialog with the document summary."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Document Summary")
+        dialog.setMinimumSize(600, 400)
         
-        # Create the extract
-        extract = Extract(
-            content=self.selected_text,
-            context=context,
-            document_id=self.document_id,
-            position=position,
-            created_date=datetime.utcnow()
+        layout = QVBoxLayout(dialog)
+        
+        # Summary text edit
+        summary_text = QTextEdit()
+        summary_text.setReadOnly(True)
+        summary_text.setPlainText(summary)
+        layout.addWidget(summary_text)
+        
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Save)
+        button_box.accepted.connect(dialog.accept)
+        
+        # Connect save button
+        save_button = button_box.button(QDialogButtonBox.StandardButton.Save)
+        save_button.clicked.connect(lambda: self._save_summary(summary))
+        
+        layout.addWidget(button_box)
+        
+        dialog.exec()
+        
+    def _save_summary(self, summary):
+        """Save the summary to a file."""
+        from PyQt6.QtWidgets import QFileDialog
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Summary", "", "Text Files (*.txt);;All Files (*)"
         )
         
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(summary)
+                    
+                QMessageBox.information(
+                    self, "Summary Saved", 
+                    f"Summary saved to {file_path}"
+                )
+                
+            except Exception as e:
+                logger.exception(f"Error saving summary: {e}")
+                QMessageBox.warning(
+                    self, "Save Error", 
+                    f"An error occurred while saving the summary: {str(e)}"
+                )
+
+    def _on_previous(self):
+        """Navigate to the previous page in the history."""
+        if hasattr(self, 'web_view') and self.web_view:
+            self.web_view.back()
+        else:
+            logger.debug("Previous action called but no webview available")
+            
+    def _on_next(self):
+        """Navigate to the next page in the history."""
+        if hasattr(self, 'web_view') and self.web_view:
+            self.web_view.forward()
+        else:
+            logger.debug("Next action called but no webview available")
+
+    def _create_toolbar(self):
+        """Create the document viewer toolbar with actions."""
+        toolbar = QToolBar()
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        
+        # Create actions
+        self.prev_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward), "Previous", self)
+        self.prev_action.triggered.connect(self._on_previous)
+        toolbar.addAction(self.prev_action)
+        
+        self.next_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward), "Next", self)
+        self.next_action.triggered.connect(self._on_next)
+        toolbar.addAction(self.next_action)
+        
+        toolbar.addSeparator()
+        
+        # Add highlight action
+        self.highlight_action = QAction(QIcon.fromTheme("edit-select-all"), "Highlight", self)
+        self.highlight_action.triggered.connect(self._on_highlight)
+        toolbar.addAction(self.highlight_action)
+        
+        # Add extract action
+        self.extract_action = QAction(QIcon.fromTheme("edit-copy"), "Extract", self)
+        self.extract_action.triggered.connect(self._on_extract)
+        toolbar.addAction(self.extract_action)
+        
+        toolbar.addSeparator()
+        
+        # Add incremental reading actions
+        self.add_to_ir_action = QAction(QIcon.fromTheme("bookmark-new"), "Add to Reading Queue", self)
+        self.add_to_ir_action.triggered.connect(self._on_add_to_incremental_reading)
+        toolbar.addAction(self.add_to_ir_action)
+        
+        self.mark_progress_action = QAction(QIcon.fromTheme("document-save"), "Mark Reading Progress", self)
+        self.mark_progress_action.triggered.connect(self._on_mark_reading_progress)
+        toolbar.addAction(self.mark_progress_action)
+        
+        self.extract_important_action = QAction(QIcon.fromTheme("edit-find"), "Extract Important Content", self)
+        self.extract_important_action.triggered.connect(self._on_extract_important)
+        toolbar.addAction(self.extract_important_action)
+        
+        return toolbar
+        
+    def _on_add_to_incremental_reading(self):
+        """Add document to incremental reading queue."""
         try:
-            # Add to database
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            from PyQt6.QtWidgets import QInputDialog
+            from core.spaced_repetition.incremental_reading import IncrementalReadingManager
+            
+            # Get priority from user
+            priority, ok = QInputDialog.getDouble(
+                self, "Reading Priority", 
+                "Enter reading priority (0-100):",
+                50, 0, 100, 1
+            )
+            
+            if not ok:
+                return
+                
+            # Add to incremental reading queue
+            ir_manager = IncrementalReadingManager(self.db_session)
+            result = ir_manager.add_document_to_queue(self.document_id, priority)
+            
+            if result:
+                QMessageBox.information(
+                    self, "Success", 
+                    "Document added to incremental reading queue with priority %.1f" % priority
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Error", 
+                    "Failed to add document to incremental reading queue"
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error adding to incremental reading: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+    
+    def _on_mark_reading_progress(self):
+        """Mark reading progress for incremental reading."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            from PyQt6.QtWidgets import QInputDialog, QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider
+            from core.spaced_repetition.incremental_reading import IncrementalReadingManager
+            from core.knowledge_base.models import IncrementalReading
+            
+            # Get current reading progress
+            reading = self.db_session.query(IncrementalReading)\
+                .filter(IncrementalReading.document_id == self.document_id)\
+                .first()
+                
+            if not reading:
+                result = QMessageBox.question(
+                    self, "Incremental Reading", 
+                    "This document is not in your incremental reading queue. Add it?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                
+                if result == QMessageBox.StandardButton.Yes:
+                    self._on_add_to_incremental_reading()
+                return
+                
+            # Create custom dialog for rating reading session
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Mark Reading Progress")
+            layout = QVBoxLayout(dialog)
+            
+            # Current position
+            current_pos = 0
+            if hasattr(self, 'web_view') and self.web_view:
+                # Get scroll position from web view
+                self.web_view.page().runJavaScript(
+                    "window.pageYOffset || document.documentElement.scrollTop || 0;",
+                    lambda result: setattr(self, '_temp_scroll_pos', result)
+                )
+                QApplication.processEvents()
+                current_pos = getattr(self, '_temp_scroll_pos', 0)
+            
+            # Add position display
+            pos_layout = QHBoxLayout()
+            pos_layout.addWidget(QLabel("Current Position:"))
+            pos_label = QLabel(str(current_pos))
+            pos_layout.addWidget(pos_label)
+            layout.addLayout(pos_layout)
+            
+            # Add percent complete slider
+            percent_layout = QHBoxLayout()
+            percent_layout.addWidget(QLabel("Percent Complete:"))
+            percent_slider = QSlider(Qt.Orientation.Horizontal)
+            percent_slider.setRange(0, 100)
+            percent_slider.setValue(int(reading.percent_complete))
+            percent_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+            percent_slider.setTickInterval(10)
+            percent_layout.addWidget(percent_slider)
+            percent_label = QLabel(f"{reading.percent_complete:.1f}%")
+            percent_layout.addWidget(percent_label)
+            layout.addLayout(percent_layout)
+            
+            # Update label when slider changes
+            percent_slider.valueChanged.connect(
+                lambda value: percent_label.setText(f"{value:.1f}%")
+            )
+            
+            # Add rating selection
+            rating_layout = QHBoxLayout()
+            rating_layout.addWidget(QLabel("Rate this reading session:"))
+            rating_combo = QComboBox()
+            ratings = [
+                "0 - Complete blackout",
+                "1 - Barely remembered",
+                "2 - Difficult, but remembered",
+                "3 - Some effort needed",
+                "4 - Easy recall",
+                "5 - Perfect recall"
+            ]
+            rating_combo.addItems(ratings)
+            rating_combo.setCurrentIndex(4)  # Default to "Easy recall"
+            rating_layout.addWidget(rating_combo)
+            layout.addLayout(rating_layout)
+            
+            # Add dialog buttons
+            button_layout = QHBoxLayout()
+            cancel_button = QPushButton("Cancel")
+            cancel_button.clicked.connect(dialog.reject)
+            save_button = QPushButton("Save Progress")
+            save_button.clicked.connect(dialog.accept)
+            save_button.setDefault(True)
+            button_layout.addWidget(cancel_button)
+            button_layout.addWidget(save_button)
+            layout.addLayout(button_layout)
+            
+            # Show dialog
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                # Save progress
+                ir_manager = IncrementalReadingManager(self.db_session)
+                grade = rating_combo.currentIndex()
+                percent = percent_slider.value()
+                
+                result = ir_manager.record_reading_session(
+                    reading.id, current_pos, grade, percent
+                )
+                
+                if result:
+                    QMessageBox.information(
+                        self, "Success", 
+                        f"Reading progress saved. Next review scheduled for {reading.next_read_date.strftime('%Y-%m-%d')}"
+                    )
+                else:
+                    QMessageBox.warning(
+                        self, "Error", 
+                        "Failed to save reading progress"
+                    )
+                
+        except Exception as e:
+            logger.exception(f"Error marking reading progress: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+    
+    def _on_extract_important(self):
+        """Extract important content from document for learning."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            from PyQt6.QtWidgets import QInputDialog
+            from core.spaced_repetition.incremental_reading import IncrementalReadingManager
+            
+            # Ask for number of extracts
+            num_extracts, ok = QInputDialog.getInt(
+                self, "Extract Content", 
+                "Number of important sections to extract:",
+                5, 1, 20, 1
+            )
+            
+            if not ok:
+                return
+                
+            # Extract important content
+            ir_manager = IncrementalReadingManager(self.db_session)
+            extracts = ir_manager.auto_extract_important_content(self.document_id, num_extracts)
+            
+            if extracts:
+                QMessageBox.information(
+                    self, "Success", 
+                    f"Successfully extracted {len(extracts)} important sections from document."
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Warning", 
+                    "No important content could be extracted. Try using manual highlights."
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error extracting important content: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+            
+    def _on_highlight(self):
+        """Create highlight from selected text."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            # Get selected text
+            selected_text = None
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, use JavaScript to get selected text
+                self.web_view.page().runJavaScript(
+                    "window.getSelection().toString();",
+                    lambda result: setattr(self, '_temp_selection', result)
+                )
+                
+                # Process events to ensure JavaScript result is available
+                for _ in range(10):  # Try a few iterations
+                    QApplication.processEvents()
+                    if hasattr(self, '_temp_selection'):
+                        selected_text = self._temp_selection
+                        break
+                        
+            elif hasattr(self, 'text_edit') and self.text_edit:
+                # For text edit, use cursor
+                selected_text = self.text_edit.textCursor().selectedText()
+                
+            if not selected_text or len(selected_text.strip()) < 5:
+                QMessageBox.warning(
+                    self, "Highlight", 
+                    "Please select some text to highlight."
+                )
+                return
+                
+            # Create highlight
+            from core.knowledge_base.models import WebHighlight
+            
+            highlight = WebHighlight(
+                document_id=self.document_id,
+                content=selected_text,
+                created_date=datetime.utcnow()
+            )
+            
+            # Get some context if available
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, try to get surrounding text
+                self.web_view.page().runJavaScript(
+                    """
+                    (function() {
+                        var sel = window.getSelection();
+                        if (sel.rangeCount > 0) {
+                            var range = sel.getRangeAt(0);
+                            var contextNode = range.commonAncestorContainer;
+                            if (contextNode.nodeType === Node.TEXT_NODE) {
+                                contextNode = contextNode.parentNode;
+                            }
+                            return contextNode.textContent;
+                        }
+                        return "";
+                    })();
+                    """,
+                    lambda result: setattr(highlight, 'context', result[:500])
+                )
+                # Process events to wait for JavaScript
+                for _ in range(10):
+                    QApplication.processEvents()
+                
+                # Also try to get XPath
+                self.web_view.page().runJavaScript(
+                    """
+                    (function() {
+                        var sel = window.getSelection();
+                        if (sel.rangeCount > 0) {
+                            var range = sel.getRangeAt(0);
+                            var node = range.commonAncestorContainer;
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                node = node.parentNode;
+                            }
+                            
+                            var path = '';
+                            while (node && node.nodeType === Node.ELEMENT_NODE) {
+                                var name = node.nodeName.toLowerCase();
+                                var index = 1;
+                                var sibling = node.previousSibling;
+                                while (sibling) {
+                                    if (sibling.nodeType === Node.ELEMENT_NODE && 
+                                        sibling.nodeName.toLowerCase() === name) {
+                                        index++;
+                                    }
+                                    sibling = sibling.previousSibling;
+                                }
+                                path = '/' + name + '[' + index + ']' + path;
+                                node = node.parentNode;
+                            }
+                            return path;
+                        }
+                        return "";
+                    })();
+                    """,
+                    lambda result: setattr(highlight, 'xpath', result)
+                )
+                # Process events to wait for JavaScript
+                for _ in range(10):
+                    QApplication.processEvents()
+                
+                # Apply visual highlighting in the web view
+                self.web_view.page().runJavaScript(
+                    """
+                    (function() {
+                        var sel = window.getSelection();
+                        if (sel.rangeCount > 0) {
+                            var range = sel.getRangeAt(0);
+                            
+                            // Create highlight span
+                            var highlightSpan = document.createElement('span');
+                            highlightSpan.className = 'incrementum-highlight';
+                            highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.4)';
+                            highlightSpan.style.borderRadius = '2px';
+                            
+                            // Apply highlight
+                            range.surroundContents(highlightSpan);
+                            
+                            // Clear selection
+                            sel.removeAllRanges();
+                            
+                            return true;
+                        }
+                        return false;
+                    })();
+                    """
+                )
+            
+            # Save highlight
+            self.db_session.add(highlight)
+            self.db_session.commit()
+            
+            QMessageBox.information(
+                self, "Highlight", 
+                "Highlight created successfully."
+            )
+                
+        except Exception as e:
+            logger.exception(f"Error creating highlight: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+            
+    def _on_extract(self):
+        """Create extract from selected text."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            # Get selected text
+            selected_text = None
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, use JavaScript to get selected text
+                self.web_view.page().runJavaScript(
+                    "window.getSelection().toString();",
+                    lambda result: setattr(self, '_temp_selection', result)
+                )
+                QApplication.processEvents()
+                selected_text = getattr(self, '_temp_selection', None)
+            elif hasattr(self, 'text_edit') and self.text_edit:
+                # For text edit, use cursor
+                selected_text = self.text_edit.textCursor().selectedText()
+                
+            if not selected_text or len(selected_text.strip()) < 5:
+                QMessageBox.warning(
+                    self, "Extract", 
+                    "Please select some text to extract."
+                )
+                return
+                
+            # Create extract directly
+            from core.knowledge_base.models import Extract
+            
+            extract = Extract(
+                document_id=self.document_id,
+                content=selected_text,
+                created_date=datetime.utcnow(),
+                priority=50
+            )
+            
+            # Save extract
             self.db_session.add(extract)
             self.db_session.commit()
             
-            # Refresh extracts view
-            self.extract_view.load_extracts_for_document(self.document_id)
-            
-            # Emit signal
-            self.extractCreated.emit(extract.id)
-            
-            # Clear selection
-            self.selected_text = ""
-            
+            QMessageBox.information(
+                self, "Extract", 
+                "Extract created successfully. You can find it in the Knowledge Base."
+            )
+                
         except Exception as e:
             logger.exception(f"Error creating extract: {e}")
             QMessageBox.warning(
                 self, "Error", 
-                f"Failed to create extract: {str(e)}"
+                f"An error occurred: {str(e)}"
             )
-    
-    def showEvent(self, event):
-        """Handle widget show event to restore view state."""
-        super().showEvent(event)
-        
-        # Restore view state when tab is shown again
-        self._restore_view_state()
-        
-        # Emit signal when the document is shown
-        QTimer.singleShot(100, self._on_tab_activated)
-        
-    def hideEvent(self, event):
-        """Handle widget hide event to save view state."""
-        super().hideEvent(event)
-        
-        # Save view state when tab is hidden
-        self._save_view_state()
-        
-        # Emit signal when the document is hidden
-        QTimer.singleShot(0, self._on_tab_deactivated)
-    
-    def _on_tab_activated(self):
-        """Handle tab activation."""
-        # Additional things to do when a tab becomes active
-        # For example, update toolbar actions or refresh content
-        logger.debug(f"Tab activated for document: {self.document_id}")
-        
-        # Special handling for different content types
-        if hasattr(self, 'document') and self.document:
-            # For PDF content, ensure proper restoration
-            if self.document.content_type == 'pdf' and hasattr(self, 'content_edit'):
-                # If it's a PDFViewWidget, call its specific methods
-                if hasattr(self.content_edit, 'set_view_state') and hasattr(self.content_edit, 'get_view_state'):
-                    # Any specific PDF restoration
-                    pass
+
+    def _show_context_menu(self, position):
+        """Show document context menu."""
+        if not hasattr(self, 'document_id') or not self.document_id:
+            return
             
-            # For YouTube content, which uses web_view instead of content_edit
-            elif self.document.content_type == 'youtube' and hasattr(self, 'web_view'):
-                logger.debug(f"Tab activated for YouTube video: {self.document.id}")
-                # YouTube-specific restoration if needed
-                pass
-                    
-            # For general web content, ensure JavaScript is running
-            elif hasattr(self, 'content_edit') and HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
-                # Refresh web content to ensure JavaScript is working
-                refresh_script = """
-                if (typeof refreshActiveContent === 'function') {
-                    refreshActiveContent();
-                }
-                """
-                self.content_edit.page().runJavaScript(refresh_script)
-    
-    def _on_tab_deactivated(self):
-        """Handle tab deactivation."""
-        # Additional things to do when a tab becomes inactive
-        logger.debug(f"Tab deactivated for document: {self.document_id}")
+        menu = QMenu(self)
         
-        # Save any unsaved changes or state
-        self._save_position()
+        # Add export actions
+        export_menu = QMenu("Export", menu)
         
-        # Content type specific handling
-        if hasattr(self, 'document') and self.document:
-            # PDF-specific handling
-            if self.document.content_type == 'pdf' and hasattr(self, 'content_edit'):
-                # Additional PDF-specific state saving
-                pass
-            
-            # YouTube-specific handling
-            elif self.document.content_type == 'youtube' and hasattr(self, 'web_view'):
-                # Save YouTube position if needed
-                # This is usually handled automatically by the setup_youtube_webview callback
-                pass
-    
-    def _save_view_state(self):
-        """Save the current view state for later restoration."""
+        # Export extracts action
+        export_extracts_action = QAction("Export Extracts", export_menu)
+        export_extracts_action.triggered.connect(self._export_extracts)
+        export_menu.addAction(export_extracts_action)
+        
+        # Export SuperMemo HTML action
+        export_sm_html_action = QAction("Export SuperMemo HTML", export_menu)
+        export_sm_html_action.triggered.connect(self._export_supermemo_html)
+        export_menu.addAction(export_sm_html_action)
+        
+        menu.addMenu(export_menu)
+        
+        # Add document management actions
+        menu.addSeparator()
+        
+        # Other actions...
+        
+        menu.exec(self.mapToGlobal(position))
+
+    def _export_supermemo_html(self):
+        """Export document extracts and highlights as SuperMemo-compatible HTML."""
         try:
-            # Handle YouTube specially since it uses web_view instead of content_edit
-            if hasattr(self, 'document') and self.document and self.document.content_type == 'youtube':
-                if hasattr(self, 'web_view') and HAS_WEBENGINE:
-                    # Using JavaScript to get YouTube player state
-                    self.web_view.page().runJavaScript(
-                        "getPlayerState();",
-                        lambda state: setattr(self, 'view_state', {**self.view_state, "youtube_state": state}) if state else None
-                    )
-                return
-            
-            # If content_edit is a PDFViewWidget, use its specific methods
-            if hasattr(self, 'content_edit'):
-                # Special handling for PDF view widget
-                if hasattr(self.content_edit, 'get_view_state'):
-                    pdf_state = self.content_edit.get_view_state()
-                    self.view_state.update(pdf_state)
-                    logger.debug(f"Saved PDF-specific view state: {pdf_state}")
-                elif hasattr(self.content_edit, 'zoom_factor'):
-                    self.view_state["zoom_factor"] = self.content_edit.zoom_factor
-                
-                # Save scroll position for QTextEdit and similar
-                if hasattr(self.content_edit, 'verticalScrollBar'):
-                    scrollbar = self.content_edit.verticalScrollBar()
-                    if scrollbar:
-                        self.view_state["scroll_position"] = scrollbar.value()
-                        
-                # Save scroll position for webviews
-                if HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
-                    # Using JavaScript to get scroll position
-                    self.content_edit.page().runJavaScript(
-                        "window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;",
-                        lambda pos: setattr(self, 'view_state', {**self.view_state, "scroll_position": pos})
-                    )
-                    
-            # Save size and position if needed
-            self.view_state["size"] = self.size()
-            
-            # Store state in database if needed for persistent storage across sessions
-            if hasattr(self, 'document') and self.document:
-                # In a production version, you might want to store this in the database
-                # import json
-                # self.document.view_state = json.dumps(self.view_state)
-                # self.db_session.commit()
-                pass
-                
-            logger.debug(f"Saved view state for document {self.document_id}: {self.view_state}")
-                
-        except Exception as e:
-            logger.exception(f"Error saving view state: {e}")
-    
-    def _restore_view_state(self):
-        """Restore the previously saved view state."""
-        try:
-            if not hasattr(self, 'content_edit') or not self.content_edit:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
                 return
                 
-            # If content_edit is a PDFViewWidget, use its specific methods
-            if hasattr(self.content_edit, 'set_view_state'):
-                # Create a copy of the view state to avoid modifying the original
-                pdf_state = {k: v for k, v in self.view_state.items() 
-                            if k in ['page', 'zoom_factor', 'position']}
-                
-                if pdf_state:
-                    self.content_edit.set_view_state(pdf_state)
-                    logger.debug(f"Restored PDF-specific view state: {pdf_state}")
-                return  # Exit early since PDF view handles its own state
-                
-            # For other view types, apply generic restoration
+            from PyQt6.QtWidgets import QFileDialog
+            from core.spaced_repetition.sm_html_exporter import SuperMemoHTMLExporter
             
-            # Restore zoom factor
-            if "zoom_factor" in self.view_state and self.view_state["zoom_factor"]:
-                if hasattr(self.content_edit, 'set_zoom'):
-                    self.content_edit.set_zoom(self.view_state["zoom_factor"])
-                
-            # Restore scroll position
-            if "scroll_position" in self.view_state and self.view_state["scroll_position"] is not None:
-                # For QTextEdit and similar
-                if hasattr(self.content_edit, 'verticalScrollBar'):
-                    scrollbar = self.content_edit.verticalScrollBar()
-                    if scrollbar:
-                        scrollbar.setValue(self.view_state["scroll_position"])
-                        
-                # For web views
-                if HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
-                    pos = self.view_state["scroll_position"]
-                    script = f"window.scrollTo(0, {pos});"
-                    self.content_edit.page().runJavaScript(script)
-                    
-            # Apply sizing if needed
-            if "size" in self.view_state and self.view_state["size"]:
-                # Usually not needed as the tab widget will control size,
-                # but could be useful in some cases
-                pass
-                
-            logger.debug(f"Restored view state for document {self.document_id}: {self.view_state}")
-                
-        except Exception as e:
-            logger.exception(f"Error restoring view state: {e}")
-    
-    def closeEvent(self, event):
-        try:
-            # Force save YouTube position if applicable
-            if (hasattr(self, 'document') and self.document and 
-                self.document.content_type == 'youtube' and 
-                hasattr(self, 'youtube_callback') and self.youtube_callback):
-                
-                logger.info(f"Saving YouTube position on close: {self.youtube_callback.current_position}")
-                self.youtube_callback.savePosition()
-                
-            self._save_position()
-            self._save_view_state()
-            self.db_session.commit()  # Ensure changes are committed
-        except Exception as e:
-            logger.exception(f"Error in closeEvent: {e}")
-        super().closeEvent(event)
-    
-    def _save_position(self):
-        """Save the current reading position."""
-        try:
-            # Check if we have a document to save position for
-            if not hasattr(self, 'document') or not self.document:
-                return
+            # Ask for output directory
+            output_dir = QFileDialog.getExistingDirectory(
+                self, "Select Output Directory", os.path.expanduser("~")
+            )
             
-            # For QTextEdit
-            if hasattr(self, 'text_view') and isinstance(self.text_view, QTextEdit):
-                cursor = self.text_view.textCursor()
-                position = cursor.position()
-                
-                # Update the document
-                self.document.position = position
-                self.db_session.commit()
-                logger.debug(f"Saved text cursor position: {position}")
-            
-            # For QWebEngineView (position handled by the helper module)
-            elif hasattr(self, 'web_view') and QWebEngineView and isinstance(self.web_view, QWebEngineView):
-                # Position is saved automatically by the setup_youtube_webview callback system
-                logger.debug("WebView position handled by helper module")
-                
-        except Exception as e:
-            logger.exception(f"Error saving position: {e}")
-    
-    def _restore_position(self):
-        """Restore the last reading position."""
-        try:
-            if not hasattr(self, 'document') or not self.document:
+            if not output_dir:
                 return
                 
-            # Get stored position
-            position = getattr(self.document, 'position', None)
-            if position is None or position <= 0:
-                logger.info(f"No stored position found for {self.document.title}")
-                return
-                    
-            logger.info(f"Attempting to restore position {position} for {self.document.title}")
-                
-            # Determine how to set position based on document type and view
-            if hasattr(self, 'content_edit'):
-                if isinstance(self.content_edit, QTextEdit):
-                    # For text documents, set cursor position
-                    cursor = self.content_edit.textCursor()
-                        
-                    # Make sure position is within valid range
-                    doc_length = len(self.content_edit.toPlainText())
-                    position = min(position, doc_length)
-                        
-                    cursor.setPosition(position)
-                    self.content_edit.setTextCursor(cursor)
-                        
-                    # Ensure the cursor is visible
-                    self.content_edit.ensureCursorVisible()
-                    logger.info(f"Restored text document position: {position}")
-                        
-                elif HAS_WEBENGINE and isinstance(self.content_edit, QWebEngineView):
-                    # For WebEngine view (EPUB/HTML/YouTube), position is handled by the helper module
-                    # No need to do anything here as it's done when the view is initialized
-                    pass
-                else:
-                    logger.warning(f"Unknown content editor type, can't restore position: {type(self.content_edit)}")
+            # Export HTML
+            exporter = SuperMemoHTMLExporter(self.db_session)
+            result = exporter.export_document_extracts(self.document_id, output_dir)
+            
+            if result:
+                QMessageBox.information(
+                    self, "Export Successful", 
+                    f"SuperMemo HTML exported to:\n{result}"
+                )
             else:
-                logger.warning("No content_edit available to restore position to")
+                QMessageBox.warning(
+                    self, "Export Failed", 
+                    "Failed to export SuperMemo HTML. Check if there are extracts or highlights."
+                )
                 
         except Exception as e:
-            logger.exception(f"Error restoring document position: {e}")
-
-    def _on_reimport_youtube(self):
-        """Reimport the YouTube video with transcript."""
-        try:
-            from PyQt6.QtWidgets import QMessageBox
-            
-            # Show confirmation dialog
-            reply = QMessageBox.question(
-                self, 
-                "Reimport YouTube Video",
-                "This will reimport the YouTube video and attempt to fetch the transcript again. Continue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
+            logger.exception(f"Error exporting SuperMemo HTML: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
             )
-            
-            if reply == QMessageBox.StandardButton.Yes:
-                # Check if we have a source URL or video ID
-                if hasattr(self.document, 'source_url') and self.document.source_url:
-                    source_url = self.document.source_url
-                    
-                    # Import the document processor in the handler to avoid circular imports
-                    from core.document_processor.handlers.youtube_handler import YouTubeHandler
-                    handler = YouTubeHandler()
-                    
-                    # Extract video ID from source URL
-                    video_id = handler._extract_video_id(source_url)
-                    
-                    if video_id:
-                        # Show importing message
-                        self.youtube_status.setText(f"Reimporting video {video_id} with transcript...")
-                        self.youtube_status.setStyleSheet("color: #000; background-color: #ffd; padding: 5px; border-radius: 3px;")
-                        
-                        # Process in a background thread to avoid UI freezing
-                        from PyQt6.QtCore import QThread, pyqtSignal
-                        
-                        class ImportThread(QThread):
-                            importFinished = pyqtSignal(bool, str)
-                            
-                            def __init__(self, handler, url, parent=None):
-                                super().__init__(parent)
-                                self.handler = handler
-                                self.url = url
-                                
-                            def run(self):
-                                try:
-                                    # Reimport with force_transcript=True
-                                    success = self.handler.process_url(self.url, force_transcript=True)
-                                    self.importFinished.emit(success, "")
-                                except Exception as e:
-                                    self.importFinished.emit(False, str(e))
-                        
-                        # Create and start the thread
-                        self.import_thread = ImportThread(handler, source_url, self)
-                        self.import_thread.importFinished.connect(self._on_reimport_finished)
-                        self.import_thread.start()
-                    else:
-                        self.youtube_status.setText("Could not extract video ID from URL")
-                        self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
-                else:
-                    self.youtube_status.setText("No source URL available for reimport")
-                    self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
-        except Exception as e:
-            logger.exception(f"Error starting YouTube reimport: {e}")
-            self.youtube_status.setText(f"Error: {str(e)}")
-            self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
-            
-    def _on_reimport_finished(self, success, error_msg):
-        """Handle completion of YouTube reimport."""
-        if success:
-            self.youtube_status.setText("Video reimported successfully. Reloading...")
-            self.youtube_status.setStyleSheet("color: green; background-color: #efe; padding: 5px; border-radius: 3px;")
-            
-            # Reload the document after a short delay
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(1500, lambda: self.load_document(self.document_id))
-        else:
-            self.youtube_status.setText(f"Reimport failed: {error_msg}")
-            self.youtube_status.setStyleSheet("color: red; background-color: #fee; padding: 5px; border-radius: 3px;")
-
-    def save_document(self):
-        """Save the current document state to the database."""
-        try:
-            if not self.document or not self.document_id:
-                logger.debug("No document to save")
-                return False
-                
-            # Save position
-            self._save_position()
-            
-            # Save view state
-            self._save_view_state()
-            
-            # Update last_modified timestamp
-            self.document.last_modified = datetime.utcnow()
-            
-            # Commit changes to the database
-            self.db_session.commit()
-            
-            logger.debug(f"Document {self.document_id} saved successfully")
-            return True
-            
-        except Exception as e:
-            logger.exception(f"Error saving document: {e}")
-            return False
-
-    def _update_youtube_position(self):
-        """Update and save the current YouTube position."""
-        if not hasattr(self, 'web_view') or not self.web_view:
-            return
-            
-        # Use JavaScript to get the current position
-        self.web_view.page().runJavaScript(
-            "getCurrentPosition();",
-            self._handle_position_update
-        )
-        
-    def _handle_position_update(self, position):
-        """Handle position update from JavaScript."""
-        if position is None or not isinstance(position, (int, float)):
-            return
-            
-        # Update position label
-        if hasattr(self, 'position_label'):
-            self.position_label.setText(f"Position: {int(position)}s")
-        
-        # Update the document position in the database
-        if hasattr(self, 'document') and self.document:
-            try:
-                if position > 0:  # Don't save if at the beginning
-                    self.document.position = int(position)
-                    self.db_session.commit()
-                    logger.debug(f"Saved YouTube position: {position}")
-            except Exception as e:
-                logger.error(f"Error saving YouTube position: {e}")
-                
-    def _on_save_youtube_position(self):
-        """Manually save the current YouTube position."""
-        if hasattr(self, 'youtube_callback') and self.youtube_callback:
-            try:
-                self.youtube_callback.savePosition()
-                logger.debug(f"Position saved: {self.youtube_callback.current_position}s")
-            except Exception as e:
-                logger.error(f"Error manually saving position: {e}")
-        else:
-            self._update_youtube_position()  # Fallback
-        
-    def _on_seek_youtube_position(self):
-        """Handle seeking to a specific position in a YouTube video."""
-        if not hasattr(self, 'web_view') or not self.web_view or not hasattr(self, 'seek_time_input'):
-            return
-            
-        try:
-            # Get position from input
-            time_text = self.seek_time_input.text()
-            position = int(time_text)
-            
-            # Use JavaScript to seek
-            seek_script = f"seekToTime({position});"
-            self.web_view.page().runJavaScript(seek_script)
-            
-            # Update backend
-            if hasattr(self, 'youtube_callback') and self.youtube_callback:
-                self.youtube_callback.current_position = position
-                self.youtube_callback.onTimeUpdate(position)
-                
-            # Update label
-            if hasattr(self, 'position_label'):
-                self.position_label.setText(f"Position: {position}s")
-                
-        except (ValueError, TypeError) as e:
-            logger.error(f"Invalid position value: {e}")
-
-    def _set_error_message(self, message):
-        """
-        Display an error message in the content area.
-        
-        Args:
-            message: Error message to display
-        """
-        # Clear the content layout
-        self._clear_content_layout()
-        
-        # Create error label
-        error_widget = QLabel(message)
-        error_widget.setWordWrap(True)
-        error_widget.setStyleSheet("color: red; padding: 20px;")
-        
-        # Add to layout
-        self.content_layout.addWidget(error_widget)
-        
-        logger.error(message)
 
     def _add_supermemo_features(self, web_view):
-        """
-        Add SuperMemo SM-18 style incremental reading features to web view.
-        
-        Args:
-            web_view: QWebEngineView instance
-        """
+        """Add SuperMemo-style incremental reading features to web view."""
         if not HAS_WEBENGINE or not isinstance(web_view, QWebEngineView):
+            logger.warning("Cannot add SuperMemo features without WebEngine")
             return
             
-        logger.info("Adding SuperMemo incremental reading features to EPUB view")
+        # Add JavaScript to enable SM-18 style incremental reading capabilities
+        sm_script = """
+        // SuperMemo SM-18 style incremental reading script
         
-        # Add SuperMemo toolbar
-        toolbar = QToolBar("SuperMemo Features")
-        toolbar.setObjectName("superMemoToolbar")
+        // Initialize state
+        let smState = {
+            highlighting: false,
+            startPoint: null,
+            selectedText: '',
+            lastSelection: null
+        };
         
-        # Extract action
-        extract_action = QAction("Extract Selection", self)
-        extract_action.setToolTip("Extract selected text to create a new learning item (Ctrl+Alt+E)")
-        extract_action.setShortcut("Ctrl+Alt+E")
-        extract_action.triggered.connect(self._on_sm_extract)
-        
-        # Cloze deletion action
-        cloze_action = QAction("Cloze Deletion", self)
-        cloze_action.setToolTip("Create cloze deletion from selected text (Ctrl+Alt+C)")
-        cloze_action.setShortcut("Ctrl+Alt+C")
-        cloze_action.triggered.connect(self._on_sm_cloze)
-        
-        # Priority tools
-        priority_action = QAction("Set Priority", self)
-        priority_action.setToolTip("Set learning priority for this item (Ctrl+Alt+P)")
-        priority_action.setShortcut("Ctrl+Alt+P")
-        priority_action.triggered.connect(self._on_sm_priority)
-        
-        # Highlighting tools with SuperMemo color scheme
-        highlight_menu = QMenu("Highlight", self)
-        
-        # SM-18 style color highlighting
-        colors = [
-            ("Most Important", "#FF0000", "Ctrl+Alt+1"),  # Red
-            ("Very Important", "#FF7F00", "Ctrl+Alt+2"),  # Orange
-            ("Important", "#FFFF00", "Ctrl+Alt+3"),       # Yellow
-            ("Less Important", "#00FF00", "Ctrl+Alt+4"),  # Green
-            ("Least Important", "#0000FF", "Ctrl+Alt+5")  # Blue
-        ]
-        
-        for name, color, shortcut in colors:
-            action = QAction(name, self)
-            action.setData(color)
-            action.setShortcut(shortcut)
-            action.triggered.connect(lambda checked, c=color: self._on_sm_highlight(c))
-            highlight_menu.addAction(action)
-        
-        # Schedule review actions
-        schedule_action = QAction("Schedule Review", self)
-        schedule_action.setToolTip("Schedule this item for review (Ctrl+Alt+S)")
-        schedule_action.setShortcut("Ctrl+Alt+S")
-        schedule_action.triggered.connect(self._on_sm_schedule)
-        
-        # Add actions to toolbar
-        toolbar.addAction(extract_action)
-        toolbar.addAction(cloze_action)
-        toolbar.addAction(priority_action)
-        toolbar.addSeparator()
-        toolbar.addAction(schedule_action)
-        toolbar.addSeparator()
-        
-        # Add highlight menu button
-        highlight_button = QPushButton("Highlight")
-        highlight_button.setMenu(highlight_menu)
-        toolbar.addWidget(highlight_button)
-        
-        # Add spacing
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
-        
-        # Add toolbar to layout before the web view
-        if hasattr(self, 'content_layout'):
-            # Insert the toolbar at the top
-            self.content_layout.insertWidget(0, toolbar)
-        
-        # Add JavaScript for SuperMemo features
-        js_code = """
-        (function() {
-            // SuperMemo Incremental Reading Enhancements
-            document.addEventListener('keydown', function(e) {
-                // Ctrl+Alt+Z - Fast forward (skip current item)
-                if (e.ctrlKey && e.altKey && e.code === 'KeyZ') {
-                    window.superMemo.skipItem();
-                }
-            });
+        // Add SuperMemo style toolbar
+        function addSuperMemoToolbar() {
+            // Create toolbar
+            const toolbar = document.createElement('div');
+            toolbar.id = 'sm-toolbar';
+            toolbar.style.position = 'fixed';
+            toolbar.style.bottom = '20px';
+            toolbar.style.right = '20px';
+            toolbar.style.zIndex = '1000';
+            toolbar.style.backgroundColor = 'rgba(50, 50, 50, 0.7)';
+            toolbar.style.padding = '5px';
+            toolbar.style.borderRadius = '5px';
+            toolbar.style.display = 'none';
             
-            // Make text easier to process in chunks
-            const style = document.createElement('style');
-            style.textContent = `
-                p, li { 
-                    margin-bottom: 1em; 
-                    line-height: 1.5;
-                }
-                .sm-highlight-red { background-color: rgba(255,0,0,0.3); }
-                .sm-highlight-orange { background-color: rgba(255,127,0,0.3); }
-                .sm-highlight-yellow { background-color: rgba(255,255,0,0.3); }
-                .sm-highlight-green { background-color: rgba(0,255,0,0.3); }
-                .sm-highlight-blue { background-color: rgba(0,0,255,0.3); }
-                .sm-extracted { border-left: 3px solid #0078D7; padding-left: 10px; }
-            `;
-            document.head.appendChild(style);
-            
-            window.superMemo = {
-                highlight: function(color) {
-                    const selection = window.getSelection();
-                    if (selection.rangeCount > 0) {
-                        const range = selection.getRangeAt(0);
-                        const span = document.createElement('span');
-                        span.className = 'sm-highlight-' + color;
-                        range.surroundContents(span);
+            // Extract button
+            const extractBtn = document.createElement('button');
+            extractBtn.innerText = 'Extract';
+            extractBtn.style.marginRight = '5px';
+            extractBtn.style.cursor = 'pointer';
+            extractBtn.onclick = function() {
+                if (smState.selectedText) {
+                    // Call back to Qt
+                    if (typeof window.callbackHandler !== 'undefined') {
+                        window.callbackHandler.extractText(smState.selectedText);
                     }
-                },
-                
-                extract: function() {
-                    const selection = window.getSelection();
-                    if (selection.rangeCount > 0) {
-                        const range = selection.getRangeAt(0);
-                        const div = document.createElement('div');
-                        div.className = 'sm-extracted';
-                        range.surroundContents(div);
-                        return selection.toString();
-                    }
-                    return '';
-                },
-                
-                skipItem: function() {
-                    // This would be connected to the review system
-                    console.log('Item skipped for later review');
+                    
+                    // Visual feedback
+                    extractBtn.style.backgroundColor = '#8f8';
+                    setTimeout(() => {
+                        extractBtn.style.backgroundColor = '';
+                    }, 500);
                 }
             };
-        })();
+            
+            // Cloze button
+            const clozeBtn = document.createElement('button');
+            clozeBtn.innerText = 'Cloze';
+            clozeBtn.style.marginRight = '5px';
+            clozeBtn.style.cursor = 'pointer';
+            clozeBtn.onclick = function() {
+                if (smState.selectedText) {
+                    // Call back to Qt
+                    if (typeof window.callbackHandler !== 'undefined') {
+                        window.callbackHandler.createCloze(smState.selectedText);
+                    }
+                    
+                    // Visual feedback
+                    clozeBtn.style.backgroundColor = '#8f8';
+                    setTimeout(() => {
+                        clozeBtn.style.backgroundColor = '';
+                    }, 500);
+                }
+            };
+            
+            // Skip button
+            const skipBtn = document.createElement('button');
+            skipBtn.innerText = 'Skip';
+            skipBtn.style.cursor = 'pointer';
+            skipBtn.onclick = function() {
+                // Call back to Qt
+                if (typeof window.callbackHandler !== 'undefined') {
+                    window.callbackHandler.skipItem();
+                }
+                
+                // Visual feedback
+                skipBtn.style.backgroundColor = '#f88';
+                setTimeout(() => {
+                    skipBtn.style.backgroundColor = '';
+                }, 500);
+            };
+            
+            // Add buttons to toolbar
+            toolbar.appendChild(extractBtn);
+            toolbar.appendChild(clozeBtn);
+            toolbar.appendChild(skipBtn);
+            
+            // Add toolbar to document
+            document.body.appendChild(toolbar);
+            
+            return toolbar;
+        }
+        
+        // Track text selection
+        document.addEventListener('selectionchange', function() {
+            const selection = window.getSelection();
+            const text = selection.toString().trim();
+            
+            // Store selection
+            smState.selectedText = text;
+            smState.lastSelection = selection;
+            
+            // Update toolbar visibility
+            const toolbar = document.getElementById('sm-toolbar');
+            if (toolbar) {
+                if (text) {
+                    // Position toolbar near selection
+                    if (selection.rangeCount > 0) {
+                        const range = selection.getRangeAt(0);
+                        const rect = range.getBoundingClientRect();
+                        
+                        // Position near selection but ensure it's visible
+                        toolbar.style.display = 'block';
+                        toolbar.style.bottom = 'auto';
+                        toolbar.style.right = 'auto';
+                        
+                        // Position above selection if there's room, otherwise below
+                        if (rect.top > 100) {
+                            toolbar.style.top = (rect.top - 40) + 'px';
+                        } else {
+                            toolbar.style.top = (rect.bottom + 10) + 'px';
+                        }
+                        
+                        // Center horizontally on selection
+                        toolbar.style.left = (rect.left + rect.width/2 - toolbar.offsetWidth/2) + 'px';
+                    }
+                } else {
+                    toolbar.style.display = 'none';
+                }
+            }
+            
+            // Send selection to Qt if we have a callback handler
+            if (text && typeof window.callbackHandler !== 'undefined') {
+                window.callbackHandler.selectionChanged(text);
+            }
+        });
+        
+        // Run when document is loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            // Add toolbar
+            addSuperMemoToolbar();
+            
+            // Add keyboard shortcuts
+            document.addEventListener('keydown', function(event) {
+                // Handle Ctrl+E for extract
+                if (event.ctrlKey && event.key === 'e') {
+                    event.preventDefault();
+                    const extractBtn = document.querySelector('#sm-toolbar button:nth-child(1)');
+                    if (extractBtn) extractBtn.click();
+                }
+                
+                // Handle Ctrl+C for cloze
+                if (event.ctrlKey && event.key === 'c' && event.altKey) {
+                    event.preventDefault();
+                    const clozeBtn = document.querySelector('#sm-toolbar button:nth-child(2)');
+                    if (clozeBtn) clozeBtn.click();
+                }
+                
+                // Handle Ctrl+S for skip
+                if (event.ctrlKey && event.key === 's') {
+                    event.preventDefault();
+                    const skipBtn = document.querySelector('#sm-toolbar button:nth-child(3)');
+                    if (skipBtn) skipBtn.click();
+                }
+            });
+        });
+        
+        // Initialize right away if document is already loaded
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+            setTimeout(function() {
+                addSuperMemoToolbar();
+            }, 100);
+        }
         """
         
         # Inject the SuperMemo JavaScript
-        web_view.page().runJavaScript(js_code)
+        web_view.page().runJavaScript(sm_script)
         
-        # Connect JavaScript bridge for communication
-        self.sm_channel = QWebChannel()
-        self.sm_callback = WebViewCallback(self)
-        self.sm_channel.registerObject("superMemoHandler", self.sm_callback)
-        web_view.page().setWebChannel(self.sm_channel)
+        # Connect JavaScript to handle selection changes
+        # This is already set up in _create_webview_and_setup
         
-        # Keep references alive
-        self.keep_alive(toolbar)
-        self.keep_alive(self.sm_channel)
-        self.keep_alive(self.sm_callback)
+        logger.debug("Added SuperMemo features to web view")
     
-    @pyqtSlot()
-    def _on_sm_extract(self):
-        """Create a SuperMemo-style extract from selected text."""
-        if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWebEngineView):
-            # Get selected text via JavaScript
-            self.content_edit.page().runJavaScript(
-                "window.superMemo.extract();",
-                self._handle_sm_extract_result
-            )
-    
-    def _handle_sm_extract_result(self, selected_text):
-        """Handle the extract creation from selected text."""
-        if not selected_text:
-            return
-            
+    def _restore_position(self):
+        """Restore previous reading position for the document."""
         try:
-            # Create a new extract with SuperMemo metadata
+            if not hasattr(self, 'document_id') or not self.document_id:
+                return
+                
+            # Check if we have a stored position for this document
+            from core.knowledge_base.models import DocumentReadingPosition
+            
+            position = self.db_session.query(DocumentReadingPosition)\
+                .filter_by(document_id=self.document_id)\
+                .first()
+                
+            if not position:
+                logger.debug(f"No reading position found for document {self.document_id}")
+                return
+                
+            # Restore position based on content type
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, use JavaScript to set scroll position
+                scroll_script = f"window.scrollTo(0, {position.position});"
+                self.web_view.page().runJavaScript(scroll_script)
+                logger.debug(f"Restored web view scroll position to {position.position}")
+                
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
+                # For widgets with scroll bars, set the value directly
+                scrollbar = self.content_edit.verticalScrollBar()
+                if scrollbar:
+                    scrollbar.setValue(position.position)
+                    logger.debug(f"Restored scroll position to {position.position}")
+                    
+            # Also restore any view state like zoom factor
+            if position.view_state:
+                try:
+                    # Parse the JSON view state
+                    import json
+                    view_state = json.loads(position.view_state)
+                    
+                    # Apply zoom factor if available
+                    if 'zoom_factor' in view_state and hasattr(self, 'web_view') and self.web_view:
+                        self.web_view.setZoomFactor(view_state['zoom_factor'])
+                        logger.debug(f"Restored zoom factor to {view_state['zoom_factor']}")
+                        
+                except Exception as e:
+                    logger.warning(f"Error restoring view state: {e}")
+                    
+            logger.debug(f"Successfully restored reading position for document {self.document_id}")
+                
+        except Exception as e:
+            logger.exception(f"Error restoring reading position: {e}")
+            # Continue without restoring position
+
+    def _handle_webview_selection(self, text):
+        """Handle text selection in the WebView."""
+        if text and text.strip():
+            self.selected_text = text.strip()
+            logger.debug(f"Selected text in WebView: {text[:50]}...")
+            
+    def _on_create_extract(self):
+        """Create an extract from the selected text."""
+        try:
+            if not self.selected_text or len(self.selected_text.strip()) < 5:
+                logger.warning("No text selected for extract creation")
+                return
+                
+            # Create extract
             from core.knowledge_base.models import Extract
             
-            # Include SuperMemo priority and scheduling data
             extract = Extract(
-                document_id=self.document.id,
-                content=selected_text,
-                source_page=getattr(self.document, 'current_page', 0),
-                created_at=datetime.now(),
-                metadata={
-                    "sm_priority": 50,  # Default priority (0-100)
-                    "sm_interval": 1,   # Days until next review
-                    "sm_ease_factor": 2.5,  # SuperMemo ease factor
-                    "sm_extract_type": "topic"  # SuperMemo concept
-                }
+                document_id=self.document_id,
+                content=self.selected_text,
+                created_date=datetime.utcnow(),
+                priority=50  # Default priority
             )
             
-            # Save to database
+            # Save extract
             self.db_session.add(extract)
             self.db_session.commit()
             
-            # Show confirmation
-            QApplication.instance().beep()
+            # Emit the extract created signal
+            self.extractCreated.emit(extract.id)
             
-            # Notify about the new extract
-            if hasattr(self, 'extractCreated'):
-                self.extractCreated.emit(extract.id)
-                
-            logger.info(f"Created SuperMemo extract {extract.id} with priority 50")
+            logger.info(f"Created extract: {extract.id}")
+            
+            # Clear selection
+            self.selected_text = ""
+            
+            return extract.id
             
         except Exception as e:
-            logger.exception(f"Error creating SuperMemo extract: {e}")
-    
-    @pyqtSlot()
-    def _on_sm_cloze(self):
-        """Create a SuperMemo-style cloze deletion from selected text."""
-        if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWebEngineView):
-            # Get selected text via JavaScript
-            self.content_edit.page().runJavaScript(
-                "window.getSelection().toString();",
-                self._handle_sm_cloze_result
-            )
-    
-    def _handle_sm_cloze_result(self, selected_text):
-        """Handle the cloze deletion creation from selected text."""
-        if not selected_text:
-            return
+            logger.exception(f"Error creating extract: {e}")
+            return None
             
+    def _handle_sm_extract_result(self, text):
+        """Handle extract creation from SuperMemo JS callback."""
+        self.selected_text = text
+        extract_id = self._on_create_extract()
+        
+        if extract_id:
+            logger.info(f"Created extract from SuperMemo: {extract_id}")
+            
+            # Show visual feedback in web view if available
+            if hasattr(self, 'web_view') and self.web_view:
+                feedback_script = """
+                // Show extract confirmation
+                const feedback = document.createElement('div');
+                feedback.textContent = 'Extract created!';
+                feedback.style.position = 'fixed';
+                feedback.style.top = '20px';
+                feedback.style.left = '50%';
+                feedback.style.transform = 'translateX(-50%)';
+                feedback.style.backgroundColor = 'rgba(0, 200, 0, 0.8)';
+                feedback.style.color = 'white';
+                feedback.style.padding = '10px 20px';
+                feedback.style.borderRadius = '5px';
+                feedback.style.zIndex = '9999';
+                feedback.style.fontWeight = 'bold';
+                
+                document.body.appendChild(feedback);
+                
+                // Remove after 2 seconds
+                setTimeout(() => {
+                    feedback.style.opacity = '0';
+                    feedback.style.transition = 'opacity 0.5s';
+                    setTimeout(() => feedback.remove(), 500);
+                }, 2000);
+                """
+                self.web_view.page().runJavaScript(feedback_script)
+        
+    def _handle_sm_cloze_result(self, text):
+        """Handle cloze creation from SuperMemo JS callback."""
         try:
-            # Create a new learning item with cloze deletion
-            from core.knowledge_base.models import LearningItem
+            if not text or len(text.strip()) < 5:
+                logger.warning("Text too short for cloze creation")
+                return
+                
+            # Create cloze
+            from core.knowledge_base.models import Extract
             
-            # Create cloze format: text with [...] replacing the selection
-            content = self.content_text
-            cloze_text = content.replace(selected_text, f"[...]")
+            # Mark this as a cloze extract using a special prefix
+            cloze_content = f"[CLOZE] {text}"
             
-            # Create the learning item with SuperMemo properties
-            item = LearningItem(
-                content=cloze_text,
-                answer=selected_text,
-                item_type="cloze",
-                document_id=self.document.id,
-                metadata={
-                    "sm_priority": 60,  # Default priority for cloze (0-100)
-                    "sm_interval": 1,   # Days until next review
-                    "sm_ease_factor": 2.5,  # SuperMemo ease factor
-                    "sm_repetitions": 0  # Number of reviews
-                }
+            extract = Extract(
+                document_id=self.document_id,
+                content=cloze_content,
+                created_date=datetime.utcnow(),
+                priority=50,  # Default priority
+                extract_type="cloze"
             )
             
-            # Save to database
-            self.db_session.add(item)
+            # Save extract
+            self.db_session.add(extract)
             self.db_session.commit()
             
-            # Show confirmation
-            QApplication.instance().beep()
+            # Emit the extract created signal
+            self.extractCreated.emit(extract.id)
             
-            logger.info(f"Created SuperMemo cloze item {item.id} with priority 60")
+            logger.info(f"Created cloze extract: {extract.id}")
             
+            # Show visual feedback in web view if available
+            if hasattr(self, 'web_view') and self.web_view:
+                feedback_script = """
+                // Show cloze confirmation
+                const feedback = document.createElement('div');
+                feedback.textContent = 'Cloze created!';
+                feedback.style.position = 'fixed';
+                feedback.style.top = '20px';
+                feedback.style.left = '50%';
+                feedback.style.transform = 'translateX(-50%)';
+                feedback.style.backgroundColor = 'rgba(0, 100, 200, 0.8)';
+                feedback.style.color = 'white';
+                feedback.style.padding = '10px 20px';
+                feedback.style.borderRadius = '5px';
+                feedback.style.zIndex = '9999';
+                feedback.style.fontWeight = 'bold';
+                
+                document.body.appendChild(feedback);
+                
+                // Remove after 2 seconds
+                setTimeout(() => {
+                    feedback.style.opacity = '0';
+                    feedback.style.transition = 'opacity 0.5s';
+                    setTimeout(() => feedback.remove(), 500);
+                }, 2000);
+                """
+                self.web_view.page().runJavaScript(feedback_script)
+                
         except Exception as e:
-            logger.exception(f"Error creating SuperMemo cloze: {e}")
-    
-    @pyqtSlot()
-    def _on_sm_priority(self):
-        """Set SuperMemo priority for the current document or selection."""
-        # Create a dialog for setting priority
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Set SuperMemo Priority")
-        layout = QVBoxLayout()
-        
-        # Slider for priority (0-100)
-        priority_slider = QSlider(Qt.Orientation.Horizontal)
-        priority_slider.setMinimum(0)
-        priority_slider.setMaximum(100)
-        priority_slider.setValue(50)  # Default
-        priority_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        priority_slider.setTickInterval(10)
-        
-        # Label to show value
-        value_label = QLabel("Priority: 50")
-        priority_slider.valueChanged.connect(lambda v: value_label.setText(f"Priority: {v}"))
-        
-        # Add to layout
-        layout.addWidget(QLabel("Set learning priority (0-100):"))
-        layout.addWidget(priority_slider)
-        layout.addWidget(value_label)
-        
-        # Buttons
-        buttons = QHBoxLayout()
-        ok_button = QPushButton("OK")
-        cancel_button = QPushButton("Cancel")
-        
-        ok_button.clicked.connect(dialog.accept)
-        cancel_button.clicked.connect(dialog.reject)
-        
-        buttons.addWidget(ok_button)
-        buttons.addWidget(cancel_button)
-        
-        layout.addLayout(buttons)
-        dialog.setLayout(layout)
-        
-        # Show dialog and process result
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            priority = priority_slider.value()
+            logger.exception(f"Error creating cloze: {e}")
             
-            # Update document metadata with SuperMemo priority
-            if hasattr(self, 'document') and self.document:
-                metadata = self.document.metadata or {}
-                metadata['sm_priority'] = priority
-                self.document.metadata = metadata
+    def _on_content_menu(self, position):
+        """Show custom context menu for content."""
+        menu = QMenu(self)
+        
+        # Only add actions if we have a document
+        if hasattr(self, 'document_id') and self.document_id:
+            # Get selected text
+            has_selection = False
+            selected_text = ""
+            
+            if hasattr(self, 'web_view') and self.web_view:
+                # For WebView, get current selection via JavaScript
+                self.web_view.page().runJavaScript(
+                    "window.getSelection().toString();",
+                    lambda result: setattr(self, '_temp_selection_result', result)
+                )
                 
-                # Save changes
-                self.db_session.commit()
+                # Process events to ensure JavaScript result is available
+                for _ in range(10):  # Try a few iterations
+                    QApplication.processEvents()
+                    if hasattr(self, '_temp_selection_result'):
+                        selected_text = self._temp_selection_result
+                        if selected_text and len(selected_text.strip()) > 0:
+                            has_selection = True
+                            self.selected_text = selected_text
+                        break
+            
+            elif hasattr(self, 'text_edit') and self.text_edit:
+                # For text edit widgets
+                cursor = self.text_edit.textCursor()
+                has_selection = cursor.hasSelection()
+                if has_selection:
+                    selected_text = cursor.selectedText()
+                    self.selected_text = selected_text
+            
+            # Add extract action if text is selected
+            if has_selection:
+                extract_action = QAction("Extract Selection", self)
+                extract_action.triggered.connect(self._on_extract)
+                menu.addAction(extract_action)
                 
-                logger.info(f"Set SuperMemo priority {priority} for document {self.document.id}")
+                highlight_action = QAction("Highlight Selection", self)
+                highlight_action.triggered.connect(self._on_highlight)
+                menu.addAction(highlight_action)
+                
+                menu.addSeparator()
+            
+            # Add general document actions
+            add_to_ir_action = QAction("Add to Incremental Reading", self)
+            add_to_ir_action.triggered.connect(self._on_add_to_incremental_reading)
+            menu.addAction(add_to_ir_action)
+            
+            # Add summarize action
+            summarize_action = QAction("Summarize Document", self)
+            summarize_action.triggered.connect(self.summarize_current_content)
+            menu.addAction(summarize_action)
+            
+            menu.addSeparator()
+        
+        # Add clipboard actions
+        if hasattr(self, 'selected_text') and self.selected_text:
+            copy_action = QAction("Copy", self)
+            copy_action.triggered.connect(
+                lambda: QApplication.clipboard().setText(self.selected_text)
+            )
+            menu.addAction(copy_action)
+        
+        # Show menu if it has actions
+        if not menu.isEmpty():
+            menu.exec(self.mapToGlobal(position))
     
-    @pyqtSlot(str)
-    def _on_sm_highlight(self, color):
-        """Apply SuperMemo-style highlighting to selected text."""
-        if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWebEngineView):
-            # Map the color to a color name for JavaScript
-            color_map = {
-                "#FF0000": "red",     # Red
-                "#FF7F00": "orange",  # Orange
-                "#FFFF00": "yellow",  # Yellow
-                "#00FF00": "green",   # Green
-                "#0000FF": "blue"     # Blue
-            }
+    def _set_error_message(self, message):
+        """Display an error message in the content area."""
+        error_label = QLabel(message)
+        error_label.setWordWrap(True)
+        error_label.setStyleSheet("color: red; padding: 20px;")
+        self.content_layout.addWidget(error_label)
+    
+    def _export_extracts(self):
+        """Export all extracts for the current document."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            from PyQt6.QtWidgets import QFileDialog
             
-            color_name = color_map.get(color, "yellow")
-            
-            # Apply the highlight via JavaScript
-            self.content_edit.page().runJavaScript(
-                f"window.superMemo.highlight('{color_name}');"
+            # Ask for save location
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Export Extracts", "", "Text Files (*.txt);;HTML Files (*.html);;All Files (*)"
             )
             
-            logger.debug(f"Applied SuperMemo {color_name} highlight")
-    
-    @pyqtSlot()
-    def _on_sm_schedule(self):
-        """Schedule the current document for SuperMemo-style review."""
-        # Create dialog for scheduling
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Schedule Review")
-        layout = QVBoxLayout()
-        
-        # Days until next review
-        days_spinner = QLineEdit()
-        days_spinner.setText("1")  # Default: tomorrow
-        days_spinner.setValidator(QIntValidator(1, 365))
-        
-        # Add to layout
-        layout.addWidget(QLabel("Days until next review:"))
-        layout.addWidget(days_spinner)
-        
-        # Add SuperMemo Algorithm options
-        algorithm_checkbox = QCheckBox("Use SuperMemo SM-18 algorithm")
-        algorithm_checkbox.setChecked(True)
-        layout.addWidget(algorithm_checkbox)
-        
-        # Buttons
-        buttons = QHBoxLayout()
-        ok_button = QPushButton("Schedule")
-        cancel_button = QPushButton("Cancel")
-        
-        ok_button.clicked.connect(dialog.accept)
-        cancel_button.clicked.connect(dialog.reject)
-        
-        buttons.addWidget(ok_button)
-        buttons.addWidget(cancel_button)
-        
-        layout.addLayout(buttons)
-        dialog.setLayout(layout)
-        
-        # Show dialog and process result
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            try:
-                days = int(days_spinner.text())
-                use_sm_algorithm = algorithm_checkbox.isChecked()
+            if not file_path:
+                return
                 
-                # Update document metadata with scheduling information
-                if hasattr(self, 'document') and self.document:
-                    metadata = self.document.metadata or {}
-                    
-                    # Calculate next review date
-                    from datetime import datetime, timedelta
-                    next_review = datetime.now() + timedelta(days=days)
-                    
-                    # Update metadata
-                    metadata['sm_next_review'] = next_review.isoformat()
-                    metadata['sm_interval'] = days
-                    
-                    if use_sm_algorithm:
-                        # Apply SuperMemo SM-18 algorithm factors
-                        metadata['sm_ease_factor'] = metadata.get('sm_ease_factor', 2.5)
-                        metadata['sm_repetitions'] = metadata.get('sm_repetitions', 0) + 1
-                    
-                    self.document.metadata = metadata
-                    self.document.last_reviewed = datetime.now()
-                    
-                    # Save changes
-                    self.db_session.commit()
-                    
-                    logger.info(f"Scheduled document {self.document.id} for review in {days} days")
-                    
-                    # Show confirmation
-                    QMessageBox.information(
-                        self,
-                        "Review Scheduled",
-                        f"Document scheduled for review in {days} days."
-                    )
-                    
-            except Exception as e:
-                logger.exception(f"Error scheduling review: {e}")
-                QMessageBox.warning(
-                    self,
-                    "Error",
-                    f"Could not schedule review: {str(e)}"
+            # Get all extracts for this document
+            from core.knowledge_base.models import Extract
+            
+            extracts = self.db_session.query(Extract)\
+                .filter(Extract.document_id == self.document_id)\
+                .order_by(Extract.created_date)\
+                .all()
+                
+            if not extracts:
+                QMessageBox.information(
+                    self, "Export Extracts", 
+                    "No extracts found for this document."
                 )
-
-    # Import necessary module to avoid error
-    from datetime import datetime
-
-    def _update_theme(self):
-        """Update the theme for this document view."""
-        try:
-            # Apply theme to the content if it's a web view
-            if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWebEngineView):
-                # Get the theme manager
-                from core.utils.theme_manager import ThemeManager
-                from PyQt6.QtWidgets import QApplication
+                return
                 
-                # Get or create theme manager
-                app = QApplication.instance()
-                main_window = None
-                for widget in app.topLevelWidgets():
-                    if widget.__class__.__name__ == "MainWindow":
-                        main_window = widget
-                        break
+            # Format depends on file extension
+            if file_path.lower().endswith('.html'):
+                # Export as HTML
+                html_content = f"""<!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>Extracts from {self.document.title}</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; line-height: 1.6; margin: 20px; }}
+                        h1 {{ color: #333; }}
+                        .extract {{ border: 1px solid #ddd; padding: 10px; margin: 10px 0; }}
+                        .extract-date {{ color: #666; font-size: 0.8em; }}
+                    </style>
+                </head>
+                <body>
+                    <h1>Extracts from: {self.document.title}</h1>
+                """
                 
-                theme_manager = None
-                if main_window and hasattr(main_window, 'theme_manager'):
-                    theme_manager = main_window.theme_manager
-                else:
-                    # Create a new instance if not available
-                    from core.settings.settings_manager import SettingsManager
-                    settings_manager = SettingsManager()
-                    theme_manager = ThemeManager(settings_manager)
+                for extract in extracts:
+                    created_date = extract.created_date.strftime('%Y-%m-%d %H:%M:%S')
+                    html_content += f"""
+                    <div class="extract">
+                        <div class="extract-content">{extract.content}</div>
+                        <div class="extract-date">Created: {created_date}</div>
+                    </div>
+                    """
                 
-                # Apply theme to the web content
-                from ui.load_epub_helper import apply_theme_background
-                apply_theme_background(self.content_edit, theme_manager)
+                html_content += """
+                </body>
+                </html>
+                """
                 
-                logger.debug("Updated theme for document view")
+                # Write to file
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                    
+            else:
+                # Export as plain text
+                text_content = f"EXTRACTS FROM: {self.document.title}\n"
+                text_content += "=" * 50 + "\n\n"
+                
+                for extract in extracts:
+                    created_date = extract.created_date.strftime('%Y-%m-%d %H:%M:%S')
+                    text_content += f"{extract.content}\n\n"
+                    text_content += f"Created: {created_date}\n"
+                    text_content += "-" * 40 + "\n\n"
+                
+                # Write to file
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(text_content)
+            
+            QMessageBox.information(
+                self, "Export Successful", 
+                f"Extracts exported to {file_path}"
+            )
+                
         except Exception as e:
-            logger.exception(f"Error updating theme: {e}")
+            logger.exception(f"Error exporting extracts: {e}")
+            QMessageBox.warning(
+                self, "Export Error", 
+                f"An error occurred while exporting extracts: {str(e)}"
+            )

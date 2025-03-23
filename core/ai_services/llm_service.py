@@ -64,34 +64,65 @@ class OpenAIService(LLMService):
 class GeminiService(LLMService):
     """Google Gemini API integration."""
     
-    def __init__(self, api_key: str = None, model: str = "gemini-pro"):
+    def __init__(self, api_key: str = None, model: str = "gemini-1.5-pro"):
         self.api_key = api_key
         self.model = model
     
     def generate_text(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
         """Generate text using Google Gemini API."""
+        try:
+            # Import here to prevent dependency requirement when not using this service
+            import google.generativeai as genai
+        except ImportError:
+            logger.error("Google GenerativeAI Python package not installed")
+            return "Error: Google GenerativeAI Python package not installed."
+
         if not self.api_key:
             logger.error("Gemini API key not set")
             return "Error: Gemini API key not set"
-        
+
         try:
-            import google.generativeai as genai
-            
+            # Configure the Gemini API
             genai.configure(api_key=self.api_key)
             
-            model = genai.GenerativeModel(self.model)
+            # Map model names to appropriate Gemini API model identifiers
+            model_mapping = {
+                "gemini-2.0-pro": "gemini-2.0-pro",
+                "gemini-2.0-flash": "gemini-2.0-flash",
+                "gemini-2.0-flash-lite": "gemini-2.0-flash-lite",
+                "gemini-1.5-pro": "gemini-1.5-pro",
+                "gemini-1.5-flash": "gemini-1.5-flash"
+            }
+            
+            # Use the mapped model name or default to the original name
+            model_name = model_mapping.get(self.model, self.model)
+            
+            # For older models that might not have the prefix
+            if not model_name.startswith("models/"):
+                model_name = f"models/{model_name}"
+                
+            # Get the model
+            model = genai.GenerativeModel(model_name)
+            
+            # Generate content
+            generation_config = {
+                "temperature": temperature,
+            }
+            if max_tokens:
+                generation_config["max_output_tokens"] = max_tokens
+                
             response = model.generate_content(
                 prompt,
-                generation_config={
-                    "max_output_tokens": max_tokens,
-                    "temperature": temperature
-                }
+                generation_config=generation_config
             )
             
-            return response.text.strip()
-            
-        except ImportError:
-            return "Error: Google GenerativeAI Python package not installed"
+            # Extract the text from the response
+            if hasattr(response, 'text'):
+                return response.text.strip()
+            else:
+                # Handle different response formats
+                return str(response)
+                
         except Exception as e:
             logger.exception(f"Error generating text with Gemini: {e}")
             return f"Error generating text: {str(e)}"
@@ -101,25 +132,48 @@ class GeminiService(LLMService):
         return bool(self.api_key)
 
 class ClaudeService(LLMService):
-    """Anthropic Claude API integration."""
-    
-    def __init__(self, api_key: str = None, model: str = "claude-3-haiku-20240307"):
+    """Service for interacting with Anthropic Claude API."""
+
+    def __init__(self, api_key=None, model="claude-3-5-sonnet-20241022"):
         self.api_key = api_key
         self.model = model
-    
+
     def generate_text(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
-        """Generate text using Anthropic Claude API."""
+        """Generate text using Claude API."""
         if not self.api_key:
             logger.error("Claude API key not set")
             return "Error: Claude API key not set"
-        
+
         try:
+            # Check for Anthropic library
             import anthropic
-            
+        except ImportError:
+            logger.error("Anthropic Python package not installed")
+            return "Error: Anthropic Python package not installed. Run 'pip install anthropic'"
+
+        try:
             client = anthropic.Anthropic(api_key=self.api_key)
             
-            response = client.messages.create(
-                model=self.model,
+            # Handle model validation
+            valid_models = [
+                "claude-3-7-sonnet-20250219",
+                "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022",
+                "claude-3-opus-20240229",
+                "claude-3-sonnet-20240229",
+                "claude-3-haiku-20240307",
+                "claude-2.0",
+                "claude-2"
+            ]
+            
+            if self.model not in valid_models:
+                logger.warning(f"Unknown Claude model: {self.model}, using claude-3-5-sonnet-20241022 instead")
+                model = "claude-3-5-sonnet-20241022"
+            else:
+                model = self.model
+            
+            message = client.messages.create(
+                model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 messages=[
@@ -127,10 +181,8 @@ class ClaudeService(LLMService):
                 ]
             )
             
-            return response.content[0].text.strip()
-            
-        except ImportError:
-            return "Error: Anthropic Python package not installed"
+            return message.content[0].text
+
         except Exception as e:
             logger.exception(f"Error generating text with Claude: {e}")
             return f"Error generating text: {str(e)}"
@@ -246,17 +298,17 @@ class LLMServiceFactory:
         """Create an LLM service based on the service type."""
         if service_type == "openai":
             api_key = settings_manager.get_setting("api", "openai_api_key", "")
-            model = settings_manager.get_setting("api", "openai_model", "gpt-3.5-turbo")
+            model = settings_manager.get_setting("api", "openai_model", "gpt-4o")
             return OpenAIService(api_key, model)
         
         elif service_type == "gemini":
             api_key = settings_manager.get_setting("api", "gemini_api_key", "")
-            model = settings_manager.get_setting("api", "gemini_model", "gemini-pro")
+            model = settings_manager.get_setting("api", "gemini_model", "gemini-1.5-pro")
             return GeminiService(api_key, model)
         
         elif service_type == "claude":
             api_key = settings_manager.get_setting("api", "claude_api_key", "")
-            model = settings_manager.get_setting("api", "claude_model", "claude-3-haiku-20240307")
+            model = settings_manager.get_setting("api", "claude_model", "claude-3-5-sonnet-20241022")
             return ClaudeService(api_key, model)
         
         elif service_type == "openrouter":
@@ -270,5 +322,5 @@ class LLMServiceFactory:
             return OllamaService(host, model)
         
         else:
-            logger.error(f"Unknown LLM service type: {service_type}")
+            logger.error(f"Unknown service type: {service_type}")
             return None 

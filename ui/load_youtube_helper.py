@@ -170,7 +170,7 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
         settings.setAttribute(settings.WebAttribute.PluginsEnabled, True)
         
         # Create video URL
-        video_url = "https://www.youtube.com/embed/{0}?enablejsapi=1&origin=file://&autoplay=1&start={1}&fs=1&rel=0&modestbranding=1&controls=1&showinfo=1".format(
+        video_url = "https://www.youtube.com/embed/{0}?enablejsapi=1&origin=https://www.youtube.com&autoplay=1&start={1}&fs=1&rel=0&modestbranding=1&controls=1&showinfo=1".format(
             video_id, target_position
         )
         
@@ -514,7 +514,7 @@ def create_youtube_player_html(document, video_id, target_position):
                         'rel': 0,
                         'fs': 1,
                         'modestbranding': 1,
-                        'origin': window.location.origin || 'file://'
+                        'origin': window.location.origin || 'https://www.youtube.com'
                     }},
                     events: {{
                         'onReady': onPlayerReady,
@@ -717,8 +717,6 @@ def create_youtube_player_html(document, video_id, target_position):
                 iframe.frameBorder = '0';
                 iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
                 iframe.allowFullscreen = true;
-                
-                // Add to container
                 container.appendChild(iframe);
                 
                 // Start basic tracking

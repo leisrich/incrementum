@@ -625,3 +625,100 @@ class NLPExtractor:
             })
         
         return result
+    
+    def suggest_tags_for_extract(self, extract_id: int, max_suggestions: int = 5) -> List[str]:
+        """
+        Suggest tags for an extract based on content analysis.
+        
+        Args:
+            extract_id: ID of the extract
+            max_suggestions: Maximum number of tag suggestions to return
+            
+        Returns:
+            List of suggested tag names
+        """
+        # Get the extract
+        extract = self.db_session.query(Extract).get(extract_id)
+        if not extract:
+            logger.error(f"Extract not found: {extract_id}")
+            return []
+        
+        # Get extract content
+        content = extract.content
+        if not content or len(content.strip()) < 10:
+            return []
+        
+        # Process with spaCy
+        doc = self.nlp(content)
+        
+        # Collect potential tags from different sources
+        potential_tags = []
+        
+        # 1. Extract named entities as potential tags
+        for ent in doc.ents:
+            if ent.label_ in ['ORG', 'PERSON', 'GPE', 'LOC', 'PRODUCT', 'WORK_OF_ART', 'EVENT']:
+                # Clean up the entity text
+                tag_text = ent.text.strip().lower()
+                # Remove any trailing punctuation
+                tag_text = re.sub(r'[.,;:!?]$', '', tag_text)
+                
+                if tag_text and len(tag_text) > 2:  # Avoid too short tags
+                    potential_tags.append({
+                        'text': tag_text,
+                        'source': 'entity',
+                        'score': 0.8  # Higher score for entities
+                    })
+        
+        # 2. Extract keywords using noun chunks
+        for chunk in doc.noun_chunks:
+            # Skip chunks that are too short or just pronouns
+            if len(chunk.text) <= 2 or chunk.root.pos_ == 'PRON':
+                continue
+                
+            # Clean up the chunk text
+            tag_text = chunk.text.strip().lower()
+            tag_text = re.sub(r'[.,;:!?]$', '', tag_text)
+            
+            # Only keep chunks that are not just articles or determiners
+            if tag_text and not tag_text in ['the', 'a', 'an', 'this', 'that', 'these', 'those']:
+                potential_tags.append({
+                    'text': tag_text,
+                    'source': 'noun_chunk',
+                    'score': 0.6  # Medium score
+                })
+        
+        # 3. Extract important single terms
+        important_tokens = []
+        for token in doc:
+            # Keep only content words (nouns, verbs, adjectives, adverbs)
+            if (token.pos_ in ['NOUN', 'PROPN', 'VERB', 'ADJ', 'ADV'] and 
+                not token.is_stop and 
+                len(token.text) > 3):
+                
+                # Lemmatize the token to get base form
+                lemma = token.lemma_.lower()
+                
+                important_tokens.append({
+                    'text': lemma,
+                    'source': 'token',
+                    'score': 0.3 + (0.1 * token.prob)  # Base score plus word probability
+                })
+        
+        # Combine all potential tags
+        all_potential_tags = potential_tags + important_tokens
+        
+        # Remove duplicates by keeping highest score
+        unique_tags = {}
+        for tag in all_potential_tags:
+            text = tag['text']
+            if text in unique_tags:
+                if tag['score'] > unique_tags[text]['score']:
+                    unique_tags[text] = tag
+            else:
+                unique_tags[text] = tag
+        
+        # Sort by score and return top N
+        sorted_tags = sorted(unique_tags.values(), key=lambda x: x['score'], reverse=True)
+        
+        # Extract just the text for the final list
+        return [tag['text'] for tag in sorted_tags[:max_suggestions]]
