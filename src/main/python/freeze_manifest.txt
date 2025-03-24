@@ -1,0 +1,5 @@
+# This file tells fbs which additional files to include
+# Format: target path -> source path
+
+# Data directory
+data/

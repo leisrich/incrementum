@@ -1,0 +1,388 @@
+.
+├── ~
+├── app_output.log
+├── arxiv
+│   ├── 2310.18862v1_Counterfactually_Probing_Language_Identity_in_Multilingual_Models.pdf
+│   ├── 2502.18481v1_MDE_Modality_Discrimination_Enhancement_for_Multi-modal_Recommendation.pdf
+│   └── 2502.19249v1_Between_Circuits_and_Chomsky_Pre-pretraining_on_Formal_Languages__Imparts_Linguistic_Biases.pdf
+├── assets
+│   ├── generate_icon.py
+│   ├── icons
+│   │   ├── incrementum_1024.png
+│   │   ├── incrementum_128.png
+│   │   ├── incrementum_16.png
+│   │   ├── incrementum_22.png
+│   │   ├── incrementum_24.png
+│   │   ├── incrementum_256.png
+│   │   ├── incrementum_32.png
+│   │   ├── incrementum_48.png
+│   │   ├── incrementum_512.png
+│   │   ├── incrementum_64.png
+│   │   ├── incrementum.ico
+│   │   └── incrementum.png
+│   └── __init__.py
+├── build
+│   └── Incrementum
+│       ├── Analysis-00.toc
+│       ├── base_library.zip
+│       ├── EXE-00.toc
+│       ├── Incrementum.pkg
+│       ├── localpycs
+│       ├── PKG-00.toc
+│       ├── PYZ-00.pyz
+│       ├── PYZ-00.toc
+│       ├── warn-Incrementum.txt
+│       └── xref-Incrementum.html
+├── build_linux.sh
+├── build_macos.sh
+├── BUILD.md
+├── build_windows.bat
+├── core
+│   ├── ai_services
+│   │   ├── content_processor.py
+│   │   ├── __init__.py
+│   │   └── llm_service.py
+│   ├── content_extractor
+│   │   ├── extractor.py
+│   │   ├── __init__.py
+│   │   └── nlp_extractor.py
+│   ├── document_processor
+│   │   ├── arxiv_importer.py
+│   │   ├── document_importer.py
+│   │   ├── handlers
+│   │   ├── __init__.py
+│   │   ├── nlp_extractor.py
+│   │   ├── processor.py
+│   │   ├── summarizer_manager.py
+│   │   └── summarizer.py
+│   ├── extractor.py
+│   ├── __init__.py
+│   ├── knowledge_base
+│   │   ├── backup_manager.py
+│   │   ├── database_migration.py
+│   │   ├── database.py
+│   │   ├── export_manager.py
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── search_engine.py
+│   │   ├── settings_manager.py
+│   │   └── tag_manager.py
+│   ├── knowledge_network
+│   │   ├── __init__.py
+│   │   └── network_builder.py
+│   ├── sm18.py
+│   ├── spaced_repetition
+│   │   ├── fsrs.py
+│   │   ├── incremental_reading.py
+│   │   ├── __init__.py
+│   │   ├── item_analyzer.py
+│   │   ├── queue_manager.py
+│   │   ├── sm18.py
+│   │   ├── sm_html_exporter.py
+│   │   └── supermemo_scheduler.py
+│   └── utils
+│       ├── category_helper.py
+│       ├── dark.json
+│       ├── dark.qss
+│       ├── encoding_helper.py
+│       ├── encoding_patch.py
+│       ├── __init__.py
+│       ├── light.json
+│       ├── rss_feed_manager.py
+│       ├── settings_manager.py
+│       ├── shortcuts.py
+│       └── theme_manager.py
+├── data
+│   ├── documents
+│   │   ├── html_20250323_091527_parkinsons-gut-bacteria-link-suggests-an-unexpected-simple-treatment.html
+│   │   ├── html_20250323_092155_Evolutionary_biology.html
+│   │   ├── html_20250323_092811_Evolutionary_biology.html
+│   │   ├── html_20250323_092826_Evolutionary_biology.html
+│   │   └── Robert Wright - The Moral Animal_ Why We Are the Way We Are. The New Science of Evolutionary Psychology-Vintage (1995).epub
+│   ├── incrementum.db
+│   ├── incrementum.db.backup-20250323114233
+│   ├── incrementum.db.backup-20250323121013
+│   ├── incrementum.db.backup-20250323202421
+│   └── youtube_videos
+│       ├── 3p-Eyt7-BBg.json
+│       ├── eCvyUyk8jmk.json
+│       ├── NvsaineOYWk.json
+│       ├── uX2txbQp1Fc.json
+│       ├── youtube_20vUNgRdB4o.json
+│       ├── youtube_2hjbycmXZ54.json
+│       ├── youtube_3p-Eyt7-BBg.json
+│       ├── youtube_45PB8u0f9U0.json
+│       ├── youtube_72GtkP6nP_A.json
+│       ├── youtube_7qype7X0zJ8.json
+│       ├── youtube_B0CQVnAN_VY.json
+│       ├── youtube_JkRZ-Hc7PzE.json
+│       ├── youtube_Lzk4l0ZnFnk.json
+│       ├── youtube_N2aqn4jvwOM.json
+│       ├── youtube_Q7bQ013FOJg.json
+│       ├── youtube_qJZ1Ez28C-A.json
+│       ├── youtube_u8m7hzqsM58.json
+│       ├── youtube_UgsKAb-gKpE.json
+│       ├── youtube_xo9T8SlBUaI.json
+│       └── youtube_xT4jxQUl0X8.json
+├── dist
+│   ├── assets
+│   │   ├── generate_icon.py
+│   │   ├── icons
+│   │   └── __init__.py
+│   ├── data
+│   ├── Incrementum
+│   ├── incrementum.desktop
+│   ├── incrementum.log
+│   └── README.txt
+├── docs
+│   ├── custom_themes.md
+│   ├── developer
+│   │   └── audio_implementation.md
+│   ├── FSRS_README.md
+│   ├── IMPORT_OPTIONS.md
+│   ├── user_guide
+│   │   └── audio_files.md
+│   └── YOUTUBE_TRANSCRIPTS.md
+├── fix_dependencies.py
+├── fix_docx.py
+├── incrementum
+│   ├── bin
+│   │   ├── activate
+│   │   ├── activate.csh
+│   │   ├── activate.fish
+│   │   ├── Activate.ps1
+│   │   ├── chardetect
+│   │   ├── csv2rdf
+│   │   ├── cursor-bin.AppImage -> /opt/cursor-bin/cursor-bin.AppImage
+│   │   ├── dumppdf.py
+│   │   ├── f2py
+│   │   ├── git-filter-repo
+│   │   ├── html2text
+│   │   ├── markdown-it
+│   │   ├── nib-conform
+│   │   ├── nib-convert
+│   │   ├── nib-dicomfs
+│   │   ├── nib-diff
+│   │   ├── nib-ls
+│   │   ├── nib-nifti-dx
+│   │   ├── nib-roi
+│   │   ├── nib-stats
+│   │   ├── nib-tck2trk
+│   │   ├── nib-trk2tck
+│   │   ├── nipypecli
+│   │   ├── nltk
+│   │   ├── normalizer
+│   │   ├── numpy-config
+│   │   ├── parrec2nii
+│   │   ├── pdf2txt.py
+│   │   ├── pip
+│   │   ├── pip3
+│   │   ├── pip3.11
+│   │   ├── prov-compare
+│   │   ├── prov-convert
+│   │   ├── pygmentize
+│   │   ├── pyi-archive_viewer
+│   │   ├── pyi-bindepend
+│   │   ├── pyi-grab_version
+│   │   ├── pyi-makespec
+│   │   ├── pyinstaller
+│   │   ├── pyi-set_version
+│   │   ├── pylupdate5
+│   │   ├── pylupdate6
+│   │   ├── pymupdf
+│   │   ├── pyrcc5
+│   │   ├── pyrsa-decrypt
+│   │   ├── pyrsa-encrypt
+│   │   ├── pyrsa-keygen
+│   │   ├── pyrsa-priv2pub
+│   │   ├── pyrsa-sign
+│   │   ├── pyrsa-verify
+│   │   ├── python -> python3.11
+│   │   ├── python3 -> python3.11
+│   │   ├── python3.11 -> /usr/bin/python3.11
+│   │   ├── python3.13 -> cursor-bin.AppImage
+│   │   ├── pyuic5
+│   │   ├── pyuic6
+│   │   ├── rdf2dot
+│   │   ├── rdfgraphisomorphism
+│   │   ├── rdfpipe
+│   │   ├── rdfs2dot
+│   │   ├── sessionmirror.py
+│   │   ├── sip-build
+│   │   ├── sip-distinfo
+│   │   ├── sip-install
+│   │   ├── sip-module
+│   │   ├── sip-sdist
+│   │   ├── sip-wheel
+│   │   ├── spacy
+│   │   ├── tqdm
+│   │   ├── typer
+│   │   ├── uvicorn
+│   │   ├── weasel
+│   │   ├── wheel
+│   │   └── youtube_transcript_api
+│   ├── docx-template
+│   │   ├── docProps
+│   │   ├── _rels
+│   │   └── word
+│   ├── include
+│   │   ├── python3.11
+│   │   ├── python3.13
+│   │   └── site
+│   ├── lib
+│   │   ├── python3.11
+│   │   └── python3.13
+│   ├── lib64 -> lib
+│   └── pyvenv.cfg
+├── incrementum_deck_20250322.json
+├── incrementum-env
+│   ├── bin
+│   │   ├── activate
+│   │   ├── activate.csh
+│   │   ├── activate.fish
+│   │   ├── Activate.ps1
+│   │   ├── cursor-bin.AppImage -> /opt/cursor-bin/cursor-bin.AppImage
+│   │   ├── python -> cursor-bin.AppImage
+│   │   ├── python3 -> cursor-bin.AppImage
+│   │   └── python3.13 -> cursor-bin.AppImage
+│   ├── include
+│   │   └── python3.13
+│   ├── lib
+│   │   └── python3.13
+│   ├── lib64 -> lib
+│   └── pyvenv.cfg
+├── incrementum.log
+├── Incrementum.spec
+├── init_db.py
+├── INSTALL.md
+├── JAVASCRIPT_LIBRARIES.md
+├── LICENSE
+├── main.py
+├── main.spec
+├── migrate_db.py
+├── migrations
+│   ├── fsrs_migration.py
+│   ├── video_learning_migration.py
+│   └── web_highlight_color_migration.py
+├── minimal_test.html
+├── models
+├── new-venv
+│   ├── bin
+│   │   ├── activate
+│   │   ├── activate.csh
+│   │   ├── activate.fish
+│   │   ├── Activate.ps1
+│   │   ├── cursor-bin.AppImage -> /opt/cursor-bin/cursor-bin.AppImage
+│   │   ├── python -> cursor-bin.AppImage
+│   │   ├── python3 -> cursor-bin.AppImage
+│   │   └── python3.13 -> cursor-bin.AppImage
+│   ├── include
+│   │   └── python3.13
+│   ├── lib
+│   │   └── python3.13
+│   ├── lib64 -> lib
+│   └── pyvenv.cfg
+├── package_linux.sh
+├── package_macos.sh
+├── package.py
+├── package_windows.bat
+├── PACKAGING.md
+├── project_structure.txt
+├── README.md
+├── recovery
+├── requirements.txt
+├── run.bat
+├── run_fsrs_migration.py
+├── run_migration.py
+├── run.sh
+├── run_video_learning_migration.py
+├── run_web_highlight_color_migration.py
+├── setup_dir_structure.py
+├── setup.ps1
+├── static
+├── test_editor.py
+├── test_javascript_libraries.html
+├── test_output.log
+├── test_pdf_fix.py
+├── tests
+│   ├── test_database.py
+│   ├── test_run.py
+│   ├── test_search_engine.py
+│   └── test_spaced_repetition.py
+├── test_summarizer.py
+├── test_youtube.py
+├── ui
+│   ├── arxiv_dialog.py
+│   ├── backup_view.py
+│   ├── browse_extracts_view.py
+│   ├── detailed_queue_view.py
+│   ├── dialog_manager.py
+│   ├── dialogs
+│   │   ├── category_manager_dialog.py
+│   │   ├── content_processor_dialog.py
+│   │   ├── __init__.py
+│   │   ├── rss_feed_dialog.py
+│   │   └── url_import_dialog.py
+│   ├── dockable_pdf_viewer.py
+│   ├── document_extracts_view.py
+│   ├── document_position_manager.py
+│   ├── document_view.py
+│   ├── document_view.py.bak
+│   ├── document_view.py.recovered
+│   ├── export_dialog.py
+│   ├── extract_editor.py
+│   ├── extract_view.py
+│   ├── import_dialog.py
+│   ├── incremental_reading_view.py
+│   ├── Incrementum_configuration.py
+│   ├── Incrementum_features.py
+│   ├── incrementum.log
+│   ├── __init__.py
+│   ├── learning_item_editor.py
+│   ├── load_audio_helper.py
+│   ├── load_epub_helper.py
+│   ├── load_youtube_helper.py
+│   ├── main_window.py
+│   ├── models
+│   │   ├── category_model.py
+│   │   ├── document_model.py
+│   │   └── __init__.py
+│   ├── network_view.py
+│   ├── pdf_view.py
+│   ├── position_autosave.py
+│   ├── position_tracking.js
+│   ├── queue_view.py
+│   ├── reading_stats_widget.py
+│   ├── read_later_feature.py
+│   ├── resources
+│   │   └── README.md
+│   ├── review_view.py
+│   ├── review_widget.py
+│   ├── rss_view.py
+│   ├── search_view.py
+│   ├── settings_dialog.py
+│   ├── statistics_view.py
+│   ├── styles
+│   │   └── dark_theme.qss
+│   ├── tag_view.py
+│   ├── test_youtube.py
+│   ├── test_youtube_timestamp.py
+│   ├── timeline_view.js
+│   ├── views
+│   │   └── extract_review_view.py
+│   ├── visual_bookmarks.js
+│   ├── web_browser_view.py
+│   ├── welcome_screen.py
+│   └── youtube_transcript_view.py
+├── venv_fixed
+│   ├── include
+│   │   └── python3.11
+│   └── lib
+│       └── python3.11
+├── venv_py311
+│   └── lib
+│       └── python3.11
+├── WORKFLOW.md
+└── YOUTUBE_README.md
+
+74 directories, 312 files
