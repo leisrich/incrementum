@@ -298,75 +298,75 @@ class YouTubeHandler(DocumentHandler):
                     logger.error(f"Failed to install youtube-transcript-api: {pip_error}")
                     return None
             
-            # Get transcript
+            # First try to list available transcripts
             try:
-                logger.info(f"Fetching transcript for video ID: {video_id}")
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-                logger.info(f"Found transcript with {len(transcript_list)} entries")
+                logger.info(f"Listing available transcripts for video ID: {video_id}")
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                
+                # Try to find the best transcript
+                transcript = None
+                
+                # 1. Try English manual transcript first
+                for t in transcript_list:
+                    if t.language_code == 'en' and not t.is_generated:
+                        transcript = t
+                        logger.info("Found English manual transcript")
+                        break
+                
+                # 2. Try English auto-generated transcript
+                if not transcript:
+                    for t in transcript_list:
+                        if t.language_code == 'en':
+                            transcript = t
+                            logger.info("Found English auto-generated transcript")
+                            break
+                
+                # 3. Try any manual transcript
+                if not transcript:
+                    for t in transcript_list:
+                        if not t.is_generated:
+                            transcript = t
+                            logger.info(f"Found manual transcript in {t.language_code}")
+                            break
+                
+                # 4. Use any available transcript
+                if not transcript:
+                    transcript = next(transcript_list._transcripts.values().__iter__())
+                    logger.info(f"Using first available transcript in {transcript.language_code}")
+                
+                # Get the transcript
+                transcript_data = transcript.fetch()
+                logger.info(f"Successfully fetched transcript with {len(transcript_data)} entries")
                 
                 # Format transcript as text
                 formatter = TextFormatter()
-                formatted_transcript = formatter.format_transcript(transcript_list)
+                formatted_transcript = formatter.format_transcript(transcript_data)
                 logger.info(f"Formatted transcript length: {len(formatted_transcript)}")
                 return formatted_transcript
+                
             except TranscriptsDisabled:
                 logger.warning(f"Transcripts are disabled for video {video_id}")
                 return None
             except NoTranscriptFound:
                 logger.warning(f"No transcripts found for video {video_id}")
                 return None
-            except Exception as transcript_error:
-                # Try with different language options
+            except Exception as list_error:
+                logger.warning(f"Error listing transcripts: {list_error}")
+                # Fallback to direct transcript fetch
                 try:
-                    logger.info("Trying to get transcript with language detection...")
-                    try:
-                        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                    except TranscriptsDisabled:
-                        logger.warning(f"Transcripts are disabled for video {video_id}")
-                        return None
-                    except NoTranscriptFound:
-                        logger.warning(f"No transcripts found for video {video_id}")
-                        return None
-                    
-                    # Try English first, then manual transcripts, then any available
-                    transcript = None
-                    for t in transcript_list:
-                        if t.language_code == 'en':
-                            transcript = t
-                            logger.info("Found English transcript")
-                            break
-                    
-                    # If no English found, try to find any manual transcript
-                    if not transcript:
-                        for t in transcript_list:
-                            if not t.is_generated:
-                                transcript = t
-                                logger.info(f"Found manual transcript in {t.language_code}")
-                                break
-                    
-                    # If still not found, just use the first available
-                    if not transcript:
-                        transcript = next(transcript_list._transcripts.values().__iter__())
-                        logger.info(f"Using first available transcript in {transcript.language_code}")
-                    
-                    # Get the transcript
-                    transcript_data = transcript.fetch()
+                    logger.info("Falling back to direct transcript fetch...")
+                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+                    logger.info(f"Found transcript with {len(transcript_list)} entries")
                     
                     # Format transcript as text
                     formatter = TextFormatter()
-                    formatted_transcript = formatter.format_transcript(transcript_data)
+                    formatted_transcript = formatter.format_transcript(transcript_list)
                     logger.info(f"Formatted transcript length: {len(formatted_transcript)}")
                     return formatted_transcript
+                except Exception as direct_error:
+                    logger.error(f"Error in direct transcript fetch: {direct_error}")
+                    return None
                     
-                except TranscriptsDisabled:
-                    logger.warning(f"Transcripts are disabled for video {video_id}")
-                    return None
-                except NoTranscriptFound:
-                    logger.warning(f"No transcripts found for video {video_id}")
-                    return None
-                except Exception as advanced_error:
-                    logger.exception(f"Error fetching transcript with advanced options: {advanced_error}")
-                    return None
         except Exception as e:
             logger.exception(f"Error fetching transcript with library: {e}")
             return None

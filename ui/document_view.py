@@ -1938,8 +1938,18 @@ window.addEventListener('load', function() {
             
             # Add transcript view if available
             try:
-                # Create a transcript view widget
-                transcript_view = YouTubeTranscriptView(video_id, self.db_session)
+                # Get the metadata file path from the document
+                metadata_file = getattr(self.document, 'file_path', None)
+                if not metadata_file:
+                    logger.warning("No metadata file found for YouTube video")
+                    raise ValueError("No metadata file found for YouTube video")
+                
+                # Create a transcript view widget with the correct parameters
+                transcript_view = YouTubeTranscriptView(
+                    self.db_session, 
+                    self.document.id,  # Use document.id instead of document_id
+                    metadata_file
+                )
                 transcript_view.setMaximumHeight(200)  # Limit height
                 
                 # Connect transcript navigation signals if available
@@ -1958,6 +1968,15 @@ window.addEventListener('load', function() {
                 
             except Exception as e:
                 logger.warning(f"Could not load YouTube transcript: {e}")
+                # Show error message to user
+                error_label = QLabel("Could not load video transcript. This might be because:\n"
+                                   "1. The video has no captions\n"
+                                   "2. Captions are disabled\n"
+                                   "3. The video is private or unavailable\n"
+                                   "4. The metadata file is missing")
+                error_label.setWordWrap(True)
+                error_label.setStyleSheet("color: #666; padding: 10px;")
+                self.content_layout.addWidget(error_label)
                 # Continue without transcript
             
             logger.info(f"Loaded YouTube video: {video_id}")
