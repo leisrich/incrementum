@@ -32,10 +32,6 @@ Create a JSON file with the following structure:
 
 ```json
 {
-  "name": "My Custom Theme",
-  "description": "My personalized theme for Incrementum",
-  "created": "2023-07-14T12:00:00",
-  "colors": {
     "window": "#2D2D30",
     "windowText": "#FFFFFF",
     "base": "#252526",
@@ -52,7 +48,6 @@ Create a JSON file with the following structure:
     "mid": "#2D2D30",
     "shadow": "#1A1A1A",
     "light": "#505050"
-  }
 }
 ```
 
