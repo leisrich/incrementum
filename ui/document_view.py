@@ -865,6 +865,9 @@ class DocumentView(QWidget):
         # Create the UI
         self._create_ui()
         
+        # Enable keyboard tracking for shortcuts
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
         # Load document if provided
         if document_id:
             self.load_document(document_id)
@@ -977,9 +980,14 @@ class DocumentView(QWidget):
         self._update_vim_status_visibility()
     
     def keyPressEvent(self, event):
-        """Handle key press events for Vim-like navigation."""
+        """Handle key press events for document view."""
+        # Check for Ctrl+E shortcut for extract
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_E:
+            self._on_extract()
+            return
+            
         # Check if Vim handler wants to handle this key
-        if self.vim_key_handler.handle_key_event(event):
+        if hasattr(self, 'vim_key_handler') and self.vim_key_handler.handle_key_event(event):
             # Update command display if in command mode
             if self.vim_key_handler.command_mode:
                 self.vim_status_label.setText("Vim Mode: Command")
@@ -998,10 +1006,9 @@ class DocumentView(QWidget):
                 else:
                     self.vim_command_label.setText("")
             
-            # Event was handled
             return
-        
-        # If not handled by Vim mode, pass to parent
+            
+        # Allow the parent class to handle the event
         super().keyPressEvent(event)
     
     def _create_webview_and_setup(self, html_content, base_url):
@@ -2444,16 +2451,41 @@ window.addEventListener('load', function() {
             selected_text = None
             if hasattr(self, 'web_view') and self.web_view:
                 # For web view, use JavaScript to get selected text
+                script = """
+                (function() {
+                    var selection = window.getSelection();
+                    var text = selection.toString();
+                    if (text && text.trim().length > 0) {
+                        // Highlight if we have a SuperMemo script
+                        if (typeof highlightExtractedText === 'function') {
+                            highlightExtractedText();
+                        }
+                        return text;
+                    }
+                    return '';
+                })();
+                """
                 self.web_view.page().runJavaScript(
-                    "window.getSelection().toString();",
-                    lambda result: setattr(self, '_temp_selection', result)
+                    script,
+                    lambda result: self._process_extracted_text(result)
                 )
-                QApplication.processEvents()
-                selected_text = getattr(self, '_temp_selection', None)
+                # Continue processing in the callback (_process_extracted_text)
+                return
             elif hasattr(self, 'text_edit') and self.text_edit:
                 # For text edit, use cursor
                 selected_text = self.text_edit.textCursor().selectedText()
+                self._process_extracted_text(selected_text)
                 
+        except Exception as e:
+            logger.exception(f"Error creating extract: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+            
+    def _process_extracted_text(self, selected_text):
+        """Process text after extraction from web view or text edit."""
+        try:
             if not selected_text or len(selected_text.strip()) < 5:
                 QMessageBox.warning(
                     self, "Extract", 
@@ -2474,6 +2506,9 @@ window.addEventListener('load', function() {
             # Save extract
             self.db_session.add(extract)
             self.db_session.commit()
+            
+            # Emit signal for extract created
+            self.extractCreated.emit(extract.id)
             
             QMessageBox.information(
                 self, "Extract", 
@@ -2599,6 +2634,9 @@ window.addEventListener('load', function() {
                     if (typeof window.callbackHandler !== 'undefined') {
                         window.callbackHandler.extractText(smState.selectedText);
                     }
+                    
+                    // Highlight the extracted text
+                    highlightExtractedText();
                     
                     // Visual feedback
                     extractBtn.style.backgroundColor = '#8f8';
@@ -2729,6 +2767,26 @@ window.addEventListener('load', function() {
                 }
             });
         });
+        
+        // Function to highlight extracted text
+        function highlightExtractedText() {
+            if (!smState.lastSelection || !smState.lastSelection.rangeCount) return;
+            
+            const range = smState.lastSelection.getRangeAt(0);
+            const span = document.createElement('span');
+            span.className = 'extracted-text-highlight';
+            span.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+            span.style.borderRadius = '2px';
+            
+            try {
+                range.surroundContents(span);
+                // Keep the selection active
+                smState.lastSelection.removeAllRanges();
+                smState.lastSelection.addRange(range);
+            } catch (e) {
+                console.error('Error highlighting text:', e);
+            }
+        }
         
         // Initialize right away if document is already loaded
         if (document.readyState === 'complete' || document.readyState === 'interactive') {
@@ -2960,53 +3018,106 @@ window.addEventListener('load', function() {
                         selected_text = self._temp_selection_result
                         if selected_text and len(selected_text.strip()) > 0:
                             has_selection = True
-                            self.selected_text = selected_text
                         break
-            
+                
             elif hasattr(self, 'text_edit') and self.text_edit:
-                # For text edit widgets
-                cursor = self.text_edit.textCursor()
-                has_selection = cursor.hasSelection()
-                if has_selection:
-                    selected_text = cursor.selectedText()
-                    self.selected_text = selected_text
+                # For text edit, use cursor
+                selected_text = self.text_edit.textCursor().selectedText()
+                if selected_text and len(selected_text.strip()) > 0:
+                    has_selection = True
+            
+            # Store the selected text for use in action handlers
+            self.selected_text = selected_text if has_selection else ""
             
             # Add extract action if text is selected
             if has_selection:
                 extract_action = QAction("Extract Selection", self)
-                extract_action.triggered.connect(self._on_extract)
+                extract_action.triggered.connect(self._extract_from_context_menu)
                 menu.addAction(extract_action)
                 
+                # Add highlight action
                 highlight_action = QAction("Highlight Selection", self)
                 highlight_action.triggered.connect(self._on_highlight)
                 menu.addAction(highlight_action)
                 
+                # Add separator
                 menu.addSeparator()
             
-            # Add general document actions
+            # Add document actions
             add_to_ir_action = QAction("Add to Incremental Reading", self)
             add_to_ir_action.triggered.connect(self._on_add_to_incremental_reading)
             menu.addAction(add_to_ir_action)
             
-            # Add summarize action
-            summarize_action = QAction("Summarize Document", self)
-            summarize_action.triggered.connect(self.summarize_current_content)
-            menu.addAction(summarize_action)
+            mark_progress_action = QAction("Mark Reading Progress", self)
+            mark_progress_action.triggered.connect(self._on_mark_reading_progress)
+            menu.addAction(mark_progress_action)
             
+            # Add zoom actions
             menu.addSeparator()
-        
-        # Add clipboard actions
-        if hasattr(self, 'selected_text') and self.selected_text:
-            copy_action = QAction("Copy", self)
-            copy_action.triggered.connect(
-                lambda: QApplication.clipboard().setText(self.selected_text)
-            )
-            menu.addAction(copy_action)
-        
-        # Show menu if it has actions
-        if not menu.isEmpty():
+            
+            zoom_in_action = QAction("Zoom In", self)
+            zoom_in_action.triggered.connect(self._on_zoom_in)
+            menu.addAction(zoom_in_action)
+            
+            zoom_out_action = QAction("Zoom Out", self)
+            zoom_out_action.triggered.connect(self._on_zoom_out)
+            menu.addAction(zoom_out_action)
+            
+            # Show the menu
             menu.exec(self.mapToGlobal(position))
-    
+            
+    def _extract_from_context_menu(self):
+        """Extract text from context menu selection and highlight it."""
+        try:
+            if not self.selected_text or len(self.selected_text.strip()) < 5:
+                QMessageBox.warning(
+                    self, "Extract", 
+                    "Please select more text to extract."
+                )
+                return
+                
+            # Create extract
+            from core.knowledge_base.models import Extract
+            
+            extract = Extract(
+                document_id=self.document_id,
+                content=self.selected_text,
+                created_date=datetime.utcnow(),
+                priority=50  # Default priority
+            )
+            
+            # Save extract
+            self.db_session.add(extract)
+            self.db_session.commit()
+            
+            # Emit the extract created signal
+            self.extractCreated.emit(extract.id)
+            
+            # Highlight the extracted text if in a web view
+            if hasattr(self, 'web_view') and self.web_view:
+                highlight_script = """
+                (function() {
+                    if (typeof highlightExtractedText === 'function') {
+                        highlightExtractedText();
+                        return true;
+                    }
+                    return false;
+                })();
+                """
+                self.web_view.page().runJavaScript(highlight_script)
+            
+            QMessageBox.information(
+                self, "Extract", 
+                "Extract created successfully. You can find it in the Knowledge Base."
+            )
+                
+        except Exception as e:
+            logger.exception(f"Error creating extract from context menu: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+
     def _set_error_message(self, message):
         """Display an error message in the content area."""
         error_label = QLabel(message)

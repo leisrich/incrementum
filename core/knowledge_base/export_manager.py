@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from core.knowledge_base.models import Document, Category, Extract, LearningItem, Tag, ReviewLog
+from core.knowledge_base.backup_manager import BackupManager
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,52 @@ class ExportManager:
     
     def __init__(self, db_session: Session):
         self.db_session = db_session
+        self.backup_manager = BackupManager(db_session)
+    
+    def create_backup(self, include_files: bool = True) -> Optional[str]:
+        """
+        Create a backup of the database and optionally document files.
+        
+        Args:
+            include_files: Whether to include document files in the backup
+            
+        Returns:
+            Path to the backup file, or None if backup failed
+        """
+        return self.backup_manager.create_backup(include_files)
+    
+    def get_backup_list(self) -> List[Dict[str, Any]]:
+        """
+        Get a list of available backups.
+        
+        Returns:
+            List of dictionaries with backup information
+        """
+        return self.backup_manager.get_backup_list()
+    
+    def restore_backup(self, backup_path: str) -> bool:
+        """
+        Restore a backup.
+        
+        Args:
+            backup_path: Path to the backup file
+            
+        Returns:
+            True if restoration successful, False otherwise
+        """
+        return self.backup_manager.restore_backup(backup_path)
+    
+    def delete_backup(self, backup_path: str) -> bool:
+        """
+        Delete a backup file.
+        
+        Args:
+            backup_path: Path to the backup file
+            
+        Returns:
+            True if deletion successful, False otherwise
+        """
+        return self.backup_manager.delete_backup(backup_path)
     
     def export_extracts(self, extract_ids: List[int], filepath: str, include_learning_items: bool = True) -> bool:
         """
