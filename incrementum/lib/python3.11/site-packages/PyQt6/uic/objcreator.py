@@ -95,27 +95,29 @@ class QObjectCreator(object):
         self._customWidgets = self._cpolicy.createCustomWidgetLoader()
         self._modules.append(self._customWidgets)
 
-    def createQObject(self, classname, *args, **kwargs):
+    def createQtObject(self, ctor_name, object_name, ctor_args=None,
+            ctor_kwargs=None, is_attribute=True, no_instantiation=False):
         # Handle regular and custom widgets.
-        factory = self.findQObjectType(classname)
+        ctor = self.findQObjectType(ctor_name)
 
-        if factory is None:
+        if ctor is None:
             # Handle scoped names, typically static factory methods.
-            parts = classname.split('.')
+            parts = ctor_name.split('.')
 
             if len(parts) > 1:
-                factory = self.findQObjectType(parts[0])
+                ctor = self.findQObjectType(parts[0])
 
-                if factory is not None:
+                if ctor is not None:
                     for part in parts[1:]:
-                        factory = getattr(factory, part, None)
-                        if factory is None:
+                        ctor = getattr(ctor, part, None)
+                        if ctor is None:
                             break
 
-            if factory is None:
-                raise NoSuchWidgetError(classname)
+            if ctor is None:
+                raise NoSuchWidgetError(ctor_name)
 
-        return self._cpolicy.instantiate(factory, *args, **kwargs)
+        return self._cpolicy.instantiate(ctor, object_name, ctor_args,
+                ctor_kwargs, is_attribute, no_instantiation)
 
     def invoke(self, rname, method, args=()):
         return self._cpolicy.invoke(rname, method, args)

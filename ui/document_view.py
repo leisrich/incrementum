@@ -31,6 +31,15 @@ try:
 except ImportError:
     HAS_WEBENGINE = False
 
+# Separate try block for QtMultimedia since we've had issues with it
+QT_MULTIMEDIA_AVAILABLE = False
+try:
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+    QT_MULTIMEDIA_AVAILABLE = True
+except (ImportError, RuntimeError) as multimedia_err:
+    logger = logging.getLogger(__name__)
+    logger.error(f"Failed to import QtMultimedia: {multimedia_err}")
+
 from core.knowledge_base.models import Document, Extract, WebHighlight
 from core.content_extractor.extractor import ContentExtractor
 from core.document_processor.handlers.epub_handler import EPUBHandler
@@ -3577,6 +3586,10 @@ window.addEventListener('load', function() {
     def _load_audio(self):
         """Load an audio file for playback with position tracking."""
         try:
+            # First check if QtMultimedia is available
+            if not QT_MULTIMEDIA_AVAILABLE:
+                raise ImportError("PyQt6.QtMultimedia is not available. Audio playback requires this module to be properly installed.")
+                
             from ui.load_audio_helper import setup_audio_player
             
             # Calculate initial position
@@ -3599,11 +3612,42 @@ window.addEventListener('load', function() {
             self.document.last_accessed = datetime.now()
             self.db_session.commit()
             
-        except Exception as e:
+        except (ImportError, RuntimeError) as e:
             logger.exception(f"Error loading audio file: {e}")
+            error_label = QLabel(f"Error loading audio file: {str(e)}\n\nThis may be caused by an incompatible version of PyQt6-Multimedia.\nTry updating it with: pip install PyQt6-Multimedia==6.6.1 -U")
+            error_label.setStyleSheet("color: red; padding: 10px;")
+            error_label.setWordWrap(True)
+            self.content_layout.addWidget(error_label)
+            
+            # Try to provide alternative playback options
+            alt_label = QLabel("You can try opening this audio file with your system's default audio player:")
+            alt_label.setStyleSheet("padding: 10px;")
+            self.content_layout.addWidget(alt_label)
+            
+            # Add a button to open the file with the system's default player
+            open_button = QPushButton("Open with System Player")
+            open_button.clicked.connect(lambda: self._open_with_system_player())
+            open_button.setMaximumWidth(200)
+            self.content_layout.addWidget(open_button)
+            
+        except Exception as e:
+            logger.exception(f"Unexpected error loading audio file: {e}")
             error_label = QLabel(f"Error loading audio file: {str(e)}")
             error_label.setStyleSheet("color: red;")
             self.content_layout.addWidget(error_label)
+            
+    def _open_with_system_player(self):
+        """Open the audio file with the system's default player."""
+        try:
+            if not hasattr(self, 'document') or not hasattr(self.document, 'file_path'):
+                return
+                
+            from PyQt6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.document.file_path))
+            
+        except Exception as e:
+            logger.exception(f"Error opening file with system player: {e}")
+            QMessageBox.warning(self, "Error", f"Could not open the file with system player: {str(e)}")
 
     def _create_toolbar(self):
         """Create toolbar with common document actions."""

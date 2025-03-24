@@ -1,4 +1,4 @@
-# Copyright (c) 2020 Riverbank Computing Limited.
+# Copyright (c) 2023 Riverbank Computing Limited.
 # Copyright (c) 2006 Thorsten Marek.
 # All right reserved.
 #
@@ -47,7 +47,7 @@ class DynamicUILoader(UIParser):
 
     def createToplevelWidget(self, classname, widgetname):
         if self.toplevelInst is None:
-            return self.factory.createQObject(classname, widgetname, ())
+            return self.factory.createQtObject(classname, widgetname)
 
         if not isinstance(self.toplevelInst, self.factory.findQObjectType(classname)):
             raise TypeError(

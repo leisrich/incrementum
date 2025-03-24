@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Riverbank Computing Limited.
+# Copyright (c) 2023 Riverbank Computing Limited.
 # Copyright (c) 2006 Thorsten Marek.
 # All right reserved.
 #
@@ -215,21 +215,30 @@ class UIParser(object):
         self.currentActionGroup = None
         self.button_groups = {}
 
-    def setupObject(self, clsname, parent, branch, is_attribute=True):
-        name = self.uniqueName(branch.attrib.get('name') or clsname[1:].lower())
+    def _setupObject(self, class_name, parent, branch, is_attribute=True,
+            parent_is_optional=True):
+        object_name = self.uniqueName(
+                branch.attrib.get('name') or class_name[1:].lower())
 
         if parent is None:
-            args = ()
+            ctor_args = ()
+            ctor_kwargs = {}
+        elif parent_is_optional:
+            ctor_args = ()
+            ctor_kwargs = dict(parent=parent)
         else:
-            args = (parent, )
+            ctor_args = (parent, )
+            ctor_kwargs = {}
 
-        obj = self.factory.createQObject(clsname, name, args, is_attribute)
+        obj = self.factory.createQtObject(class_name, object_name,
+                ctor_args=ctor_args, ctor_kwargs=ctor_kwargs,
+                is_attribute=is_attribute)
 
         self.wprops.setProperties(obj, branch)
-        obj.setObjectName(name)
+        obj.setObjectName(object_name)
 
         if is_attribute:
-            setattr(self.toplevelWidget, name, obj)
+            setattr(self.toplevelWidget, object_name, obj)
 
         return obj
 
@@ -259,7 +268,7 @@ class UIParser(object):
                                QtWidgets.QWizard)):
             parent = None
 
-        self.stack.push(self.setupObject(widget_class, parent, elem))
+        self.stack.push(self._setupObject(widget_class, parent, elem))
 
         if isinstance(self.stack.topwidget, QtWidgets.QTableWidget):
             if self.getProperty(elem, 'columnCount') is None:
@@ -305,8 +314,8 @@ class UIParser(object):
                     bg = self.button_groups[bg_name] = ButtonGroup()
 
                 if bg.object is None:
-                    bg.object = self.factory.createQObject("QButtonGroup",
-                            bg_name, (self.toplevelWidget, ))
+                    bg.object = self.factory.createQtObject('QButtonGroup',
+                            bg_name, ctor_args=(self.toplevelWidget, ))
                     setattr(self.toplevelWidget, bg_name, bg.object)
 
                     bg.object.setObjectName(bg_name)
@@ -433,8 +442,8 @@ class UIParser(object):
         if self.wprops.getProperty(elem, "orientation") == QtCore.Qt.Orientation.Horizontal:
             policy = policy[1], policy[0]
 
-        spacer = self.factory.createQObject("QSpacerItem",
-                self.uniqueName("spacerItem"), size_args + policy,
+        spacer = self.factory.createQtObject('QSpacerItem',
+                self.uniqueName('spacerItem'), ctor_args=size_args + policy,
                 is_attribute=False)
 
         if self.stack.topIsLayout():
@@ -497,7 +506,9 @@ class UIParser(object):
             parent = self.stack.topwidget
         if "name" not in elem.attrib:
             elem.attrib["name"] = classname[1:].lower()
-        self.stack.push(self.setupObject(classname, parent, elem))
+        self.stack.push(
+                self._setupObject(classname, parent, elem,
+                        parent_is_optional=False))
         self.traverseWidgetTree(elem)
 
         layout = self.stack.popLayout()
@@ -570,8 +581,9 @@ class UIParser(object):
                     parent = w
                     nr_in_root = self.item_nr
 
-                item = self.factory.createQObject("QTreeWidgetItem",
-                        "item_%d" % len(self.itemstack), (parent, ), False)
+                item = self.factory.createQtObject('QTreeWidgetItem',
+                        'item_%d' % len(self.itemstack), ctor_args=(parent, ),
+                        is_attribute=False)
 
                 if self.item_nr == 0 and not self.itemstack:
                     self.sorting_enabled = self.factory.invoke("__sortingEnabled", w.isSortingEnabled)
@@ -644,7 +656,8 @@ class UIParser(object):
     def createWidgetItem(self, item_type, elem, getter, *getter_args):
         """ Create a specific type of widget item. """
 
-        item = self.factory.createQObject(item_type, "item", (), False)
+        item = self.factory.createQtObject(item_type, 'item',
+                is_attribute=False)
         props = self.wprops
 
         # Note that not all types of widget items support the full set of
@@ -772,11 +785,12 @@ class UIParser(object):
             pass
 
     def createAction(self, elem):
-        self.setupObject("QAction", self.currentActionGroup or self.toplevelWidget,
-                         elem)
+        self._setupObject('QAction',
+                self.currentActionGroup or self.toplevelWidget, elem)
 
     def createActionGroup(self, elem):
-        action_group = self.setupObject("QActionGroup", self.toplevelWidget, elem)
+        action_group = self._setupObject('QActionGroup', self.toplevelWidget,
+                elem, parent_is_optional=False)
         self.currentActionGroup = action_group
         self.traverseWidgetTree(elem)
         self.currentActionGroup = None

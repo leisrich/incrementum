@@ -1,6 +1,6 @@
 #############################################################################
 ##
-## Copyright (C) 2020 Riverbank Computing Limited.
+## Copyright (C) 2023 Riverbank Computing Limited.
 ## Copyright (C) 2006 Thorsten Marek.
 ## All right reserved.
 ##
@@ -133,8 +133,16 @@ class LoaderCreatorPolicy(object):
     def createCustomWidgetLoader(self):
         return _CustomWidgetLoader(self._package)
 
-    def instantiate(self, clsObject, objectName, ctor_args, is_attribute=True):
-        return clsObject(*ctor_args)
+    def instantiate(self, ctor, object_name, ctor_args, ctor_kwargs,
+            is_attribute, no_instantiation):
+
+        if ctor_args is None:
+            ctor_args = ()
+
+        if ctor_kwargs is None:
+            ctor_kwargs = {}
+
+        return ctor(*ctor_args, **ctor_kwargs)
 
     def invoke(self, rname, method, args):
         return method(*args)

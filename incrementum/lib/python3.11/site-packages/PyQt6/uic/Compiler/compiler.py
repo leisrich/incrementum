@@ -1,4 +1,4 @@
-# Copyright (c) 2020 Riverbank Computing Limited.
+# Copyright (c) 2023 Riverbank Computing Limited.
 # Copyright (c) 2006 Thorsten Marek.
 # All right reserved.
 #
@@ -67,9 +67,8 @@ class UICompiler(UIParser):
         indenter.indent()
         indenter.write("def setupUi(self, %s):" % widgetname)
         indenter.indent()
-        w = self.factory.createQObject(classname, widgetname, (),
-                                   is_attribute = False,
-                                   no_instantiation = True)
+        w = self.factory.createQtObject(classname, widgetname,
+                is_attribute=False, no_instantiation=True)
         w.baseclass = classname
         w.uiclass = "Ui_%s" % self.uiname
         return w

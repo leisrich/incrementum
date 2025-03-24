@@ -14,10 +14,17 @@ from PyQt6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QComboBox,
     QFrame
 )
-from PyQt6.QtMultimedia import (
-    QMediaPlayer, QAudioOutput, 
-    QMediaMetaData, QMediaFormat
-)
+
+# Check for QtMultimedia availability
+QT_MULTIMEDIA_AVAILABLE = True
+try:
+    from PyQt6.QtMultimedia import (
+        QMediaPlayer, QAudioOutput, 
+        QMediaMetaData, QMediaFormat
+    )
+except (ImportError, RuntimeError) as e:
+    QT_MULTIMEDIA_AVAILABLE = False
+    logging.getLogger(__name__).error(f"Failed to import QtMultimedia: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -33,28 +40,92 @@ class AudioPlayerWidget(QWidget):
         self.current_position = 0
         self.audio_duration = 0
         self.last_save_position = 0
-        self.player_state = QMediaPlayer.PlaybackState.StoppedState
+        self.player_state = None
         self.playback_rate = 1.0
         
-        # Create media player
-        self.player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        self.player.setAudioOutput(self.audio_output)
+        # Check if QtMultimedia is available
+        if not QT_MULTIMEDIA_AVAILABLE:
+            logger.error("QtMultimedia is not available - audio player will be limited")
+            # Create a UI with limited functionality
+            self._create_limited_ui()
+            return
+            
+        try:
+            # Create media player
+            self.player = QMediaPlayer()
+            self.audio_output = QAudioOutput()
+            self.player.setAudioOutput(self.audio_output)
+            
+            # Store enums for state tracking
+            self.player_state = QMediaPlayer.PlaybackState.StoppedState
+            
+            # Connect signals
+            self.player.positionChanged.connect(self.on_position_changed)
+            self.player.durationChanged.connect(self.on_duration_changed)
+            self.player.playbackStateChanged.connect(self.on_state_changed)
+            self.player.errorOccurred.connect(self.on_error)
+            
+            # Set up the UI
+            self.init_ui()
+            
+            # Auto-save timer
+            self.auto_save_timer = QTimer(self)
+            self.auto_save_timer.setInterval(5000)  # 5 seconds
+            self.auto_save_timer.timeout.connect(self.auto_save_position)
+            self.auto_save_timer.start()
+            
+        except Exception as e:
+            logger.exception(f"Error initializing audio player: {e}")
+            # Create a limited UI if initialization fails
+            self._create_limited_ui()
+    
+    def _create_limited_ui(self):
+        """Create a limited UI when QtMultimedia is not available."""
+        main_layout = QVBoxLayout(self)
         
-        # Connect signals
-        self.player.positionChanged.connect(self.on_position_changed)
-        self.player.durationChanged.connect(self.on_duration_changed)
-        self.player.playbackStateChanged.connect(self.on_state_changed)
-        self.player.errorOccurred.connect(self.on_error)
+        # Error message
+        error_label = QLabel("Audio playback is not available due to missing or incompatible QtMultimedia module.")
+        error_label.setStyleSheet("color: red; font-weight: bold;")
+        error_label.setWordWrap(True)
+        main_layout.addWidget(error_label)
         
-        # Set up the UI
-        self.init_ui()
+        # Document info
+        self.title_label = QLabel("No audio loaded")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        main_layout.addWidget(self.title_label)
         
-        # Auto-save timer
-        self.auto_save_timer = QTimer(self)
-        self.auto_save_timer.setInterval(5000)  # 5 seconds
-        self.auto_save_timer.timeout.connect(self.auto_save_position)
-        self.auto_save_timer.start()
+        self.author_label = QLabel("")
+        self.author_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.author_label)
+        
+        # Open with system player button
+        self.open_system_button = QPushButton("Open with System Player")
+        self.open_system_button.clicked.connect(self._open_with_system_player)
+        main_layout.addWidget(self.open_system_button)
+        
+        # Add spacer
+        main_layout.addStretch(1)
+        
+        # Add suggestions for fixing
+        fix_label = QLabel("Suggested fix: Try updating PyQt6-Multimedia with: pip install PyQt6-Multimedia==6.6.1 -U")
+        fix_label.setStyleSheet("color: #333; font-style: italic;")
+        fix_label.setWordWrap(True)
+        main_layout.addWidget(fix_label)
+    
+    def _open_with_system_player(self):
+        """Open the audio file with the system's default player."""
+        try:
+            if not hasattr(self, 'document') or not hasattr(self.document, 'file_path'):
+                return
+                
+            from PyQt6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.document.file_path))
+            
+        except Exception as e:
+            logger.exception(f"Error opening file with system player: {e}")
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Error", f"Could not open the file with system player: {str(e)}")
     
     def init_ui(self):
         """Initialize the user interface."""
@@ -397,6 +468,13 @@ def setup_audio_player(parent, document, db_session, target_position=0):
         AudioPlayerWidget: The configured audio player widget
     """
     try:
+        # Check if QtMultimedia is available
+        if not QT_MULTIMEDIA_AVAILABLE:
+            error_label = QLabel(f"Audio playback is not available. The PyQt6-Multimedia module is missing or incompatible.")
+            error_label.setStyleSheet("color: red; padding: 10px;")
+            error_label.setWordWrap(True)
+            return error_label
+        
         # Create audio player widget
         player = AudioPlayerWidget(parent)
         
