@@ -493,6 +493,9 @@ class PDFViewWidget(QWidget):
         self.doc = None
         self.total_pages = 0
         
+        # Initialize bookmarks
+        self.bookmarks = []
+        
         # Create UI
         self._create_ui()
         
@@ -501,6 +504,9 @@ class PDFViewWidget(QWidget):
         
         # Load existing extracts
         self._load_extracts()
+        
+        # Load bookmarks
+        self._load_bookmarks()
         
         # Track view state for position restoration
         self.saved_state = {
@@ -1002,17 +1008,28 @@ class PDFViewWidget(QWidget):
     @pyqtSlot()
     def _on_add_bookmark(self):
         """Add a bookmark for the current page."""
-        # In a real app, we'd show a dialog to enter bookmark title
-        # For now, just use a simple approach
-        
-        # Add to bookmarks
-        self.bookmarks.append({
-            'page': self.current_page,
-            'text': f"Bookmark on page {self.current_page+1}"
-        })
-        
-        # Update display
-        self._update_bookmarks_list()
+        try:
+            # Make sure bookmarks attribute exists
+            if not hasattr(self, 'bookmarks'):
+                self.bookmarks = []
+                
+            # Add to bookmarks
+            self.bookmarks.append({
+                'page': self.current_page,
+                'text': f"Bookmark on page {self.current_page+1}"
+            })
+            
+            # Update display
+            self._update_bookmarks_list()
+            
+            logger.debug(f"Added bookmark for page {self.current_page+1}")
+        except Exception as e:
+            logger.exception(f"Error adding bookmark: {e}")
+            QMessageBox.warning(
+                self, 
+                "Bookmark Error", 
+                f"Unable to add bookmark: {str(e)}"
+            )
 
     @pyqtSlot(int)
     def _on_page_requested(self, page_number):

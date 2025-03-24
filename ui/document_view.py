@@ -9,12 +9,17 @@ from io import BytesIO
 from pathlib import Path
 import base64
 
+from ui.document_position_manager import DocumentPositionManager
+from ui.read_later_feature import ReadLaterManager, ReadLaterDialog
+from ui.reading_stats_widget import ReadingStatsWidget, ReadingStatsDialog
+from ui.position_autosave import DocumentPositionAutoSave
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
     QTabWidget, QLineEdit, QSizePolicy, QCheckBox, QSlider, 
-    QInputDialog, QComboBox, QStyle, QTextEdit
+    QInputDialog, QComboBox, QStyle, QTextEdit, QToolButton
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray, QThread
 from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QKeyEvent, QIntValidator, QIcon
@@ -866,6 +871,18 @@ class DocumentView(QWidget):
         
         # Create UI components
         self._create_ui()
+
+        # Initialize position tracking
+        self.position_manager = DocumentPositionManager(self)
+
+        # Initialize Read Later manager
+        self.read_later_manager = ReadLaterManager(self.db_session)
+
+        # Initialize position auto-save
+        self.position_autosave = DocumentPositionAutoSave(self)
+
+        # Connect signals
+        self.position_autosave.positionSaved.connect(self._on_position_saved)
         
         # Load document if provided
         if document_id:
@@ -967,6 +984,176 @@ class DocumentView(QWidget):
                         widget.deleteLater()
         except Exception as e:
             logger.error(f"Error clearing content layout: {e}")
+
+    def cleanup(self):
+        """Cleanup resources when document view is destroyed."""
+        try:
+            # Make a final position save before cleanup
+            if hasattr(self, 'position_autosave'):
+                try:
+                    # Stop the timer first to prevent any more callbacks
+                    if hasattr(self.position_autosave, 'timer') and self.position_autosave.timer:
+                        self.position_autosave.timer.stop()
+                    # Save current position one last time
+                    self.position_autosave.save_position()
+                except Exception as e:
+                    logger.exception(f"Error stopping position autosave timer: {e}")
+
+            # Stop timers
+            if hasattr(self, 'position_manager'):
+                self.position_manager.cleanup()
+
+            # Save references to avoid creating new variables
+            web_view_ref = None
+            content_edit_ref = None
+            
+            if hasattr(self, 'web_view'):
+                web_view_ref = self.web_view
+                self.web_view = None
+                
+            if hasattr(self, 'content_edit'):  
+                content_edit_ref = self.content_edit
+                self.content_edit = None
+                
+            # Process events to ensure Qt handles the reference changes
+            from PyQt6.QtCore import QCoreApplication
+            QCoreApplication.processEvents()
+            
+            # Now safely delete any remaining references
+            if web_view_ref is not None:
+                try:
+                    web_view_ref.deleteLater()
+                except Exception:
+                    # Already deleted, just ignore
+                    pass
+                    
+            if content_edit_ref is not None and content_edit_ref != web_view_ref:
+                try:
+                    content_edit_ref.deleteLater()
+                except Exception:
+                    # Already deleted, just ignore
+                    pass
+
+            logger.debug("DocumentView cleanup completed")
+        except Exception as e:
+            logger.exception(f"Error during cleanup: {e}")
+
+    def closeEvent(self, event):
+        """Handle cleanup when document view is closed."""
+        try:
+            # Cleanup position manager
+            if hasattr(self, 'position_manager'):
+                self.position_manager.close_document()
+                
+            # Save position for the content
+            if hasattr(self, 'document') and hasattr(self.document, 'position'):
+                try:
+                    if hasattr(self, 'content_edit'):
+                        if hasattr(self.content_edit, 'verticalScrollBar'):
+                            # For text edit or other scrollable widgets
+                            scrollbar = self.content_edit.verticalScrollBar()
+                            self.document.position = scrollbar.value()
+                        elif hasattr(self.content_edit, 'audioPosition'):
+                            # For audio player
+                            self.document.position = self.content_edit.audioPosition()
+                        elif hasattr(self.content_edit, 'currentPage'):
+                            # For PDF viewer
+                            self.document.position = self.content_edit.currentPage()
+                            
+                    # Update last accessed timestamp
+                    self.document.last_accessed = datetime.utcnow()
+                    self.db_session.commit()
+                    logger.info(f"Saved position for document {self.document_id}")
+                except Exception as e:
+                    logger.exception(f"Error saving position on close: {e}")
+        except Exception as e:
+            logger.exception(f"Error during closeEvent: {e}")
+        
+        # Call parent handler
+        super().closeEvent(event)
+
+
+        def _on_js_position_changed(self, position):
+            """Handle position changed event from JavaScript."""
+            # Update document position
+            if hasattr(self, 'document') and self.document:
+                self.document.position = position
+                self.db_session.commit()
+
+        def _update_bookmark_note(self, position, note):
+            """Update note for bookmark at the specified position."""
+            if not hasattr(self, 'read_later_manager'):
+                return
+
+            # Find and update bookmark
+            for item in self.read_later_manager.read_later_items:
+                if item.document_id == self.document_id and abs(item.position - position) < 100:
+                    item.note = note
+                    self.read_later_manager.save_items()
+
+                    # Update bookmark menu
+                    self.update_bookmark_menu()
+                    break
+
+        def _remove_bookmark(self, position):
+            """Remove bookmark at the specified position."""
+            if not hasattr(self, 'read_later_manager'):
+                return
+
+            # Remove bookmark
+            self.read_later_manager.remove_item(self.document_id, position)
+
+            # Update bookmark menu
+            self.update_bookmark_menu()
+
+    def update_bookmark_menu(self):
+        """Update the bookmark menu with current document bookmarks."""
+        if not hasattr(self, 'bookmark_button') or not self.bookmark_button:
+            return
+
+        # Get menu
+        menu = self.bookmark_button.menu()
+        if not menu:
+            return
+
+        # Clear existing document bookmarks
+        for action in menu.actions():
+            if hasattr(action, 'is_bookmark') and action.is_bookmark:
+                menu.removeAction(action)
+
+        # Add current document bookmarks if available
+        if hasattr(self, 'document_id') and self.document_id and hasattr(self, 'read_later_manager'):
+            items = self.read_later_manager.get_items_for_document(self.document_id)
+
+            if items:
+                # Get document
+                from core.knowledge_base.models import Document
+                document = self.db_session.query(Document).get(self.document_id)
+
+                # Add document header
+                doc_header = QAction(f"Bookmarks for {document.title}", self.bookmark_button)
+                doc_header.setEnabled(False)
+                doc_header.is_bookmark = True
+                menu.addAction(doc_header)
+
+                # Add bookmark items
+                for item in items:
+                    # Create descriptive label
+                    label = f"Position: {item.position:.0f}"
+                    if item.note:
+                        label = f"{label} - {item.note}"
+
+                    # Create action
+                    bookmark_action = QAction(label, self.bookmark_button)
+                    bookmark_action.is_bookmark = True
+                    bookmark_action.triggered.connect(lambda checked=False, pos=item.position: self._restore_read_later_position(pos))
+                    menu.addAction(bookmark_action)
+            else:
+                # No bookmarks message
+                no_bookmarks = QAction("No bookmarks for this document", self.bookmark_button)
+                no_bookmarks.setEnabled(False)
+                no_bookmarks.is_bookmark = True
+                menu.addAction(no_bookmarks)
     
     def _update_vim_status_visibility(self):
         """Update the visibility of the Vim status bar based on Vim mode state."""
@@ -1498,6 +1685,8 @@ window.addEventListener('load', function() {
                 self.keep_alive(self.youtube_callback)
             if hasattr(self, 'audio_player'):
                 self.keep_alive(self.audio_player)
+            if hasattr(self, 'position_manager'):
+                self.position_manager.restore_position(document_id)
                 
             # Clear the document area
             self._clear_content_layout()
@@ -1517,7 +1706,15 @@ window.addEventListener('load', function() {
             doc_type = self.document.content_type.lower() if hasattr(self.document, 'content_type') and self.document.content_type else "text"
             
             logger.debug(f"Loading document: {self.document.title} (Type: {doc_type})")
-            
+
+            self.position_manager.restore_position(document_id)
+
+            if hasattr(self, 'position_manager'):
+                self.position_manager.restore_position(document_id)
+
+            if hasattr(self, 'position_autosave'):
+                self.position_autosave.set_document(document_id)
+                
             # Handle different document types
             if doc_type == "youtube":
                 self._load_youtube()
@@ -1773,7 +1970,12 @@ window.addEventListener('load', function() {
                 
                 # Store the web view for later use (important for context menu)
                 self.web_view = content_edit
+                self.content_edit = content_edit
                 
+
+                # Add to keep alive to prevent garbage collection
+                self.keep_alive(content_edit)
+
                 # Set up the selection handling and context menu
                 from PyQt6.QtCore import QObject, pyqtSlot
                 
@@ -1789,18 +1991,72 @@ window.addEventListener('load', function() {
                 content_edit.page().setWebChannel(self.web_channel)
                 self.web_channel.registerObject("selectionHandler", handler)
                 
+                # Add JavaScript files for enhanced features
+                js_files = [
+                    'position_tracking.js',
+                    'visual_bookmarks.js',
+                    'timeline_view.js'
+                ]
+
+                for js_file in js_files:
+                    js_path = os.path.join(os.path.dirname(__file__), js_file)
+                    if os.path.exists(js_path):
+                        with open(js_path, 'r') as f:
+                            script = f.read()
+                            content_edit.page().runJavaScript(script)
+                    else:
+                        logger.warning(f"JavaScript file not found: {js_path}")
+
+                # Initialize with document ID
+                doc_id_script = f"document.documentElement.setAttribute('data-document-id', '{self.document_id}');"
+                content_edit.page().runJavaScript(doc_id_script)
+
+                # Set up communication handlers for JavaScript features
+                class WebFeaturesHandler(QObject):
+                    """Handler for JavaScript communication."""
+                    
+                    @pyqtSlot(float)
+                    def positionChanged(self, position):
+                        """Handle position changed event from JavaScript."""
+                        self.parent()._on_js_position_changed(position)
+                    
+                    @pyqtSlot(float)
+                    def addBookmark(self, position):
+                        """Handle add bookmark request from JavaScript."""
+                        self.parent()._create_read_later_item(position)
+                    
+                    @pyqtSlot(float, str)
+                    def updateBookmark(self, position, note):
+                        """Handle update bookmark request from JavaScript."""
+                        self.parent()._update_bookmark_note(position, note)
+                    
+                    @pyqtSlot(float)
+                    def removeBookmark(self, position):
+                        """Handle remove bookmark request from JavaScript."""
+                        self.parent()._remove_bookmark(position)
+
+                # Create handler and register with web channel
+                handler = WebFeaturesHandler(self)
+                if not hasattr(self, 'web_channel'):
+                    from PyQt6.QtWebChannel import QWebChannel
+                    self.web_channel = QWebChannel()
+                self.web_channel.registerObject("qtHandler", handler)
+
                 # First, inject the QWebChannel JavaScript API fallback
                 qwebchannel_js = """
                 // Define QWebChannel if needed
                 if (typeof QWebChannel === 'undefined') {
+                    console.log('QWebChannel not found, creating fallback implementation');
                     class QWebChannel {
                         constructor(transport, callback) {
+                            console.log('QWebChannel fallback created');
                             this.transport = transport;
                             this.objects = {};
                             
                             // Add the callback handler object
                             this.objects.selectionHandler = {
                                 selectionChanged: function(text) {
+                                    console.log('Selection changed in fallback handler:', text);
                                     if (window.qt && window.qt.selectionChanged) {
                                         window.qt.selectionChanged(text);
                                     }
@@ -1809,11 +2065,34 @@ window.addEventListener('load', function() {
                             
                             // Call the callback with this channel
                             if (callback) {
-                                callback(this);
+                                setTimeout(function() {
+                                    callback(this);
+                                }.bind(this), 0);
                             }
                         }
                     }
+                    
+                    // Create global namespace
+                    window.qt = {
+                        webChannelTransport: {},
+                        selectionChanged: function(text) {
+                            console.log('Selection fallback called with:', text);
+                            window.text_selection = text;
+                        }
+                    };
+                    
+                    console.log('QWebChannel fallback implementation complete');
                 }
+                
+                // Ensure QWebChannel is properly initialized
+                document.addEventListener('DOMContentLoaded', function() {
+                    console.log('DOM loaded, checking QWebChannel');
+                    if (typeof QWebChannel === 'undefined') {
+                        console.warn('QWebChannel still not defined after DOMContentLoaded');
+                    } else {
+                        console.log('QWebChannel is available');
+                    }
+                });
                 """
                 
                 # Inject custom JavaScript for selection handling
@@ -1907,27 +2186,46 @@ window.addEventListener('load', function() {
                 if (typeof QWebChannel === 'undefined') {
                     console.error('QWebChannel is not defined. Using fallback method.');
                     // Direct fallback for selection handling
-                    window.qt = {
-                        selectionChanged: function(text) {
-                            // Handle in a simpler way
-                            window.text_selection = text;
-                        }
+                    window.qt = window.qt || {};
+                    window.qt.selectionChanged = function(text) {
+                        // Handle in a simpler way
+                        console.log('Fallback selection handler called with:', text);
+                        window.text_selection = text;
                     };
                 } else {
                     try {
+                        console.log('Attempting to initialize QWebChannel with transport');
+                        if (!qt.webChannelTransport) {
+                            console.warn('webChannelTransport not found, creating dummy');
+                            qt.webChannelTransport = {};
+                        }
+                        
                         new QWebChannel(qt.webChannelTransport, function(channel) {
+                            console.log('QWebChannel initialized successfully');
                             window.qt = channel.objects.selectionHandler;
+                            console.log('Selection handler registered:', window.qt);
                         });
                     } catch (e) {
                         console.error('Error initializing QWebChannel:', e);
                         // Fallback
-                        window.qt = {
-                            selectionChanged: function(text) {
-                                window.text_selection = text;
-                            }
+                        window.qt = window.qt || {};
+                        window.qt.selectionChanged = function(text) {
+                            console.log('Error fallback selection handler called with:', text);
+                            window.text_selection = text;
                         };
                     }
                 }
+                
+                // Global function to check if selection handling is working
+                window.checkSelectionHandler = function() {
+                    console.log('Qt object:', window.qt);
+                    console.log('Current selection:', window.text_selection);
+                    return {
+                        qt: !!window.qt,
+                        selection: window.text_selection,
+                        channelDefined: (typeof QWebChannel !== 'undefined')
+                    };
+                };
                 """
                 
                 # Add SuperMemo SM-18 style incremental reading capabilities
@@ -1935,8 +2233,15 @@ window.addEventListener('load', function() {
                 
                 # Inject the scripts after the page has loaded - order matters!
                 content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(qwebchannel_js))
-                content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(selection_js))
-                content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(connect_js))
+                # Add a small delay to ensure the QWebChannel script has time to execute
+                content_edit.loadFinished.connect(lambda ok: QTimer.singleShot(100, lambda: content_edit.page().runJavaScript(selection_js)))
+                content_edit.loadFinished.connect(lambda ok: QTimer.singleShot(200, lambda: content_edit.page().runJavaScript(connect_js)))
+                
+                # Add a diagnostic check after a delay
+                content_edit.loadFinished.connect(lambda ok: QTimer.singleShot(500, lambda: content_edit.page().runJavaScript(
+                    "window.checkSelectionHandler ? window.checkSelectionHandler() : 'Not available'",
+                    lambda result: logger.debug(f"Selection handler check: {result}")
+                )))
                 
                 # Set up context menu
                 content_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1992,6 +2297,170 @@ window.addEventListener('load', function() {
             error_widget.setStyleSheet("color: red; padding: 20px;")
             self.content_layout.addWidget(error_widget)
             return False
+
+    def _on_add_read_later(self):
+        """Add current position to Read Later."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+
+            # Get current position
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, get scroll position using JavaScript
+                self.web_view.page().runJavaScript(
+                    "window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;",
+                    lambda result: self._create_read_later_item(result)
+                )
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
+                # For text edit or other scrollable widgets
+                scrollbar = self.content_edit.verticalScrollBar()
+                position = scrollbar.value()
+                self._create_read_later_item(position)
+            elif hasattr(self, 'audio_player') and hasattr(self.audio_player, 'audioPosition'):
+                # For audio player
+                position = self.audio_player.audioPosition()
+                self._create_read_later_item(position)
+            elif hasattr(self, 'pdf_view') and hasattr(self.pdf_view, 'currentPage'):
+                # For PDF viewer
+                position = self.pdf_view.currentPage()
+                self._create_read_later_item(position)
+            else:
+                QMessageBox.warning(
+                    self, "Read Later",
+                    "Unable to determine reading position for this document type."
+                )
+
+        except Exception as e:
+            logger.exception(f"Error adding to Read Later: {e}")
+            QMessageBox.warning(
+                self, "Error",
+                f"An error occurred: {str(e)}"
+            )
+
+    def _create_read_later_item(self, position):
+        """Create a Read Later item with the given position."""
+        try:
+            # Ask for note
+            note, ok = QInputDialog.getText(
+                self,
+                "Add to Read Later",
+                "Enter a note for this position (optional):",
+                text=""
+            )
+
+            if not ok:
+                return
+
+            # Add to manager
+            item = self.read_later_manager.add_item(
+                document_id=self.document_id,
+                position=position,
+                note=note if note else None
+            )
+
+            # Add visual bookmark if in web view
+            if hasattr(self, 'web_view') and self.web_view:
+                # Add visual bookmark with JavaScript
+                script = f"""
+                if (typeof addVisualBookmark === 'function') {{
+                    addVisualBookmark({position}, "{note.replace('"', '')}");
+                    true;
+                }} else {{
+                    false;
+                }}
+                """
+                self.web_view.page().runJavaScript(script)
+
+            QMessageBox.information(
+                self, "Read Later",
+                "Position saved for reading later."
+            )
+
+        except Exception as e:
+            logger.exception(f"Error creating Read Later item: {e}")
+            QMessageBox.warning(
+                self, "Error",
+                f"An error occurred: {str(e)}"
+            )
+
+    def _on_show_read_later_items(self):
+        """Show Read Later items dialog."""
+        try:
+            from read_later_feature import ReadLaterDialog
+
+            dialog = ReadLaterDialog(self.db_session, self)
+            dialog.itemSelected.connect(self._on_read_later_item_selected)
+            dialog.exec()
+
+        except Exception as e:
+            logger.exception(f"Error showing Read Later items: {e}")
+            QMessageBox.warning(
+                self, "Error",
+                f"An error occurred: {str(e)}"
+            )
+
+    def _on_read_later_item_selected(self, document_id, position):
+        """Handle selection of a Read Later item."""
+        try:
+            # Check if the document is already loaded
+            if hasattr(self, 'document_id') and self.document_id == document_id:
+                # Just restore position
+                self._restore_read_later_position(position)
+            else:
+                # Load the document
+                self.load_document(document_id)
+
+                # Set a timer to restore position after document is loaded
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(500, lambda: self._restore_read_later_position(position))
+
+        except Exception as e:
+            logger.exception(f"Error loading Read Later item: {e}")
+            QMessageBox.warning(
+                self, "Error",
+                f"An error occurred: {str(e)}"
+            )
+
+    def _restore_read_later_position(self, position):
+        """Restore a specific position for the current document."""
+        if hasattr(self, 'web_view') and self.web_view:
+            # For web view, use JavaScript to set scroll position
+            script = f"""
+            if (typeof restoreDocumentPosition === 'function') {{
+                restoreDocumentPosition({position});
+            }} else {{
+                window.scrollTo(0, {position});
+            }}
+            """
+            self.web_view.page().runJavaScript(script)
+
+        elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
+            # For scrollable widgets
+            scrollbar = self.content_edit.verticalScrollBar()
+            if scrollbar:
+                scrollbar.setValue(position)
+
+        elif hasattr(self, 'audio_player') and hasattr(self.audio_player, 'setAudioPosition'):
+            # For audio player
+            self.audio_player.setAudioPosition(position)
+
+        elif hasattr(self, 'pdf_view') and hasattr(self.pdf_view, 'goToPage'):
+            # For PDF viewer
+            self.pdf_view.goToPage(int(position))
+
+    def _on_show_reading_stats(self):
+        """Show reading statistics dialog."""
+        try:
+            dialog = ReadingStatsDialog(self, self)
+            dialog.exec()
+
+        except Exception as e:
+            logger.exception(f"Error showing reading statistics: {e}")
+            QMessageBox.warning(
+                self, "Error",
+                f"An error occurred: {str(e)}"
+            )
     
     def _on_extract(self):
         """Create extract from selected text."""
@@ -2377,48 +2846,25 @@ window.addEventListener('load', function() {
     def _restore_position(self):
         """Restore previous reading position for the document."""
         try:
-            if not hasattr(self, 'document_id') or not self.document_id:
-                return
-                
-            # Check if we have a stored position for this document
-            document = self.db_session.query(Document).get(self.document_id)
-            
-            if not document or document.position is None:
-                logger.debug(f"No reading position found for document {self.document_id}")
-                return
-                
-            # Restore position based on content type
-            if hasattr(self, 'web_view') and self.web_view:
-                # For web view, use JavaScript to set scroll position with a delay
-                # to ensure document is fully loaded
-                from PyQt6.QtCore import QTimer
-                
-                def apply_scroll():
-                    scroll_script = f"window.scrollTo(0, {document.position});"
-                    self.web_view.page().runJavaScript(scroll_script)
-                    logger.debug(f"Restored web view scroll position to {document.position}")
-                
-                # Use timer to delay scroll position application
-                QTimer.singleShot(500, apply_scroll)
-                
-            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
-                # For widgets with scroll bars, set the value directly
-                scrollbar = self.content_edit.verticalScrollBar()
-                if scrollbar:
-                    scrollbar.setValue(document.position)
-                    logger.debug(f"Restored scroll position to {document.position}")
-                
-            logger.debug(f"Successfully restored reading position for document {self.document_id}")
-                
+            if hasattr(self, 'position_manager'):
+                self.position_manager.restore_position(self.document_id)
+                logger.debug(f"Restored position for document {self.document_id}")
+            else:
+                logger.warning("Position manager not initialized")
         except Exception as e:
-            logger.exception(f"Error restoring reading position: {e}")
-            # Continue without restoring position
+            logger.exception(f"Error restoring position: {e}")
+
 
     def _handle_webview_selection(self, text):
         """Handle text selection in the WebView."""
         if text and text.strip():
             self.selected_text = text.strip()
             logger.debug(f"Selected text in WebView: {text[:50]}...")
+
+    def _on_position_saved(self, document_id, position):
+        """Handle position saved event."""
+        # This can be used for UI feedback if needed
+        pass
             
     def _on_create_extract(self):
         """Create an extract from the selected text."""
@@ -2595,6 +3041,16 @@ window.addEventListener('load', function() {
                     orange_action = QAction("Orange", self)
                     orange_action.triggered.connect(lambda: self._highlight_with_color("orange"))
                     highlight_menu.addAction(orange_action)
+
+                    # Add Read Later option
+                    read_later_action = QAction("Read Later (🔖)", self)
+                    read_later_action.triggered.connect(self._on_add_read_later)
+                    menu.addAction(read_later_action)
+
+                    # Add reading stats option
+                    stats_action = QAction("Reading Statistics 📊", self)
+                    stats_action.triggered.connect(self._on_show_reading_stats)
+                    menu.addAction(stats_action)
                     
                     menu.addMenu(highlight_menu)
                     
@@ -3055,7 +3511,49 @@ window.addEventListener('load', function() {
         self.ir_button.setStatusTip("Add to incremental reading queue")
         self.ir_button.triggered.connect(self._on_add_to_incremental_reading)
         toolbar.addAction(self.ir_button)
-        
+
+        # Add Read Later button
+        self.read_later_button = QAction("Read Later", self)
+        self.read_later_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        self.read_later_button.setStatusTip("Save position for reading later")
+        self.read_later_button.triggered.connect(self._on_add_read_later)
+        toolbar.addAction(self.read_later_button)
+
+        # Add bookmark button with dropdown menu
+        bookmark_button = QToolButton()
+        bookmark_button.setText("Bookmarks")
+        bookmark_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
+        bookmark_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        bookmark_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+
+        # Create menu for bookmarks
+        bookmark_menu = QMenu(bookmark_button)
+
+        # Add action to show all bookmarks
+        show_all_action = QAction("Show All Bookmarks", bookmark_button)
+        show_all_action.triggered.connect(self._on_show_read_later_items)
+        bookmark_menu.addAction(show_all_action)
+
+        # Add separator
+        bookmark_menu.addSeparator()
+
+        # Set the menu to the button
+        bookmark_button.setMenu(bookmark_menu)
+
+        # Connect button click to show all bookmarks
+        bookmark_button.clicked.connect(self._on_show_read_later_items)
+
+        # Add to toolbar
+        toolbar.addWidget(bookmark_button)
+        self.bookmark_button = bookmark_button  # Save reference
+
+        # Add reading stats button
+        self.stats_button = QAction("Reading Stats", self)
+        self.stats_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogInfoView))
+        self.stats_button.setStatusTip("Show reading statistics")
+        self.stats_button.triggered.connect(self._on_show_reading_stats)
+        toolbar.addAction(self.stats_button)
+            
         return toolbar
 
     def _on_previous(self):
