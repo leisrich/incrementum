@@ -253,47 +253,151 @@ class IncrementalReading(Base):
     document = relationship("Document", backref="reading_progress")
     
     def __repr__(self):
-        return f"<IncrementalReading(id={self.id}, document_id={self.document_id}, priority={self.reading_priority}, complete={self.percent_complete}%)>"
+        return f"<IncrementalReading(document_id={self.document_id}, position={self.current_position}, priority={self.reading_priority})>"
     
     def calculate_next_date(self, grade: int):
         """
-        Calculate next reading date using SuperMemo SM-2 algorithm.
+        Calculate the next reading date based on the SM-2 algorithm.
         
         Args:
-            grade: Quality of reading (0-5 scale)
+            grade: Rating from 0-5
+            
+        Returns:
+            datetime: Next read date
         """
-        # If failed completely, reset
-        if grade < 3:
+        # Convert 0-5 grade to SM-2 0-5 grade
+        sm_grade = grade
+        
+        # If first time, use different schedule
+        if self.repetitions == 0:
+            if sm_grade < 3:
+                # Failed recall, repeat in 10 minutes
+                self.interval = 0
+                self.schedule_state = "learning"
+                return datetime.utcnow() + timedelta(minutes=10)
+            else:
+                # Successful recall, move to next day
+                self.interval = 1
+                self.repetitions = 1
+                self.schedule_state = "learning"
+                return datetime.utcnow() + timedelta(days=1)
+        
+        # If grade is less than 3, start over
+        if sm_grade < 3:
             self.repetitions = 0
             self.interval = 1
+            self.schedule_state = "learning"
+            return datetime.utcnow() + timedelta(days=1)
+        
+        # Update E-Factor (easiness)
+        self.easiness = max(1.3, self.easiness + (0.1 - (5 - sm_grade) * (0.08 + (5 - sm_grade) * 0.02)))
+        
+        # Update repetitions
+        self.repetitions += 1
+        
+        # Calculate next interval
+        if self.repetitions == 1:
+            self.interval = 1
+        elif self.repetitions == 2:
+            self.interval = 6
         else:
-            # Update easiness factor
-            self.easiness = max(1.3, self.easiness + (0.1 - (5 - grade) * (0.08 + (5 - grade) * 0.02)))
-            
-            # Update interval
-            if self.repetitions == 0:
-                self.interval = 1
-            elif self.repetitions == 1:
-                self.interval = 6
-            else:
-                self.interval = round(self.interval * self.easiness)
-                
-            # Cap interval at 365 days
-            self.interval = min(365, self.interval)
-            
-            # Increment repetitions
-            self.repetitions += 1
-            
-        # Set next reading date
-        self.next_read_date = datetime.utcnow() + timedelta(days=self.interval)
+            self.interval = round(self.interval * self.easiness)
+        
+        # Cap interval at 365 days
+        self.interval = min(365, self.interval)
         
         # Update state
+        self.schedule_state = "review"
+        
+        # Return next date
+        return datetime.utcnow() + timedelta(days=self.interval)
+
+class VideoLearning(Base):
+    """Tracks incremental video learning progress."""
+    __tablename__ = 'video_learning'
+
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=False)
+    current_timestamp = Column(Integer, default=0)  # Position in video (seconds)
+    duration = Column(Integer, default=0)  # Total video duration in seconds
+    last_watched_date = Column(DateTime, default=datetime.utcnow)
+    next_watch_date = Column(DateTime, nullable=True)  # When to continue watching
+    watch_priority = Column(Float, default=50.0)  # Priority (0-100)
+    
+    # Spaced repetition fields
+    interval = Column(Integer, default=1)  # Days between watching sessions
+    repetitions = Column(Integer, default=0)  # Number of watching sessions
+    easiness = Column(Float, default=2.5)  # SM-2 easiness factor
+    schedule_state = Column(String(20), default="new")  # new, learning, review
+    percent_complete = Column(Float, default=0.0)  # Watching progress (0-100)
+    watched_segments = Column(Text, default="[]")  # JSON array of watched segments [{"start": int, "end": int}, ...]
+    
+    # Video-specific fields
+    playback_rate = Column(Float, default=1.0)  # Last used playback rate
+    video_quality = Column(String(20), default="auto")  # Last used video quality
+    
+    # Relationships
+    document = relationship("Document", backref="video_progress")
+    
+    def __repr__(self):
+        return f"<VideoLearning(document_id={self.document_id}, timestamp={self.current_timestamp}, priority={self.watch_priority})>"
+    
+    def calculate_next_date(self, grade: int):
+        """
+        Calculate the next watching date based on the SM-2 algorithm.
+        
+        Args:
+            grade: Rating from 0-5
+            
+        Returns:
+            datetime: Next watch date
+        """
+        # Convert 0-5 grade to SM-2 0-5 grade
+        sm_grade = grade
+        
+        # If first time, use different schedule
         if self.repetitions == 0:
-            self.schedule_state = "new"
-        elif self.repetitions < 3:
+            if sm_grade < 3:
+                # Failed recall, repeat in 10 minutes
+                self.interval = 0
+                self.schedule_state = "learning"
+                return datetime.utcnow() + timedelta(minutes=10)
+            else:
+                # Successful recall, move to next day
+                self.interval = 1
+                self.repetitions = 1
+                self.schedule_state = "learning"
+                return datetime.utcnow() + timedelta(days=1)
+        
+        # If grade is less than 3, start over
+        if sm_grade < 3:
+            self.repetitions = 0
+            self.interval = 1
             self.schedule_state = "learning"
+            return datetime.utcnow() + timedelta(days=1)
+        
+        # Update E-Factor (easiness)
+        self.easiness = max(1.3, self.easiness + (0.1 - (5 - sm_grade) * (0.08 + (5 - sm_grade) * 0.02)))
+        
+        # Update repetitions
+        self.repetitions += 1
+        
+        # Calculate next interval
+        if self.repetitions == 1:
+            self.interval = 1
+        elif self.repetitions == 2:
+            self.interval = 6
         else:
-            self.schedule_state = "review"
+            self.interval = round(self.interval * self.easiness)
+        
+        # Cap interval at 365 days
+        self.interval = min(365, self.interval)
+        
+        # Update state
+        self.schedule_state = "review"
+        
+        # Return next date
+        return datetime.utcnow() + timedelta(days=self.interval)
 
 # Database initialization
 def init_database():
