@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_, and_, desc, asc
 from sqlalchemy.orm import Session, object_session
-from core.knowledge_base.models import Document, Category, Extract, LearningItem, ReviewLog, Tag, WebHighlight, Highlight
+from core.knowledge_base.models import Document, Category, Extract, LearningItem, ReviewLog, Tag, WebHighlight, Highlight, VideoLearning
 
 logger = logging.getLogger(__name__)
 
@@ -692,3 +692,146 @@ class FSRSAlgorithm:
             self.db_session.commit()
         
         self.document_id = document.id 
+
+    def _force_close_tab(self, index):
+        """Force close a tab, even if it's dirty."""
+        # ... existing code ...
+
+    def get_video_learning_queue(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get a sorted list of videos for incremental video learning.
+        
+        Args:
+            limit: Maximum number of items to return
+            
+        Returns:
+            List of dicts containing video information
+        """
+        try:
+            now = datetime.now()
+            
+            # Query videos that are due or new
+            query = self.db_session.query(
+                Document, VideoLearning
+            ).join(
+                VideoLearning, Document.id == VideoLearning.document_id
+            ).filter(
+                Document.content_type.in_(['mp4', 'youtube', 'video']),
+                or_(
+                    VideoLearning.next_watch_date.is_(None),
+                    VideoLearning.next_watch_date <= now
+                )
+            ).order_by(
+                # Sort by priority and due date
+                VideoLearning.watch_priority.desc(),
+                VideoLearning.next_watch_date.asc().nullsfirst()
+            ).limit(limit)
+            
+            results = query.all()
+            
+            # Format results
+            queue = []
+            for document, video_learning in results:
+                # Calculate due status
+                if video_learning.next_watch_date is None:
+                    due_status = "new"
+                    days_overdue = 0
+                else:
+                    days_overdue = (now - video_learning.next_watch_date).days
+                    if days_overdue <= 0:
+                        due_status = "due today"
+                    else:
+                        due_status = f"overdue by {days_overdue} days"
+                
+                # Calculate progress
+                progress_percent = 0
+                if video_learning.duration > 0:
+                    progress_percent = (video_learning.current_timestamp / video_learning.duration) * 100
+                
+                queue.append({
+                    "document_id": document.id,
+                    "video_learning_id": video_learning.id,
+                    "title": document.title,
+                    "priority": video_learning.watch_priority,
+                    "due_status": due_status,
+                    "days_overdue": days_overdue,
+                    "current_timestamp": video_learning.current_timestamp,
+                    "duration": video_learning.duration,
+                    "progress_percent": progress_percent,
+                    "last_watched": video_learning.last_watched_date,
+                    "easiness": video_learning.easiness,
+                    "repetitions": video_learning.repetitions,
+                    "playback_rate": video_learning.playback_rate
+                })
+            
+            return queue
+            
+        except Exception as e:
+            logger.exception(f"Error getting video learning queue: {e}")
+            return []
+
+    def update_video_learning(self, document_id: int, current_timestamp: int, 
+                            duration: int = None, rating: int = None) -> Dict[str, Any]:
+        """
+        Update video learning progress and schedule next session.
+        
+        Args:
+            document_id: Document ID
+            current_timestamp: Current position in video (seconds)
+            duration: Total video duration in seconds (optional)
+            rating: Optional rating of current session (0-5)
+            
+        Returns:
+            Dict with update status
+        """
+        try:
+            # Get document
+            document = self.db_session.query(Document).get(document_id)
+            if not document:
+                return {"success": False, "error": "Document not found"}
+                
+            # Get video learning record or create if doesn't exist
+            video_learning = self.db_session.query(VideoLearning).filter(
+                VideoLearning.document_id == document_id
+            ).first()
+            
+            if not video_learning:
+                video_learning = VideoLearning(
+                    document_id=document_id,
+                    current_timestamp=0,
+                    duration=duration or 0,
+                    watch_priority=document.priority,  # Inherit document priority
+                )
+                self.db_session.add(video_learning)
+            
+            # Update position
+            video_learning.current_timestamp = current_timestamp
+            video_learning.last_watched_date = datetime.now()
+            
+            # Update duration if provided
+            if duration:
+                video_learning.duration = duration
+                
+            # Calculate progress if duration is known
+            if video_learning.duration > 0:
+                video_learning.percent_complete = (current_timestamp / video_learning.duration) * 100
+            
+            # If rating provided, schedule next session
+            if rating is not None:
+                next_date = video_learning.calculate_next_date(rating)
+                video_learning.next_watch_date = next_date
+            
+            # Commit changes
+            self.db_session.commit()
+            
+            return {
+                "success": True, 
+                "video_learning_id": video_learning.id,
+                "next_date": video_learning.next_watch_date,
+                "progress": video_learning.percent_complete
+            }
+            
+        except Exception as e:
+            self.db_session.rollback()
+            logger.exception(f"Error updating video learning: {e}")
+            return {"success": False, "error": str(e)} 

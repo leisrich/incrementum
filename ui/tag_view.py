@@ -2,20 +2,23 @@
 
 import logging
 from typing import Dict, Any, List, Optional
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QLineEdit, QListWidget, QListWidgetItem,
     QComboBox, QGroupBox, QMessageBox, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
-    QSplitter, QMenu, QApplication
+    QSplitter, QMenu, QApplication, QDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QSize, QPoint, QModelIndex
 from PyQt6.QtGui import QIcon, QAction
 
 from sqlalchemy import func
-from core.knowledge_base.models import Document, Extract, Tag
+from core.knowledge_base.models import Document, Extract, Tag, LearningItem
 from core.knowledge_base.tag_manager import TagManager
+from core.spaced_repetition.fsrs import FSRSAlgorithm
+from ui.review_widget import ReviewWidget
 
 logger = logging.getLogger(__name__)
 
@@ -78,16 +81,16 @@ class TagView(QWidget):
         tag_ops_layout = QHBoxLayout()
         
         self.add_tag_button = QPushButton("Add Tag")
-        self.add_tag_button.clicked.connect(self._on_add_tag)
+        self.add_tag_button.clicked.connect(lambda checked=False: self._on_add_tag())
         tag_ops_layout.addWidget(self.add_tag_button)
         
         self.rename_tag_button = QPushButton("Rename")
-        self.rename_tag_button.clicked.connect(self._on_rename_tag)
+        self.rename_tag_button.clicked.connect(lambda checked=False: self._on_rename_tag())
         self.rename_tag_button.setEnabled(False)  # Initially disabled
         tag_ops_layout.addWidget(self.rename_tag_button)
         
         self.delete_tag_button = QPushButton("Delete")
-        self.delete_tag_button.clicked.connect(self._on_delete_tag)
+        self.delete_tag_button.clicked.connect(lambda checked=False: self._on_delete_tag())
         self.delete_tag_button.setEnabled(False)  # Initially disabled
         tag_ops_layout.addWidget(self.delete_tag_button)
         
@@ -97,11 +100,11 @@ class TagView(QWidget):
         tag_adv_ops_layout = QHBoxLayout()
         
         self.merge_tags_button = QPushButton("Merge Tags")
-        self.merge_tags_button.clicked.connect(self._on_merge_tags)
+        self.merge_tags_button.clicked.connect(lambda checked=False: self._on_merge_tags())
         tag_adv_ops_layout.addWidget(self.merge_tags_button)
         
         self.export_tags_button = QPushButton("Export Tags")
-        self.export_tags_button.clicked.connect(self._on_export_tags)
+        self.export_tags_button.clicked.connect(lambda checked=False: self._on_export_tags())
         tag_adv_ops_layout.addWidget(self.export_tags_button)
         
         tags_inner_layout.addLayout(tag_adv_ops_layout)
@@ -158,6 +161,33 @@ class TagView(QWidget):
         
         content_tabs.addTab(self.extracts_tab, "Extracts")
         
+        # Learning Items tab
+        self.learning_items_tab = QWidget()
+        learning_items_layout = QVBoxLayout(self.learning_items_tab)
+        
+        self.learning_items_table = QTableWidget()
+        self.learning_items_table.setColumnCount(4)
+        self.learning_items_table.setHorizontalHeaderLabels(["Question", "Type", "Last Reviewed", "Due"])
+        self.learning_items_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.learning_items_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.learning_items_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.learning_items_table.customContextMenuRequested.connect(self._on_learning_item_context_menu)
+        self.learning_items_table.doubleClicked.connect(self._on_learning_item_selected)
+        
+        learning_items_layout.addWidget(self.learning_items_table)
+        
+        # Review button
+        review_button_layout = QHBoxLayout()
+        self.review_button = QPushButton("Review Learning Items")
+        self.review_button.clicked.connect(lambda checked=False: self._on_review_learning_items())
+        self.review_button.setEnabled(False)  # Initially disabled
+        review_button_layout.addStretch()
+        review_button_layout.addWidget(self.review_button)
+        
+        learning_items_layout.addLayout(review_button_layout)
+        
+        content_tabs.addTab(self.learning_items_tab, "Learning Items")
+        
         content_layout.addWidget(content_tabs)
         
         # Add control buttons
@@ -207,11 +237,19 @@ class TagView(QWidget):
             Extract.tags.any(Tag.id == tag_id)
         ).scalar() or 0
         
+        # Count learning items associated with extracts that have this tag
+        learning_item_count = self.db_session.query(func.count(LearningItem.id)).join(
+            Extract, LearningItem.extract_id == Extract.id
+        ).filter(
+            Extract.tags.any(Tag.id == tag_id)
+        ).scalar() or 0
+        
         # Update label
         stats_text = f"<b>Tag: {tag.name}</b><br>"
         stats_text += f"Documents: {doc_count}<br>"
         stats_text += f"Extracts: {extract_count}<br>"
-        stats_text += f"Total tagged items: {doc_count + extract_count}"
+        stats_text += f"Learning Items: {learning_item_count}<br>"
+        stats_text += f"Total tagged items: {doc_count + extract_count + learning_item_count}"
         
         self.tag_stats_label.setText(stats_text)
     
@@ -225,8 +263,14 @@ class TagView(QWidget):
             Document.tags.any(Tag.id == tag_id)
         ).all()
         
-        # Update tab title
-        self.documents_tab.parentWidget().setTabText(0, f"Documents ({len(documents)})")
+        # Update tab title if parent is a QTabWidget
+        parent = self.documents_tab.parentWidget()
+        if hasattr(parent, 'setTabText'):
+            # Check which tab index this widget is at
+            for i in range(parent.count()):
+                if parent.widget(i) == self.documents_tab:
+                    parent.setTabText(i, f"Documents ({len(documents)})")
+                    break
         
         # Add rows
         for i, doc in enumerate(documents):
@@ -256,8 +300,14 @@ class TagView(QWidget):
             Extract.tags.any(Tag.id == tag_id)
         ).all()
         
-        # Update tab title
-        self.extracts_tab.parentWidget().setTabText(1, f"Extracts ({len(extracts)})")
+        # Update tab title if parent is a QTabWidget
+        parent = self.extracts_tab.parentWidget()
+        if hasattr(parent, 'setTabText'):
+            # Check which tab index this widget is at
+            for i in range(parent.count()):
+                if parent.widget(i) == self.extracts_tab:
+                    parent.setTabText(i, f"Extracts ({len(extracts)})")
+                    break
         
         # Add rows
         for i, extract in enumerate(extracts):
@@ -282,6 +332,59 @@ class TagView(QWidget):
             date_item = QTableWidgetItem(date_str)
             self.extracts_table.setItem(i, 2, date_item)
     
+    def _load_tag_learning_items(self, tag_id):
+        """Load learning items associated with extracts that have the selected tag."""
+        # Clear table
+        self.learning_items_table.setRowCount(0)
+        
+        # Get learning items associated with extracts that have this tag
+        learning_items = self.db_session.query(LearningItem).join(
+            Extract, LearningItem.extract_id == Extract.id
+        ).filter(
+            Extract.tags.any(Tag.id == tag_id)
+        ).all()
+        
+        # Update tab title if parent is a QTabWidget
+        parent = self.learning_items_tab.parentWidget()
+        if hasattr(parent, 'setTabText'):
+            # Check which tab index this widget is at
+            for i in range(parent.count()):
+                if parent.widget(i) == self.learning_items_tab:
+                    parent.setTabText(i, f"Learning Items ({len(learning_items)})")
+                    break
+        
+        # Add rows
+        for i, item in enumerate(learning_items):
+            self.learning_items_table.insertRow(i)
+            
+            # Question
+            question = item.question
+            if len(question) > 100:
+                question = question[:97] + "..."
+                
+            question_item = QTableWidgetItem(question)
+            question_item.setData(Qt.ItemDataRole.UserRole, item.id)
+            self.learning_items_table.setItem(i, 0, question_item)
+            
+            # Type
+            type_item = QTableWidgetItem(item.item_type)
+            self.learning_items_table.setItem(i, 1, type_item)
+            
+            # Last Reviewed
+            last_reviewed = "Never" if not item.last_reviewed else item.last_reviewed.strftime("%Y-%m-%d")
+            last_reviewed_item = QTableWidgetItem(last_reviewed)
+            self.learning_items_table.setItem(i, 2, last_reviewed_item)
+            
+            # Due Date
+            due_date = "New" if not item.next_review else item.next_review.strftime("%Y-%m-%d")
+            due_date_item = QTableWidgetItem(due_date)
+            self.learning_items_table.setItem(i, 3, due_date_item)
+            
+            # Highlight overdue items
+            if item.next_review and item.next_review < datetime.utcnow():
+                for col in range(self.learning_items_table.columnCount()):
+                    self.learning_items_table.item(i, col).setBackground(Qt.GlobalColor.yellow)
+    
     @pyqtSlot(str)
     def _on_filter_changed(self, text):
         """Filter tags based on input text."""
@@ -303,9 +406,11 @@ class TagView(QWidget):
             self.tag_stats_label.setText("No tag selected")
             self.documents_table.setRowCount(0)
             self.extracts_table.setRowCount(0)
+            self.learning_items_table.setRowCount(0)
             self.rename_tag_button.setEnabled(False)
             self.delete_tag_button.setEnabled(False)
             self.remove_tag_button.setEnabled(False)
+            self.review_button.setEnabled(False)
             return
         
         # Get selected tag
@@ -317,11 +422,16 @@ class TagView(QWidget):
         self._update_tag_statistics(tag_id)
         self._load_tag_documents(tag_id)
         self._load_tag_extracts(tag_id)
+        self._load_tag_learning_items(tag_id)
         
         # Enable buttons
         self.rename_tag_button.setEnabled(True)
         self.delete_tag_button.setEnabled(True)
         self.remove_tag_button.setEnabled(True)
+        
+        # Enable review button if there are learning items
+        has_learning_items = self.learning_items_table.rowCount() > 0
+        self.review_button.setEnabled(has_learning_items)
     
     @pyqtSlot(QPoint)
     def _on_tag_context_menu(self, pos):
@@ -458,9 +568,11 @@ class TagView(QWidget):
             self.tag_stats_label.setText("No tag selected")
             self.documents_table.setRowCount(0)
             self.extracts_table.setRowCount(0)
+            self.learning_items_table.setRowCount(0)
             self.rename_tag_button.setEnabled(False)
             self.delete_tag_button.setEnabled(False)
             self.remove_tag_button.setEnabled(False)
+            self.review_button.setEnabled(False)
     
     @pyqtSlot()
     def _on_merge_tags(self):
@@ -766,3 +878,101 @@ class TagView(QWidget):
                     self, "Error", 
                     "Failed to remove tag from extract."
                 )
+    
+    @pyqtSlot(QPoint)
+    def _on_learning_item_context_menu(self, pos):
+        """Show context menu for learning item table."""
+        index = self.learning_items_table.indexAt(pos)
+        if not index.isValid():
+            return
+        
+        learning_item_id = self.learning_items_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
+        
+        menu = QMenu(self)
+        
+        review_action = menu.addAction("Review This Item")
+        review_action.triggered.connect(lambda: self._review_single_learning_item(learning_item_id))
+        
+        menu.addSeparator()
+        
+        view_extract_action = menu.addAction("View Source Extract")
+        learning_item = self.db_session.query(LearningItem).get(learning_item_id)
+        if learning_item:
+            view_extract_action.triggered.connect(lambda: self.itemSelected.emit("extract", learning_item.extract_id))
+        else:
+            view_extract_action.setEnabled(False)
+        
+        menu.exec(self.learning_items_table.viewport().mapToGlobal(pos))
+    
+    @pyqtSlot(QModelIndex)
+    def _on_learning_item_selected(self, index):
+        """Handle learning item selection (double-click)."""
+        if not index.isValid():
+            return
+        
+        learning_item_id = self.learning_items_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
+        self._review_single_learning_item(learning_item_id)
+    
+    def _review_single_learning_item(self, learning_item_id):
+        """Review a single learning item."""
+        # Get the learning item
+        learning_item = self.db_session.query(LearningItem).get(learning_item_id)
+        if not learning_item:
+            QMessageBox.warning(self, "Error", "Learning item not found")
+            return
+        
+        # Create a review widget for this item
+        review_dialog = QDialog(self)
+        review_dialog.setWindowTitle("Review Learning Item")
+        review_dialog.setMinimumSize(600, 400)
+        
+        # Create layout
+        layout = QVBoxLayout(review_dialog)
+        
+        # Create review widget
+        review_widget = ReviewWidget(self.db_session, [learning_item])
+        review_widget.reviewCompleted.connect(review_dialog.accept)
+        layout.addWidget(review_widget)
+        
+        # Show dialog
+        review_dialog.exec()
+        
+        # Reload learning items to update status
+        if self.selected_tag_id:
+            self._load_tag_learning_items(self.selected_tag_id)
+    
+    @pyqtSlot()
+    def _on_review_learning_items(self):
+        """Start a review session for all learning items with the selected tag."""
+        if not self.selected_tag_id:
+            return
+        
+        # Get learning items for this tag
+        learning_items = self.db_session.query(LearningItem).join(
+            Extract, LearningItem.extract_id == Extract.id
+        ).filter(
+            Extract.tags.any(Tag.id == self.selected_tag_id)
+        ).all()
+        
+        if not learning_items:
+            QMessageBox.information(self, "No Items", "No learning items found for this tag")
+            return
+        
+        # Create a review dialog
+        review_dialog = QDialog(self)
+        review_dialog.setWindowTitle("Review Learning Items")
+        review_dialog.setMinimumSize(800, 600)
+        
+        # Create layout
+        layout = QVBoxLayout(review_dialog)
+        
+        # Create review widget
+        review_widget = ReviewWidget(self.db_session, learning_items)
+        review_widget.reviewCompleted.connect(review_dialog.accept)
+        layout.addWidget(review_widget)
+        
+        # Show dialog
+        review_dialog.exec()
+        
+        # Reload learning items to update status
+        self._load_tag_learning_items(self.selected_tag_id)
