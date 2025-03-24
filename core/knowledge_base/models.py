@@ -222,6 +222,7 @@ class WebHighlight(Base):
     context = Column(Text, nullable=True)  # Surrounding context
     xpath = Column(String(512), nullable=True)  # XPath to highlight location
     url = Column(String(1024), nullable=True)  # URL of the page
+    color = Column(String(50), default='yellow')  # Highlight color
     created_date = Column(DateTime, default=datetime.utcnow)
     
     # Relationships

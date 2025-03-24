@@ -14,9 +14,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
     QTabWidget, QLineEdit, QSizePolicy, QCheckBox, QSlider, 
-    QInputDialog, QComboBox, QStyle
+    QInputDialog, QComboBox, QStyle, QTextEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray, QThread
 from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QKeyEvent, QIntValidator, QIcon
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -840,29 +840,31 @@ class DocumentView(QWidget):
     """UI component for viewing and processing documents."""
     
     extractCreated = pyqtSignal(int)  # extract_id
+    navigate = pyqtSignal(str)  # navigation direction ("previous" or "next")
     
     def __init__(self, db_session, document_id=None):
+        """Initialize DocumentView component."""
         super().__init__()
         
+        # Store database session
         self.db_session = db_session
+        
+        # Document properties
         self.document_id = document_id
         self.document = None
+        self.content_edit = None
+        self.content_text = None
         self.selected_text = ""
-        self.content_text = ""
-        self.youtube_callback = None
+        self.progress_marker = None
+        self.zoom_level = 100
+        self.view_mode = "Default"
         
-        # View state tracking
-        self.view_state = {
-            "zoom_factor": 1.0,
-            "position": None,
-            "size": None,
-            "scroll_position": 0
-        }
+        # Initialize web channel for communication with JavaScript
+        if HAS_WEBENGINE:
+            from PyQt6.QtWebChannel import QWebChannel
+            self.web_channel = QWebChannel()
         
-        # Create the Vim key handler
-        self.vim_handler = VimKeyHandler(self)
-        
-        # Create the UI
+        # Create UI components
         self._create_ui()
         
         # Load document if provided
@@ -977,9 +979,14 @@ class DocumentView(QWidget):
         self._update_vim_status_visibility()
     
     def keyPressEvent(self, event):
-        """Handle key press events for Vim-like navigation."""
+        """Handle key press events for document view."""
+        # Check for Ctrl+E shortcut for extract
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_E:
+            self._on_extract()
+            return
+            
         # Check if Vim handler wants to handle this key
-        if self.vim_key_handler.handle_key_event(event):
+        if hasattr(self, 'vim_key_handler') and self.vim_key_handler.handle_key_event(event):
             # Update command display if in command mode
             if self.vim_key_handler.command_mode:
                 self.vim_status_label.setText("Vim Mode: Command")
@@ -998,149 +1005,229 @@ class DocumentView(QWidget):
                 else:
                     self.vim_command_label.setText("")
             
-            # Event was handled
             return
-        
-        # If not handled by Vim mode, pass to parent
+            
+        # Allow the parent class to handle the event
         super().keyPressEvent(event)
     
     def _create_webview_and_setup(self, html_content, base_url):
-        """Create a QWebEngineView and set it up with the content."""
-        if not HAS_WEBENGINE:
-            logger.warning("QWebEngineView not available, falling back to QTextEdit")
-            editor = QTextEdit()
-            editor.setReadOnly(True)
-            editor.setHtml(html_content)
-            editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            return editor
+        """Create and setup a QWebEngineView with the provided HTML content."""
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        from PyQt6.QtCore import QTimer, QObject, pyqtSlot
         
-        # Create WebEngine view for HTML content
+        # Create web view
         webview = QWebEngineView()
         
-        # Set size policy to expand
-        webview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        
-        # Configure settings to allow all JavaScript functionality
+        # Apply settings
         settings = webview.settings()
-        settings.setAttribute(settings.WebAttribute.JavascriptEnabled, True)
-        settings.setAttribute(settings.WebAttribute.JavascriptCanAccessClipboard, True)
-        settings.setAttribute(settings.WebAttribute.JavascriptCanOpenWindows, True)
-        settings.setAttribute(settings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-        settings.setAttribute(settings.WebAttribute.AllowRunningInsecureContent, True)
-        settings.setAttribute(settings.WebAttribute.PluginsEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.ErrorPageEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, True)
         
-        # Create a channel for JavaScript communication
-        channel = QWebChannel(webview.page())
+        # Set content with base URL
+        if base_url:
+            webview.setHtml(html_content, base_url)
+        else:
+            webview.setHtml(html_content)
         
         # Create callback handler
-        callback_handler = WebViewCallback(self)
-        channel.registerObject("callbackHandler", callback_handler)
+        class SelectionHandler(QObject):
+            @pyqtSlot(str)
+            def selectionChanged(self, text):
+                self.parent().selected_text = text
+                if hasattr(self.parent(), 'extract_button'):
+                    self.parent().extract_button.setEnabled(bool(text and len(text.strip()) > 0))
         
-        # Set the channel to the page
-        webview.page().setWebChannel(channel)
+        # Add the handler to the page
+        handler = SelectionHandler(self)
+        webview.page().setWebChannel(self.web_channel)
+        self.web_channel.registerObject("selectionHandler", handler)
         
-        # Check if we need to inject JavaScript libraries
-        injected_html = self._inject_javascript_libraries(html_content)
-        
-        # Load content with proper base URL for resources
-        if base_url:
-            webview.setHtml(injected_html, base_url)
-        else:
-            webview.setHtml(injected_html)
-        
-        # Inject JavaScript to capture selections - using a cleaner approach
-        selection_js = """
-        // Wait for document to be fully loaded
-        document.addEventListener('DOMContentLoaded', function() {
-            // Add selection change listener
-            document.addEventListener('selectionchange', function() {
-                const selection = window.getSelection();
-                const text = selection.toString();
-                // Only send non-empty selections
-                if (text && text.trim().length > 0) {
-                    // Check if callback handler is available
-                    if (typeof window.callbackHandler !== 'undefined') {
-                        window.callbackHandler.selectionChanged(text);
-                    } else {
-                        console.error('Callback handler not available');
+        # First, we need to inject the QWebChannel JavaScript API
+        # Get the path to qwebchannel.js
+        qwebchannel_js = """
+        // Define QWebChannel if needed
+        if (typeof QWebChannel === 'undefined') {
+            class QWebChannel {
+                constructor(transport, callback) {
+                    this.transport = transport;
+                    this.objects = {};
+                    
+                    // Add the callback handler object
+                    this.objects.selectionHandler = {
+                        selectionChanged: function(text) {
+                            if (window.qt && window.qt.selectionChanged) {
+                                window.qt.selectionChanged(text);
+                            }
+                        }
+                    };
+                    
+                    // Call the callback with this channel
+                    if (callback) {
+                        callback(this);
                     }
-                }
-            });
-
-            // Track scroll position changes
-            document.addEventListener('scroll', function() {
-                // Throttle scroll events to reduce overhead
-                if (window.scrollTrackTimeout) {
-                    clearTimeout(window.scrollTrackTimeout);
-                }
-                window.scrollTrackTimeout = setTimeout(function() {
-                    const scrollPosition = window.pageYOffset || document.documentElement.scrollTop;
-                    if (typeof window.callbackHandler !== 'undefined') {
-                        // Store position in a window variable so we can access it later
-                        window.lastScrollPosition = scrollPosition;
-                    }
-                }, 200); // 200ms throttle
-            });
-            
-            // Initialize any custom libraries
-            if (typeof initializeCustomLibraries === 'function') {
-                try {
-                    initializeCustomLibraries();
-                    console.log('Custom libraries initialized');
-                } catch (e) {
-                    console.error('Error initializing custom libraries:', e);
                 }
             }
-        });
+        }
         """
+            
+        # Inject a script to track selection changes
+        selection_js = """
+        // Global variable to store selection
+        window.text_selection = '';
         
-        # Simple direct selection capture script as fallback
-        simple_selection_js = """
-        document.onselectionchange = function() {
+        // Track selection with standard event
+        document.addEventListener('selectionchange', function() {
             var selection = window.getSelection();
             var text = selection.toString();
             if (text && text.trim().length > 0) {
-                window.text_selection = text; // Store in a global variable
+                window.text_selection = text;
+                
+                // Try to call Qt callback if it exists
+                if (window.qt && window.qt.selectionChanged) {
+                    window.qt.selectionChanged(text);
+                }
             }
+        });
+        
+        // Track selection with mouse events for better reliability
+        document.addEventListener('mouseup', function() {
+            var selection = window.getSelection();
+            var text = selection.toString();
+            if (text && text.trim().length > 0) {
+                window.text_selection = text;
+                
+                // Try to call Qt callback if it exists
+                if (window.qt && window.qt.selectionChanged) {
+                    window.qt.selectionChanged(text);
+                }
+            }
+        });
+        
+        // Function to highlight extracted text
+        window.highlightExtractedText = function(color) {
+            var sel = window.getSelection();
+            if (sel.rangeCount > 0) {
+                var range = sel.getRangeAt(0);
+                
+                // Create highlight span
+                var highlightSpan = document.createElement('span');
+                highlightSpan.className = 'incrementum-highlight';
+                
+                // Set color based on parameter or default to yellow
+                if (!color) color = 'yellow';
+                
+                switch(color) {
+                    case 'yellow':
+                        highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                        break;
+                    case 'green':
+                        highlightSpan.style.backgroundColor = 'rgba(0, 255, 0, 0.3)';
+                        break;
+                    case 'blue':
+                        highlightSpan.style.backgroundColor = 'rgba(0, 191, 255, 0.3)';
+                        break;
+                    case 'pink':
+                        highlightSpan.style.backgroundColor = 'rgba(255, 105, 180, 0.3)';
+                        break;
+                    case 'orange':
+                        highlightSpan.style.backgroundColor = 'rgba(255, 165, 0, 0.3)';
+                        break;
+                    default:
+                        highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                }
+                
+                highlightSpan.style.borderRadius = '2px';
+                
+                try {
+                    // Apply highlight
+                    range.surroundContents(highlightSpan);
+                    
+                    // Clear selection
+                    sel.removeAllRanges();
+                    
+                    return true;
+                } catch (e) {
+                    console.error('Error highlighting text:', e);
+                    return false;
+                }
+            }
+            return false;
         };
         """
         
-        # Inject the simple selection script immediately
-        webview.page().runJavaScript(simple_selection_js)
+        # Inject JavaScript to connect with the handler
+        connect_js = """
+        // Connect with Qt web channel
+        if (typeof QWebChannel === 'undefined') {
+            console.error('QWebChannel is not defined. Using fallback method.');
+            // Direct fallback for selection handling
+            window.qt = {
+                selectionChanged: function(text) {
+                    // Handle in a simpler way
+                    window.text_selection = text;
+                }
+            };
+        } else {
+            try {
+                new QWebChannel(qt.webChannelTransport, function(channel) {
+                    window.qt = channel.objects.selectionHandler;
+                });
+            } catch (e) {
+                console.error('Error initializing QWebChannel:', e);
+                // Fallback
+                window.qt = {
+                    selectionChanged: function(text) {
+                        window.text_selection = text;
+                    }
+                };
+            }
+        }
+        """
         
-        # Inject the main script after the page has loaded
+        # Add SuperMemo SM-18 style incremental reading capabilities
+        self._add_supermemo_features(webview)
+        
+        # Inject scripts when the page is loaded - order matters!
+        webview.loadFinished.connect(lambda ok: webview.page().runJavaScript(qwebchannel_js))
         webview.loadFinished.connect(lambda ok: webview.page().runJavaScript(selection_js))
+        webview.loadFinished.connect(lambda ok: webview.page().runJavaScript(connect_js))
         
         # Add a method to manually get the current selection
         def check_selection():
             webview.page().runJavaScript(
-                "window.getSelection().toString() || window.text_selection || '';",
+                """
+                (function() {
+                    var selection = window.getSelection();
+                    var text = selection.toString();
+                    return text || window.text_selection || '';
+                })();
+                """,
                 self._handle_webview_selection
             )
         
         # Store the method to check selection
         webview.check_selection = check_selection
         
-        # Connect mouse release to check selection
-        webview.mouseReleaseEvent = lambda event: (
-            super(QWebEngineView, webview).mouseReleaseEvent(event),
-            check_selection()
-        )
-        
         # Connect context menu request to check selection before showing menu
         webview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         
-        # Store the original handler
-        original_handler = self._on_content_menu
-        
         # Create a wrapper that first checks selection
         def context_menu_wrapper(pos):
+            # Check for selection first
             check_selection()
-            # Call the original handler after a small delay
+            # Process events to ensure we get the selection
             QApplication.processEvents()
-            original_handler(pos)
+            # Small delay to ensure selection is processed
+            QTimer.singleShot(50, lambda: self._on_content_menu(pos))
         
         webview.customContextMenuRequested.connect(context_menu_wrapper)
+        
+        # Disable default context menu for better control
+        webview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         
         return webview
     
@@ -1661,53 +1748,225 @@ window.addEventListener('load', function() {
                 raise Exception("Web engine not available.")
             
             # Create the web view
+            from PyQt6.QtWebEngineWidgets import QWebEngineView
+            from PyQt6.QtCore import QUrl, QObject, pyqtSlot, QTimer
             content_edit = QWebEngineView()
             
             # Load the EPUB into the handler
             try:
-                epub_handler = EPUBHandler()
+                from core.document_processor.handlers.epub_handler import EPUBHandler
                 # Load the file data and prepare it for the webview
+                epub_handler = EPUBHandler()
                 content_results = epub_handler.extract_content(document.file_path)
                 html_content = content_results['html']
                 
-                # Check if we can detect any JS libraries in the HTML content
-                # For better display with certain EPUB formats
-                has_jquery = "jquery" in html_content.lower()
+                # Process the HTML content
+                html_content = self._inject_javascript_libraries(html_content)
                 
-                # Apply jQuery from resources if not already in the HTML
-                if not has_jquery:
-                    logger.debug("EPUB does not contain jQuery, will inject if needed")
-                    # Handled via injectScriptTag in later methods
+                # Set up the web channel for JavaScript communication
+                if not hasattr(self, 'web_channel'):
+                    from PyQt6.QtWebChannel import QWebChannel
+                    self.web_channel = QWebChannel()
                 
-                # Set the EPUB content to the view
+                # Set the EPUB content to the web view
                 content_edit.setHtml(html_content, QUrl.fromLocalFile(document.file_path))
                 
-                # Set up position tracking
-                from ui.load_epub_helper import setup_epub_webview
-                from core.utils.theme_manager import ThemeManager
+                # Store the web view for later use (important for context menu)
+                self.web_view = content_edit
                 
-                # Get theme manager from MainWindow or create a new instance
-                app = QApplication.instance()
-                main_window = None
-                for widget in app.topLevelWidgets():
-                    if widget.__class__.__name__ == "MainWindow":
-                        main_window = widget
-                        break
+                # Set up the selection handling and context menu
+                from PyQt6.QtCore import QObject, pyqtSlot
                 
-                theme_manager = None
-                if main_window and hasattr(main_window, 'theme_manager'):
-                    theme_manager = main_window.theme_manager
-                else:
-                    # Create a new instance if not available
-                    from core.utils.settings_manager import SettingsManager
-                    settings_manager = SettingsManager()
-                    theme_manager = ThemeManager(settings_manager)
+                class SelectionHandler(QObject):
+                    @pyqtSlot(str)
+                    def selectionChanged(self, text):
+                        self.parent().selected_text = text
+                        if hasattr(self.parent(), 'extract_button'):
+                            self.parent().extract_button.setEnabled(bool(text and len(text.strip()) > 0))
+                
+                # Add the handler to the page
+                handler = SelectionHandler(self)
+                content_edit.page().setWebChannel(self.web_channel)
+                self.web_channel.registerObject("selectionHandler", handler)
+                
+                # First, inject the QWebChannel JavaScript API fallback
+                qwebchannel_js = """
+                // Define QWebChannel if needed
+                if (typeof QWebChannel === 'undefined') {
+                    class QWebChannel {
+                        constructor(transport, callback) {
+                            this.transport = transport;
+                            this.objects = {};
+                            
+                            // Add the callback handler object
+                            this.objects.selectionHandler = {
+                                selectionChanged: function(text) {
+                                    if (window.qt && window.qt.selectionChanged) {
+                                        window.qt.selectionChanged(text);
+                                    }
+                                }
+                            };
+                            
+                            // Call the callback with this channel
+                            if (callback) {
+                                callback(this);
+                            }
+                        }
+                    }
+                }
+                """
+                
+                # Inject custom JavaScript for selection handling
+                selection_js = """
+                // Global variable to store selection
+                window.text_selection = '';
+                
+                // Track selection with standard event
+                document.addEventListener('selectionchange', function() {
+                    var selection = window.getSelection();
+                    var text = selection.toString();
+                    if (text && text.trim().length > 0) {
+                        window.text_selection = text;
+                        
+                        // Try to call Qt callback if it exists
+                        if (window.qt && window.qt.selectionChanged) {
+                            window.qt.selectionChanged(text);
+                        }
+                    }
+                });
+                
+                // Track selection with mouse events for better reliability
+                document.addEventListener('mouseup', function() {
+                    var selection = window.getSelection();
+                    var text = selection.toString();
+                    if (text && text.trim().length > 0) {
+                        window.text_selection = text;
+                        
+                        // Try to call Qt callback if it exists
+                        if (window.qt && window.qt.selectionChanged) {
+                            window.qt.selectionChanged(text);
+                        }
+                    }
+                });
+                
+                // Function to highlight extracted text
+                window.highlightExtractedText = function(color) {
+                    var sel = window.getSelection();
+                    if (sel.rangeCount > 0) {
+                        var range = sel.getRangeAt(0);
+                        
+                        // Create highlight span
+                        var highlightSpan = document.createElement('span');
+                        highlightSpan.className = 'incrementum-highlight';
+                        
+                        // Set color based on parameter or default to yellow
+                        if (!color) color = 'yellow';
+                        
+                        switch(color) {
+                            case 'yellow':
+                                highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                                break;
+                            case 'green':
+                                highlightSpan.style.backgroundColor = 'rgba(0, 255, 0, 0.3)';
+                                break;
+                            case 'blue':
+                                highlightSpan.style.backgroundColor = 'rgba(0, 191, 255, 0.3)';
+                                break;
+                            case 'pink':
+                                highlightSpan.style.backgroundColor = 'rgba(255, 105, 180, 0.3)';
+                                break;
+                            case 'orange':
+                                highlightSpan.style.backgroundColor = 'rgba(255, 165, 0, 0.3)';
+                                break;
+                            default:
+                                highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                        }
+                        
+                        highlightSpan.style.borderRadius = '2px';
+                        
+                        try {
+                            // Apply highlight
+                            range.surroundContents(highlightSpan);
+                            
+                            // Clear selection
+                            sel.removeAllRanges();
+                            
+                            return true;
+                        } catch (e) {
+                            console.error('Error highlighting text:', e);
+                            return false;
+                        }
+                    }
+                    return false;
+                };
+                """
+                
+                # Inject JavaScript to connect with the handler
+                connect_js = """
+                // Connect with Qt web channel
+                if (typeof QWebChannel === 'undefined') {
+                    console.error('QWebChannel is not defined. Using fallback method.');
+                    // Direct fallback for selection handling
+                    window.qt = {
+                        selectionChanged: function(text) {
+                            // Handle in a simpler way
+                            window.text_selection = text;
+                        }
+                    };
+                } else {
+                    try {
+                        new QWebChannel(qt.webChannelTransport, function(channel) {
+                            window.qt = channel.objects.selectionHandler;
+                        });
+                    } catch (e) {
+                        console.error('Error initializing QWebChannel:', e);
+                        // Fallback
+                        window.qt = {
+                            selectionChanged: function(text) {
+                                window.text_selection = text;
+                            }
+                        };
+                    }
+                }
+                """
                 
                 # Add SuperMemo SM-18 style incremental reading capabilities
                 self._add_supermemo_features(content_edit)
                 
-                # Set up the EPUB view with theme
-                setup_epub_webview(document, content_edit, db_session, restore_position=True, theme_manager=theme_manager)
+                # Inject the scripts after the page has loaded - order matters!
+                content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(qwebchannel_js))
+                content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(selection_js))
+                content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(connect_js))
+                
+                # Set up context menu
+                content_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                
+                # Create a method to check for selection
+                def check_selection():
+                    content_edit.page().runJavaScript(
+                        """
+                        (function() {
+                            var selection = window.getSelection();
+                            var text = selection.toString();
+                            return text || window.text_selection || '';
+                        })();
+                        """,
+                        self._handle_webview_selection
+                    )
+                
+                # Store the method for later use
+                content_edit.check_selection = check_selection
+                
+                # Connect context menu
+                def context_menu_wrapper(pos):
+                    # Check for selection first
+                    check_selection()
+                    # Process events to ensure we get the selection
+                    QApplication.processEvents()
+                    # Small delay to ensure selection is processed
+                    QTimer.singleShot(50, lambda: self._on_content_menu(pos))
+                
+                content_edit.customContextMenuRequested.connect(context_menu_wrapper)
                 
                 # Add it to our layout
                 self.content_layout.addWidget(content_edit)
@@ -1734,726 +1993,55 @@ window.addEventListener('load', function() {
             self.content_layout.addWidget(error_widget)
             return False
     
-    def _load_text(self):
-        """Load and display a text document."""
-        try:
-            # Create text edit
-            text_edit = QTextEdit()
-            text_edit.setReadOnly(True)
-            
-            # Set size policy to expand
-            text_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            
-            # Check if file exists
-            if not os.path.exists(self.document.file_path):
-                logger.error(f"Text file does not exist: {self.document.file_path}")
-                error_message = f"File not found: {os.path.basename(self.document.file_path)}\n\nThis may happen if the file was a temporary web page that has been removed."
-                text_edit.setPlainText(error_message)
-                self.content_layout.addWidget(text_edit, 1)
-                self.content_edit = text_edit
-                self.content_text = error_message
-                return
-            
-            # Read file content
-            with open(self.document.file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Set content
-            text_edit.setPlainText(content)
-            
-            # Add to layout - use stretch factor to expand
-            self.content_layout.addWidget(text_edit, 1)
-            
-            # Store for later use
-            self.content_edit = text_edit
-            self.content_text = content
-            
-            # Restore position
-            self._restore_position()
-            
-        except Exception as e:
-            logger.exception(f"Error loading text document: {e}")
-            label = QLabel(f"Error loading text document: {str(e)}")
-            self.content_layout.addWidget(label)
-    
-    def _load_html(self):
-        """Load and display an HTML document."""
-        try:
-            # Check if file exists
-            if not os.path.exists(self.document.file_path):
-                logger.error(f"HTML file does not exist: {self.document.file_path}")
-                error_message = f"File not found: {os.path.basename(self.document.file_path)}"
-                
-                # Display error in a QLabel
-                error_label = QLabel(error_message)
-                error_label.setWordWrap(True)
-                error_label.setStyleSheet("color: red; padding: 20px;")
-                self.content_layout.addWidget(error_label)
-                
-                return
-            
-            # Read HTML content
-            with open(self.document.file_path, 'r', encoding='utf-8', errors='replace') as f:
-                html_content = f.read()
-            
-            # Get base URL for resources (images, stylesheets)
-            base_url = QUrl.fromLocalFile(os.path.dirname(self.document.file_path) + os.sep)
-            
-            # Create WebView with the HTML content
-            web_view = self._create_webview_and_setup(html_content, base_url)
-            
-            # Add to layout
-            self.content_layout.addWidget(web_view)
-            
-            # Store references for later use
-            self.web_view = web_view
-            self.content_edit = web_view
-            self.content_text = html_content
-            
-            # Add SuperMemo-style incremental reading capabilities
-            self._add_supermemo_features(web_view)
-            
-            # Restore previous reading position if available
-            self._restore_position()
-            
-            logger.info(f"Loaded HTML document: {self.document.file_path}")
-            
-        except Exception as e:
-            logger.exception(f"Error loading HTML document: {e}")
-            error_label = QLabel(f"Error loading HTML document: {str(e)}")
-            error_label.setWordWrap(True)
-            error_label.setStyleSheet("color: red; padding: 20px;")
-            self.content_layout.addWidget(error_label)
-
-    def summarize_current_content(self):
-        """Summarize the current document content using AI."""
-        try:
-            from core.document_processor.summarizer import DocumentSummarizer
-            from core.utils.settings_manager import SettingsManager
-            import tempfile
-            import os
-            
-            # Get the document content
-            document_id = getattr(self, 'document_id', None)
-            
-            if not document_id:
-                logger.warning("No document loaded to summarize")
-                QMessageBox.warning(
-                    self, "Summarization Error", 
-                    "Please load a document before trying to summarize content."
-                )
-                return
-                
-            # Create summarizer
-            settings_manager = SettingsManager()
-            summarizer = DocumentSummarizer(self.db_session, settings_manager)
-            
-            # For web content, extract directly from the web view if available
-            if hasattr(self, 'web_view') and self.web_view:
-                # Check if it's a web document from URL
-                document = self.db_session.query(Document).get(document_id)
-                if document and document.content_type == 'web':
-                    # Get content from the webview
-                    self.web_view.page().toHtml(self._on_html_extracted_for_summary)
-                    return
-                    
-                # Alternatively, get the content as text from the webview
-                self.web_view.page().toPlainText(self._on_text_extracted_for_summary)
-                return
-                
-            # For non-web documents, use the existing summarize_document method
-            result = summarizer.summarize_document(document_id)
-            
-            if result and result.get('success', False):
-                summary = result.get('summary', 'No summary generated')
-                
-                # Show the summary
-                self._show_summary_dialog(summary)
-                
-            else:
-                error = result.get('error', 'Unknown error')
-                QMessageBox.warning(
-                    self, "Summarization Failed", 
-                    f"Failed to summarize document: {error}"
-                )
-                
-        except Exception as e:
-            logger.exception(f"Error summarizing content: {e}")
-            QMessageBox.warning(
-                self, "Summarization Error", 
-                f"An error occurred while trying to summarize the content: {str(e)}"
-            )
-
-    @pyqtSlot(int)
-    def _on_extract_selected(self, extract_id):
-        """Handle extract selection from extract view."""
-        self.extractCreated.emit(extract_id)
-                
-    def _on_html_extracted_for_summary(self, html_content):
-        """Process extracted HTML content for summarization."""
-        try:
-            from core.document_processor.summarizer import DocumentSummarizer
-            from core.utils.settings_manager import SettingsManager
-            from bs4 import BeautifulSoup
-            
-            soup = BeautifulSoup(html_content, 'lxml')
-            text_content = soup.get_text(separator='\n')
-            
-            # Get document title if available
-            document = self.db_session.query(Document).get(self.document_id)
-            title = document.title if document else ""
-            
-            # Create summarizer
-            settings_manager = SettingsManager()
-            summarizer = DocumentSummarizer(self.db_session, settings_manager)
-            
-            # Use the new web-specific summarization method
-            result = summarizer.summarize_web_content(text_content, title)
-            
-            if result and result.get('success', False):
-                summary = result.get('summary', 'No summary generated')
-                
-                # Show the summary
-                self._show_summary_dialog(summary)
-                
-            else:
-                error = result.get('error', 'Unknown error')
-                QMessageBox.warning(
-                    self, "Summarization Failed", 
-                    f"Failed to summarize web content: {error}"
-                )
-                
-        except Exception as e:
-            logger.exception(f"Error summarizing HTML content: {e}")
-            QMessageBox.warning(
-                self, "Summarization Error", 
-                f"An error occurred while summarizing HTML content: {str(e)}"
-            )
-            
-    def _on_text_extracted_for_summary(self, text_content):
-        """Process extracted text content for summarization."""
-        try:
-            from core.document_processor.summarizer import DocumentSummarizer
-            from core.utils.settings_manager import SettingsManager
-            
-            # Get document title if available
-            document = self.db_session.query(Document).get(self.document_id)
-            title = document.title if document else ""
-            
-            # Create summarizer
-            settings_manager = SettingsManager()
-            summarizer = DocumentSummarizer(self.db_session, settings_manager)
-            
-            # Use the new web-specific summarization method
-            result = summarizer.summarize_web_content(text_content, title)
-            
-            if result and result.get('success', False):
-                summary = result.get('summary', 'No summary generated')
-                
-                # Show the summary
-                self._show_summary_dialog(summary)
-                
-            else:
-                error = result.get('error', 'Unknown error')
-                QMessageBox.warning(
-                    self, "Summarization Failed", 
-                    f"Failed to summarize content: {error}"
-                )
-                
-        except Exception as e:
-            logger.exception(f"Error summarizing text content: {e}")
-            QMessageBox.warning(
-                self, "Summarization Error", 
-                f"An error occurred while summarizing text content: {str(e)}"
-            )
-            
-    def _show_summary_dialog(self, summary):
-        """Show a dialog with the document summary."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Document Summary")
-        dialog.setMinimumSize(600, 400)
-        
-        layout = QVBoxLayout(dialog)
-        
-        # Summary text edit
-        summary_text = QTextEdit()
-        summary_text.setReadOnly(True)
-        summary_text.setPlainText(summary)
-        layout.addWidget(summary_text)
-        
-        # Buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Save)
-        button_box.accepted.connect(dialog.accept)
-        
-        # Connect save button
-        save_button = button_box.button(QDialogButtonBox.StandardButton.Save)
-        save_button.clicked.connect(lambda: self._save_summary(summary))
-        
-        layout.addWidget(button_box)
-        
-        dialog.exec()
-        
-    def _save_summary(self, summary):
-        """Save the summary to a file."""
-        from PyQt6.QtWidgets import QFileDialog
-        
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Summary", "", "Text Files (*.txt);;All Files (*)"
-        )
-        
-        if file_path:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(summary)
-                    
-                QMessageBox.information(
-                    self, "Summary Saved", 
-                    f"Summary saved to {file_path}"
-                )
-                
-            except Exception as e:
-                logger.exception(f"Error saving summary: {e}")
-                QMessageBox.warning(
-                    self, "Save Error", 
-                    f"An error occurred while saving the summary: {str(e)}"
-                )
-
-    def _on_previous(self):
-        """Navigate to the previous page in the history."""
-        if hasattr(self, 'web_view') and self.web_view:
-            self.web_view.back()
-        else:
-            logger.debug("Previous action called but no webview available")
-            
-    def _on_next(self):
-        """Navigate to the next page in the history."""
-        if hasattr(self, 'web_view') and self.web_view:
-            self.web_view.forward()
-        else:
-            logger.debug("Next action called but no webview available")
-
-    def _create_toolbar(self):
-        """Create the document viewer toolbar with actions."""
-        toolbar = QToolBar()
-        toolbar.setMovable(False)
-        toolbar.setFloatable(False)
-        
-        # Create actions
-        self.prev_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward), "Previous", self)
-        self.prev_action.triggered.connect(self._on_previous)
-        toolbar.addAction(self.prev_action)
-        
-        self.next_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward), "Next", self)
-        self.next_action.triggered.connect(self._on_next)
-        toolbar.addAction(self.next_action)
-        
-        toolbar.addSeparator()
-        
-        # Add highlight action
-        self.highlight_action = QAction(QIcon.fromTheme("edit-select-all"), "Highlight", self)
-        self.highlight_action.triggered.connect(self._on_highlight)
-        toolbar.addAction(self.highlight_action)
-        
-        # Add extract action
-        self.extract_action = QAction(QIcon.fromTheme("edit-copy"), "Extract", self)
-        self.extract_action.triggered.connect(self._on_extract)
-        toolbar.addAction(self.extract_action)
-        
-        toolbar.addSeparator()
-        
-        # Add incremental reading actions
-        self.add_to_ir_action = QAction(QIcon.fromTheme("bookmark-new"), "Add to Reading Queue", self)
-        self.add_to_ir_action.triggered.connect(self._on_add_to_incremental_reading)
-        toolbar.addAction(self.add_to_ir_action)
-        
-        self.mark_progress_action = QAction(QIcon.fromTheme("document-save"), "Mark Reading Progress", self)
-        self.mark_progress_action.triggered.connect(self._on_mark_reading_progress)
-        toolbar.addAction(self.mark_progress_action)
-        
-        self.extract_important_action = QAction(QIcon.fromTheme("edit-find"), "Extract Important Content", self)
-        self.extract_important_action.triggered.connect(self._on_extract_important)
-        toolbar.addAction(self.extract_important_action)
-        
-        return toolbar
-        
-    def _on_add_to_incremental_reading(self):
-        """Add document to incremental reading queue."""
-        try:
-            if not hasattr(self, 'document_id') or not self.document_id:
-                logger.warning("No document loaded")
-                return
-                
-            from PyQt6.QtWidgets import QInputDialog
-            from core.spaced_repetition.incremental_reading import IncrementalReadingManager
-            
-            # Get priority from user
-            priority, ok = QInputDialog.getDouble(
-                self, "Reading Priority", 
-                "Enter reading priority (0-100):",
-                50, 0, 100, 1
-            )
-            
-            if not ok:
-                return
-                
-            # Add to incremental reading queue
-            ir_manager = IncrementalReadingManager(self.db_session)
-            result = ir_manager.add_document_to_queue(self.document_id, priority)
-            
-            if result:
-                QMessageBox.information(
-                    self, "Success", 
-                    "Document added to incremental reading queue with priority %.1f" % priority
-                )
-            else:
-                QMessageBox.warning(
-                    self, "Error", 
-                    "Failed to add document to incremental reading queue"
-                )
-                
-        except Exception as e:
-            logger.exception(f"Error adding to incremental reading: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"An error occurred: {str(e)}"
-            )
-    
-    def _on_mark_reading_progress(self):
-        """Mark reading progress for incremental reading."""
-        try:
-            if not hasattr(self, 'document_id') or not self.document_id:
-                logger.warning("No document loaded")
-                return
-                
-            from PyQt6.QtWidgets import QInputDialog, QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider
-            from core.spaced_repetition.incremental_reading import IncrementalReadingManager
-            from core.knowledge_base.models import IncrementalReading
-            
-            # Get current reading progress
-            reading = self.db_session.query(IncrementalReading)\
-                .filter(IncrementalReading.document_id == self.document_id)\
-                .first()
-                
-            if not reading:
-                result = QMessageBox.question(
-                    self, "Incremental Reading", 
-                    "This document is not in your incremental reading queue. Add it?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                
-                if result == QMessageBox.StandardButton.Yes:
-                    self._on_add_to_incremental_reading()
-                return
-                
-            # Create custom dialog for rating reading session
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Mark Reading Progress")
-            layout = QVBoxLayout(dialog)
-            
-            # Current position
-            current_pos = 0
-            if hasattr(self, 'web_view') and self.web_view:
-                # Get scroll position from web view
-                self.web_view.page().runJavaScript(
-                    "window.pageYOffset || document.documentElement.scrollTop || 0;",
-                    lambda result: setattr(self, '_temp_scroll_pos', result)
-                )
-                QApplication.processEvents()
-                current_pos = getattr(self, '_temp_scroll_pos', 0)
-            
-            # Add position display
-            pos_layout = QHBoxLayout()
-            pos_layout.addWidget(QLabel("Current Position:"))
-            pos_label = QLabel(str(current_pos))
-            pos_layout.addWidget(pos_label)
-            layout.addLayout(pos_layout)
-            
-            # Add percent complete slider
-            percent_layout = QHBoxLayout()
-            percent_layout.addWidget(QLabel("Percent Complete:"))
-            percent_slider = QSlider(Qt.Orientation.Horizontal)
-            percent_slider.setRange(0, 100)
-            percent_slider.setValue(int(reading.percent_complete))
-            percent_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-            percent_slider.setTickInterval(10)
-            percent_layout.addWidget(percent_slider)
-            percent_label = QLabel(f"{reading.percent_complete:.1f}%")
-            percent_layout.addWidget(percent_label)
-            layout.addLayout(percent_layout)
-            
-            # Update label when slider changes
-            percent_slider.valueChanged.connect(
-                lambda value: percent_label.setText(f"{value:.1f}%")
-            )
-            
-            # Add rating selection
-            rating_layout = QHBoxLayout()
-            rating_layout.addWidget(QLabel("Rate this reading session:"))
-            rating_combo = QComboBox()
-            ratings = [
-                "0 - Complete blackout",
-                "1 - Barely remembered",
-                "2 - Difficult, but remembered",
-                "3 - Some effort needed",
-                "4 - Easy recall",
-                "5 - Perfect recall"
-            ]
-            rating_combo.addItems(ratings)
-            rating_combo.setCurrentIndex(4)  # Default to "Easy recall"
-            rating_layout.addWidget(rating_combo)
-            layout.addLayout(rating_layout)
-            
-            # Add dialog buttons
-            button_layout = QHBoxLayout()
-            cancel_button = QPushButton("Cancel")
-            cancel_button.clicked.connect(dialog.reject)
-            save_button = QPushButton("Save Progress")
-            save_button.clicked.connect(dialog.accept)
-            save_button.setDefault(True)
-            button_layout.addWidget(cancel_button)
-            button_layout.addWidget(save_button)
-            layout.addLayout(button_layout)
-            
-            # Show dialog
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                # Save progress
-                ir_manager = IncrementalReadingManager(self.db_session)
-                grade = rating_combo.currentIndex()
-                percent = percent_slider.value()
-                
-                result = ir_manager.record_reading_session(
-                    reading.id, current_pos, grade, percent
-                )
-                
-                if result:
-                    QMessageBox.information(
-                        self, "Success", 
-                        f"Reading progress saved. Next review scheduled for {reading.next_read_date.strftime('%Y-%m-%d')}"
-                    )
-                else:
-                    QMessageBox.warning(
-                        self, "Error", 
-                        "Failed to save reading progress"
-                    )
-                
-        except Exception as e:
-            logger.exception(f"Error marking reading progress: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"An error occurred: {str(e)}"
-            )
-    
-    def _on_extract_important(self):
-        """Extract important content from document for learning."""
-        try:
-            if not hasattr(self, 'document_id') or not self.document_id:
-                logger.warning("No document loaded")
-                return
-                
-            from PyQt6.QtWidgets import QInputDialog
-            from core.spaced_repetition.incremental_reading import IncrementalReadingManager
-            
-            # Ask for number of extracts
-            num_extracts, ok = QInputDialog.getInt(
-                self, "Extract Content", 
-                "Number of important sections to extract:",
-                5, 1, 20, 1
-            )
-            
-            if not ok:
-                return
-                
-            # Extract important content
-            ir_manager = IncrementalReadingManager(self.db_session)
-            extracts = ir_manager.auto_extract_important_content(self.document_id, num_extracts)
-            
-            if extracts:
-                QMessageBox.information(
-                    self, "Success", 
-                    f"Successfully extracted {len(extracts)} important sections from document."
-                )
-            else:
-                QMessageBox.warning(
-                    self, "Warning", 
-                    "No important content could be extracted. Try using manual highlights."
-                )
-                
-        except Exception as e:
-            logger.exception(f"Error extracting important content: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"An error occurred: {str(e)}"
-            )
-            
-    def _on_highlight(self):
-        """Create highlight from selected text."""
-        try:
-            if not hasattr(self, 'document_id') or not self.document_id:
-                logger.warning("No document loaded")
-                return
-                
-            # Get selected text
-            selected_text = None
-            if hasattr(self, 'web_view') and self.web_view:
-                # For web view, use JavaScript to get selected text
-                self.web_view.page().runJavaScript(
-                    "window.getSelection().toString();",
-                    lambda result: setattr(self, '_temp_selection', result)
-                )
-                
-                # Process events to ensure JavaScript result is available
-                for _ in range(10):  # Try a few iterations
-                    QApplication.processEvents()
-                    if hasattr(self, '_temp_selection'):
-                        selected_text = self._temp_selection
-                        break
-                        
-            elif hasattr(self, 'text_edit') and self.text_edit:
-                # For text edit, use cursor
-                selected_text = self.text_edit.textCursor().selectedText()
-                
-            if not selected_text or len(selected_text.strip()) < 5:
-                QMessageBox.warning(
-                    self, "Highlight", 
-                    "Please select some text to highlight."
-                )
-                return
-                
-            # Create highlight
-            from core.knowledge_base.models import WebHighlight
-            
-            highlight = WebHighlight(
-                document_id=self.document_id,
-                content=selected_text,
-                created_date=datetime.utcnow()
-            )
-            
-            # Get some context if available
-            if hasattr(self, 'web_view') and self.web_view:
-                # For web view, try to get surrounding text
-                self.web_view.page().runJavaScript(
-                    """
-                    (function() {
-                        var sel = window.getSelection();
-                        if (sel.rangeCount > 0) {
-                            var range = sel.getRangeAt(0);
-                            var contextNode = range.commonAncestorContainer;
-                            if (contextNode.nodeType === Node.TEXT_NODE) {
-                                contextNode = contextNode.parentNode;
-                            }
-                            return contextNode.textContent;
-                        }
-                        return "";
-                    })();
-                    """,
-                    lambda result: setattr(highlight, 'context', result[:500])
-                )
-                # Process events to wait for JavaScript
-                for _ in range(10):
-                    QApplication.processEvents()
-                
-                # Also try to get XPath
-                self.web_view.page().runJavaScript(
-                    """
-                    (function() {
-                        var sel = window.getSelection();
-                        if (sel.rangeCount > 0) {
-                            var range = sel.getRangeAt(0);
-                            var node = range.commonAncestorContainer;
-                            if (node.nodeType === Node.TEXT_NODE) {
-                                node = node.parentNode;
-                            }
-                            
-                            var path = '';
-                            while (node && node.nodeType === Node.ELEMENT_NODE) {
-                                var name = node.nodeName.toLowerCase();
-                                var index = 1;
-                                var sibling = node.previousSibling;
-                                while (sibling) {
-                                    if (sibling.nodeType === Node.ELEMENT_NODE && 
-                                        sibling.nodeName.toLowerCase() === name) {
-                                        index++;
-                                    }
-                                    sibling = sibling.previousSibling;
-                                }
-                                path = '/' + name + '[' + index + ']' + path;
-                                node = node.parentNode;
-                            }
-                            return path;
-                        }
-                        return "";
-                    })();
-                    """,
-                    lambda result: setattr(highlight, 'xpath', result)
-                )
-                # Process events to wait for JavaScript
-                for _ in range(10):
-                    QApplication.processEvents()
-                
-                # Apply visual highlighting in the web view
-                self.web_view.page().runJavaScript(
-                    """
-                    (function() {
-                        var sel = window.getSelection();
-                        if (sel.rangeCount > 0) {
-                            var range = sel.getRangeAt(0);
-                            
-                            // Create highlight span
-                            var highlightSpan = document.createElement('span');
-                            highlightSpan.className = 'incrementum-highlight';
-                            highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.4)';
-                            highlightSpan.style.borderRadius = '2px';
-                            
-                            // Apply highlight
-                            range.surroundContents(highlightSpan);
-                            
-                            // Clear selection
-                            sel.removeAllRanges();
-                            
-                            return true;
-                        }
-                        return false;
-                    })();
-                    """
-                )
-            
-            # Save highlight
-            self.db_session.add(highlight)
-            self.db_session.commit()
-            
-            QMessageBox.information(
-                self, "Highlight", 
-                "Highlight created successfully."
-            )
-                
-        except Exception as e:
-            logger.exception(f"Error creating highlight: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"An error occurred: {str(e)}"
-            )
-            
     def _on_extract(self):
         """Create extract from selected text."""
         try:
             if not hasattr(self, 'document_id') or not self.document_id:
                 logger.warning("No document loaded")
                 return
+            
+            # Get the selected highlight color
+            color_name = self.highlight_color_combo.currentData()
                 
             # Get selected text
             selected_text = None
             if hasattr(self, 'web_view') and self.web_view:
                 # For web view, use JavaScript to get selected text
+                script = f"""
+                (function() {{
+                    var selection = window.getSelection();
+                    var text = selection.toString();
+                    if (text && text.trim().length > 0) {{
+                        // Highlight if we have a SuperMemo script
+                        if (typeof highlightExtractedText === 'function') {{
+                            highlightExtractedText('{color_name}');
+                        }}
+                        return text;
+                    }}
+                    return '';
+                }})();
+                """
                 self.web_view.page().runJavaScript(
-                    "window.getSelection().toString();",
-                    lambda result: setattr(self, '_temp_selection', result)
+                    script,
+                    lambda result: self._process_extracted_text(result, color_name)
                 )
-                QApplication.processEvents()
-                selected_text = getattr(self, '_temp_selection', None)
+                # Continue processing in the callback (_process_extracted_text)
+                return
             elif hasattr(self, 'text_edit') and self.text_edit:
                 # For text edit, use cursor
                 selected_text = self.text_edit.textCursor().selectedText()
+                self._process_extracted_text(selected_text, color_name)
                 
+        except Exception as e:
+            logger.exception(f"Error creating extract: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+            
+    def _process_extracted_text(self, selected_text, color_name='yellow'):
+        """Process text after extraction from web view or text edit."""
+        try:
             if not selected_text or len(selected_text.strip()) < 5:
                 QMessageBox.warning(
                     self, "Extract", 
@@ -2474,6 +2062,23 @@ window.addEventListener('load', function() {
             # Save extract
             self.db_session.add(extract)
             self.db_session.commit()
+            
+            # Also create a WebHighlight with the specified color
+            from core.knowledge_base.models import WebHighlight
+            
+            highlight = WebHighlight(
+                document_id=self.document_id,
+                content=selected_text,
+                created_date=datetime.utcnow(),
+                color=color_name
+            )
+            
+            # Save highlight
+            self.db_session.add(highlight)
+            self.db_session.commit()
+            
+            # Emit signal for extract created
+            self.extractCreated.emit(extract.id)
             
             QMessageBox.information(
                 self, "Extract", 
@@ -2599,6 +2204,9 @@ window.addEventListener('load', function() {
                     if (typeof window.callbackHandler !== 'undefined') {
                         window.callbackHandler.extractText(smState.selectedText);
                     }
+                    
+                    // Highlight the extracted text
+                    highlightExtractedText();
                     
                     // Visual feedback
                     extractBtn.style.backgroundColor = '#8f8';
@@ -2730,6 +2338,26 @@ window.addEventListener('load', function() {
             });
         });
         
+        // Function to highlight extracted text
+        function highlightExtractedText() {
+            if (!smState.lastSelection || !smState.lastSelection.rangeCount) return;
+            
+            const range = smState.lastSelection.getRangeAt(0);
+            const span = document.createElement('span');
+            span.className = 'extracted-text-highlight';
+            span.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+            span.style.borderRadius = '2px';
+            
+            try {
+                range.surroundContents(span);
+                // Keep the selection active
+                smState.lastSelection.removeAllRanges();
+                smState.lastSelection.addRange(range);
+            } catch (e) {
+                console.error('Error highlighting text:', e);
+            }
+        }
+        
         // Initialize right away if document is already loaded
         if (document.readyState === 'complete' || document.readyState === 'interactive') {
             setTimeout(function() {
@@ -2753,45 +2381,33 @@ window.addEventListener('load', function() {
                 return
                 
             # Check if we have a stored position for this document
-            from core.knowledge_base.models import DocumentReadingPosition
+            document = self.db_session.query(Document).get(self.document_id)
             
-            position = self.db_session.query(DocumentReadingPosition)\
-                .filter_by(document_id=self.document_id)\
-                .first()
-                
-            if not position:
+            if not document or document.position is None:
                 logger.debug(f"No reading position found for document {self.document_id}")
                 return
                 
             # Restore position based on content type
             if hasattr(self, 'web_view') and self.web_view:
-                # For web view, use JavaScript to set scroll position
-                scroll_script = f"window.scrollTo(0, {position.position});"
-                self.web_view.page().runJavaScript(scroll_script)
-                logger.debug(f"Restored web view scroll position to {position.position}")
+                # For web view, use JavaScript to set scroll position with a delay
+                # to ensure document is fully loaded
+                from PyQt6.QtCore import QTimer
+                
+                def apply_scroll():
+                    scroll_script = f"window.scrollTo(0, {document.position});"
+                    self.web_view.page().runJavaScript(scroll_script)
+                    logger.debug(f"Restored web view scroll position to {document.position}")
+                
+                # Use timer to delay scroll position application
+                QTimer.singleShot(500, apply_scroll)
                 
             elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
                 # For widgets with scroll bars, set the value directly
                 scrollbar = self.content_edit.verticalScrollBar()
                 if scrollbar:
-                    scrollbar.setValue(position.position)
-                    logger.debug(f"Restored scroll position to {position.position}")
-                    
-            # Also restore any view state like zoom factor
-            if position.view_state:
-                try:
-                    # Parse the JSON view state
-                    import json
-                    view_state = json.loads(position.view_state)
-                    
-                    # Apply zoom factor if available
-                    if 'zoom_factor' in view_state and hasattr(self, 'web_view') and self.web_view:
-                        self.web_view.setZoomFactor(view_state['zoom_factor'])
-                        logger.debug(f"Restored zoom factor to {view_state['zoom_factor']}")
-                        
-                except Exception as e:
-                    logger.warning(f"Error restoring view state: {e}")
-                    
+                    scrollbar.setValue(document.position)
+                    logger.debug(f"Restored scroll position to {document.position}")
+                
             logger.debug(f"Successfully restored reading position for document {self.document_id}")
                 
         except Exception as e:
@@ -2938,75 +2554,303 @@ window.addEventListener('load', function() {
             
     def _on_content_menu(self, position):
         """Show custom context menu for content."""
-        menu = QMenu(self)
-        
-        # Only add actions if we have a document
-        if hasattr(self, 'document_id') and self.document_id:
-            # Get selected text
+        try:
+            menu = QMenu(self)
+            
+            # Check if we have selected text
             has_selection = False
             selected_text = ""
             
+            # Define build_menu function first, before it's used
+            def build_menu(has_selection, selected_text):
+                # Store the selected text for use in action handlers
+                self.selected_text = selected_text if has_selection else ""
+                
+                # Add extract action if text is selected
+                if has_selection:
+                    extract_action = QAction("Extract Selection", self)
+                    extract_action.triggered.connect(self._extract_from_context_menu)
+                    menu.addAction(extract_action)
+                    
+                    # Add highlight action with color submenu
+                    highlight_menu = QMenu("Highlight Selection", menu)
+                    
+                    # Add color options
+                    yellow_action = QAction("Yellow", self)
+                    yellow_action.triggered.connect(lambda: self._highlight_with_color("yellow"))
+                    highlight_menu.addAction(yellow_action)
+                    
+                    green_action = QAction("Green", self)
+                    green_action.triggered.connect(lambda: self._highlight_with_color("green"))
+                    highlight_menu.addAction(green_action)
+                    
+                    blue_action = QAction("Blue", self)
+                    blue_action.triggered.connect(lambda: self._highlight_with_color("blue"))
+                    highlight_menu.addAction(blue_action)
+                    
+                    pink_action = QAction("Pink", self)
+                    pink_action.triggered.connect(lambda: self._highlight_with_color("pink"))
+                    highlight_menu.addAction(pink_action)
+                    
+                    orange_action = QAction("Orange", self)
+                    orange_action.triggered.connect(lambda: self._highlight_with_color("orange"))
+                    highlight_menu.addAction(orange_action)
+                    
+                    menu.addMenu(highlight_menu)
+                    
+                    # Add separator
+                    menu.addSeparator()
+                else:
+                    # If we're in a WebView and there's no selection, add a message
+                    if hasattr(self, 'web_view') and self.web_view:
+                        info_action = QAction("Select text to extract", self)
+                        info_action.setEnabled(False)
+                        menu.addAction(info_action)
+                        menu.addSeparator()
+                
+                # Add document actions
+                add_to_ir_action = QAction("Add to Incremental Reading", self)
+                add_to_ir_action.triggered.connect(self._on_add_to_incremental_reading)
+                menu.addAction(add_to_ir_action)
+                
+                mark_progress_action = QAction("Mark Reading Progress", self)
+                mark_progress_action.triggered.connect(self._on_mark_reading_progress)
+                menu.addAction(mark_progress_action)
+                
+                # Add zoom actions
+                menu.addSeparator()
+                
+                zoom_in_action = QAction("Zoom In", self)
+                zoom_in_action.triggered.connect(self._on_zoom_in)
+                menu.addAction(zoom_in_action)
+                
+                zoom_out_action = QAction("Zoom Out", self)
+                zoom_out_action.triggered.connect(self._on_zoom_out)
+                menu.addAction(zoom_out_action)
+            
+            # Define context_menu_wrapper after build_menu is defined
+            def context_menu_wrapper(text):
+                if text and text.strip():
+                    self.selected_text = text.strip()
+                    has_selection = True
+                    build_menu(True, text)
+                    menu.exec(self.mapToGlobal(position))
+                else:
+                    # No selection, show basic menu
+                    build_menu(False, "")
+                    menu.exec(self.mapToGlobal(position))
+            
             if hasattr(self, 'web_view') and self.web_view:
-                # For WebView, get current selection via JavaScript
+                # For web view, get selection using JavaScript
+                def check_selection():
+                    script = """
+                    (function() {
+                        var selection = window.getSelection();
+                        var text = selection.toString();
+                        if (text && text.trim().length > 0) {
+                            return text;
+                        }
+                        return '';
+                    })();
+                    """
+                    self.web_view.page().runJavaScript(
+                        script,
+                        lambda result: context_menu_wrapper(result)
+                    )
+                
+                check_selection()
+                return  # will continue in the callback
+                
+            elif hasattr(self, 'content_edit') and self.content_edit:
+                # For QTextEdit, check cursor selection
+                if hasattr(self.content_edit, 'textCursor'):
+                    cursor = self.content_edit.textCursor()
+                    selected_text = cursor.selectedText()
+                    has_selection = bool(selected_text and selected_text.strip())
+            
+            # Build menu directly for non-web view contexts
+            build_menu(has_selection, selected_text)
+            menu.exec(self.mapToGlobal(position))
+            
+        except Exception as e:
+            logger.exception(f"Error showing context menu: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred while showing the context menu: {str(e)}"
+            )
+
+    def _highlight_with_color(self, color):
+        """Highlight the selected text with the specified color."""
+        try:
+            # Set the color in the dropdown to match
+            for i in range(self.highlight_color_combo.count()):
+                if self.highlight_color_combo.itemData(i) == color:
+                    self.highlight_color_combo.setCurrentIndex(i)
+                    break
+                    
+            # Now highlight with this color
+            if hasattr(self, 'web_view') and self.web_view:
+                # Apply highlight with JavaScript
+                script = f"""
+                (function() {{
+                    var selection = window.getSelection();
+                    var text = selection.toString();
+                    if (text && text.trim().length > 0) {{
+                        // Create highlight span
+                        var sel = window.getSelection();
+                        if (sel.rangeCount > 0) {{
+                            var range = sel.getRangeAt(0);
+                            
+                            // Create highlight span
+                            var highlightSpan = document.createElement('span');
+                            highlightSpan.className = 'incrementum-highlight';
+                            
+                            // Set color based on selection
+                            switch('{color}') {{
+                                case 'yellow':
+                                    highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                                    break;
+                                case 'green':
+                                    highlightSpan.style.backgroundColor = 'rgba(0, 255, 0, 0.3)';
+                                    break;
+                                case 'blue':
+                                    highlightSpan.style.backgroundColor = 'rgba(0, 191, 255, 0.3)';
+                                    break;
+                                case 'pink':
+                                    highlightSpan.style.backgroundColor = 'rgba(255, 105, 180, 0.3)';
+                                    break;
+                                case 'orange':
+                                    highlightSpan.style.backgroundColor = 'rgba(255, 165, 0, 0.3)';
+                                    break;
+                                default:
+                                    highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                            }}
+                            
+                            highlightSpan.style.borderRadius = '2px';
+                            
+                            try {{
+                                // Apply highlight
+                                range.surroundContents(highlightSpan);
+                                
+                                // Clear selection
+                                sel.removeAllRanges();
+                                
+                                return text;
+                            }} catch (e) {{
+                                console.error('Error highlighting text:', e);
+                                return '';
+                            }}
+                        }}
+                    }}
+                    return '';
+                }})();
+                """
                 self.web_view.page().runJavaScript(
-                    "window.getSelection().toString();",
-                    lambda result: setattr(self, '_temp_selection_result', result)
+                    script,
+                    lambda result: self._process_highlight_text(result, color)
+                )
+            elif hasattr(self, 'text_edit') and self.text_edit:
+                cursor = self.text_edit.textCursor()
+                if cursor.hasSelection():
+                    # Apply highlighting
+                    format = QTextCharFormat()
+                    
+                    # Set color based on selection
+                    if color == 'yellow':
+                        format.setBackground(QColor(255, 255, 0, 100))
+                    elif color == 'green':
+                        format.setBackground(QColor(0, 255, 0, 100))
+                    elif color == 'blue':
+                        format.setBackground(QColor(0, 191, 255, 100))
+                    elif color == 'pink':
+                        format.setBackground(QColor(255, 105, 180, 100))
+                    elif color == 'orange':
+                        format.setBackground(QColor(255, 165, 0, 100))
+                    else:
+                        format.setBackground(QColor(255, 255, 0, 100))
+                        
+                    cursor.mergeCharFormat(format)
+                    self.text_edit.setTextCursor(cursor)
+                    
+                    # Process the highlight in the database
+                    self._process_highlight_text(cursor.selectedText(), color)
+                    
+        except Exception as e:
+            logger.exception(f"Error highlighting with color: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred while highlighting: {str(e)}"
+            )
+
+    def _extract_from_context_menu(self):
+        """Extract text from context menu selection and highlight it."""
+        try:
+            if not self.selected_text or len(self.selected_text.strip()) < 5:
+                QMessageBox.warning(
+                    self, "Extract", 
+                    "Please select more text to extract."
+                )
+                return
+                
+            # Create extract
+            from core.knowledge_base.models import Extract
+            
+            extract = Extract(
+                document_id=self.document_id,
+                content=self.selected_text,
+                created_date=datetime.utcnow(),
+                priority=50  # Default priority
+            )
+            
+            # Save extract
+            self.db_session.add(extract)
+            self.db_session.commit()
+            
+            # Emit the extract created signal
+            self.extractCreated.emit(extract.id)
+            
+            # Get selected color
+            color_name = self.highlight_color_combo.currentData()
+            
+            # Highlight the extracted text if in a web view
+            if hasattr(self, 'web_view') and self.web_view:
+                highlight_script = f"""
+                (function() {{
+                    if (typeof highlightExtractedText === 'function') {{
+                        highlightExtractedText('{color_name}');
+                        return true;
+                    }}
+                    return false;
+                }})();
+                """
+                self.web_view.page().runJavaScript(highlight_script)
+                
+                # Also create a WebHighlight record for this extract
+                from core.knowledge_base.models import WebHighlight
+                
+                highlight = WebHighlight(
+                    document_id=self.document_id,
+                    content=self.selected_text,
+                    created_date=datetime.utcnow(),
+                    color=color_name
                 )
                 
-                # Process events to ensure JavaScript result is available
-                for _ in range(10):  # Try a few iterations
-                    QApplication.processEvents()
-                    if hasattr(self, '_temp_selection_result'):
-                        selected_text = self._temp_selection_result
-                        if selected_text and len(selected_text.strip()) > 0:
-                            has_selection = True
-                            self.selected_text = selected_text
-                        break
+                # Save highlight
+                self.db_session.add(highlight)
+                self.db_session.commit()
             
-            elif hasattr(self, 'text_edit') and self.text_edit:
-                # For text edit widgets
-                cursor = self.text_edit.textCursor()
-                has_selection = cursor.hasSelection()
-                if has_selection:
-                    selected_text = cursor.selectedText()
-                    self.selected_text = selected_text
-            
-            # Add extract action if text is selected
-            if has_selection:
-                extract_action = QAction("Extract Selection", self)
-                extract_action.triggered.connect(self._on_extract)
-                menu.addAction(extract_action)
-                
-                highlight_action = QAction("Highlight Selection", self)
-                highlight_action.triggered.connect(self._on_highlight)
-                menu.addAction(highlight_action)
-                
-                menu.addSeparator()
-            
-            # Add general document actions
-            add_to_ir_action = QAction("Add to Incremental Reading", self)
-            add_to_ir_action.triggered.connect(self._on_add_to_incremental_reading)
-            menu.addAction(add_to_ir_action)
-            
-            # Add summarize action
-            summarize_action = QAction("Summarize Document", self)
-            summarize_action.triggered.connect(self.summarize_current_content)
-            menu.addAction(summarize_action)
-            
-            menu.addSeparator()
-        
-        # Add clipboard actions
-        if hasattr(self, 'selected_text') and self.selected_text:
-            copy_action = QAction("Copy", self)
-            copy_action.triggered.connect(
-                lambda: QApplication.clipboard().setText(self.selected_text)
+            QMessageBox.information(
+                self, "Extract", 
+                "Extract created successfully. You can find it in the Knowledge Base."
             )
-            menu.addAction(copy_action)
-        
-        # Show menu if it has actions
-        if not menu.isEmpty():
-            menu.exec(self.mapToGlobal(position))
-    
+                
+        except Exception as e:
+            logger.exception(f"Error creating extract from context menu: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+
     def _set_error_message(self, message):
         """Display an error message in the content area."""
         error_label = QLabel(message)
@@ -3140,3 +2984,431 @@ window.addEventListener('load', function() {
             error_label = QLabel(f"Error loading audio file: {str(e)}")
             error_label.setStyleSheet("color: red;")
             self.content_layout.addWidget(error_label)
+
+    def _create_toolbar(self):
+        """Create toolbar with common document actions."""
+        toolbar = QToolBar()
+        toolbar.setIconSize(QSize(16, 16))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        
+        # Navigation actions
+        self.prev_button = QAction("Previous", self)
+        self.prev_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft))
+        self.prev_button.setStatusTip("Go to previous document")
+        self.prev_button.triggered.connect(self._on_previous)
+        toolbar.addAction(self.prev_button)
+        
+        self.next_button = QAction("Next", self)
+        self.next_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
+        self.next_button.setStatusTip("Go to next document")
+        self.next_button.triggered.connect(self._on_next)
+        toolbar.addAction(self.next_button)
+        
+        toolbar.addSeparator()
+        
+        # Extract action
+        self.extract_button = QAction("Extract", self)
+        self.extract_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        self.extract_button.setStatusTip("Extract selected text")
+        self.extract_button.triggered.connect(self._on_extract)
+        toolbar.addAction(self.extract_button)
+        
+        # Highlight action
+        self.highlight_button = QAction("Highlight", self)
+        self.highlight_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
+        self.highlight_button.setStatusTip("Highlight selected text")
+        self.highlight_button.triggered.connect(self._on_highlight)
+        toolbar.addAction(self.highlight_button)
+        
+        # Color picker for highlighting
+        self.highlight_color_combo = QComboBox()
+        self.highlight_color_combo.addItem("Yellow", "yellow")
+        self.highlight_color_combo.addItem("Green", "green")
+        self.highlight_color_combo.addItem("Blue", "blue")
+        self.highlight_color_combo.addItem("Pink", "pink")
+        self.highlight_color_combo.addItem("Orange", "orange")
+        self.highlight_color_combo.setCurrentIndex(0)
+        self.highlight_color_combo.setToolTip("Select highlight color")
+        self.highlight_color_combo.setStatusTip("Select highlight color")
+        self.highlight_color_combo.setMaximumWidth(80)
+        toolbar.addWidget(self.highlight_color_combo)
+        
+        toolbar.addSeparator()
+        
+        # Zoom actions
+        self.zoom_out_button = QAction("Zoom Out", self)
+        self.zoom_out_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_MediaSeekBackward))
+        self.zoom_out_button.setStatusTip("Zoom out")
+        self.zoom_out_button.triggered.connect(self._on_zoom_out)
+        toolbar.addAction(self.zoom_out_button)
+        
+        self.zoom_in_button = QAction("Zoom In", self)
+        self.zoom_in_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward))
+        self.zoom_in_button.setStatusTip("Zoom in")
+        self.zoom_in_button.triggered.connect(self._on_zoom_in)
+        toolbar.addAction(self.zoom_in_button)
+        
+        toolbar.addSeparator()
+        
+        # Incremental reading action
+        self.ir_button = QAction("Add to IR", self)
+        self.ir_button.setStatusTip("Add to incremental reading queue")
+        self.ir_button.triggered.connect(self._on_add_to_incremental_reading)
+        toolbar.addAction(self.ir_button)
+        
+        return toolbar
+
+    def _on_previous(self):
+        """Navigate to the previous document."""
+        self.navigate.emit("previous")
+    
+    def _on_next(self):
+        """Navigate to the next document."""
+        self.navigate.emit("next")
+
+    def _on_zoom_in(self):
+        """Zoom in on the document content."""
+        if hasattr(self, 'content_edit'):
+            if isinstance(self.content_edit, QWebEngineView):
+                # For web view, use zoom factor
+                current_zoom = self.content_edit.zoomFactor()
+                self.content_edit.setZoomFactor(current_zoom * 1.2)
+            elif hasattr(self.content_edit, 'zoomIn'):
+                # For text edit, use zoom in method
+                self.content_edit.zoomIn(2)
+    
+    def _on_zoom_out(self):
+        """Zoom out on the document content."""
+        if hasattr(self, 'content_edit'):
+            if isinstance(self.content_edit, QWebEngineView):
+                # For web view, use zoom factor
+                current_zoom = self.content_edit.zoomFactor()
+                self.content_edit.setZoomFactor(current_zoom / 1.2)
+            elif hasattr(self.content_edit, 'zoomOut'):
+                # For text edit, use zoom out method
+                self.content_edit.zoomOut(2)
+
+    def _on_add_to_incremental_reading(self):
+        """Add the current document to the incremental reading queue."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            # Use the IR manager to add document to queue
+            ir_manager = IncrementalReadingManager(self.db_session)
+            ir_manager.add_document_to_queue(self.document_id)
+            
+            QMessageBox.information(
+                self, "Incremental Reading", 
+                "Document added to incremental reading queue."
+            )
+                
+        except Exception as e:
+            logger.exception(f"Error adding to incremental reading: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+    
+    def _on_highlight(self):
+        """Highlight the selected text in the document."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            # Get the selected highlight color
+            color_name = self.highlight_color_combo.currentData()
+            
+            # Get selected text
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, use JavaScript to get selected text and apply highlight
+                script = f"""
+                (function() {{
+                    var selection = window.getSelection();
+                    var text = selection.toString();
+                    if (text && text.trim().length > 0) {{
+                        // Apply highlight
+                        if (typeof highlightExtractedText === 'function') {{
+                            // Create highlight span
+                            var sel = window.getSelection();
+                            if (sel.rangeCount > 0) {{
+                                var range = sel.getRangeAt(0);
+                                
+                                // Create highlight span
+                                var highlightSpan = document.createElement('span');
+                                highlightSpan.className = 'incrementum-highlight';
+                                
+                                // Set color based on selection
+                                switch('{color_name}') {{
+                                    case 'yellow':
+                                        highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                                        break;
+                                    case 'green':
+                                        highlightSpan.style.backgroundColor = 'rgba(0, 255, 0, 0.3)';
+                                        break;
+                                    case 'blue':
+                                        highlightSpan.style.backgroundColor = 'rgba(0, 191, 255, 0.3)';
+                                        break;
+                                    case 'pink':
+                                        highlightSpan.style.backgroundColor = 'rgba(255, 105, 180, 0.3)';
+                                        break;
+                                    case 'orange':
+                                        highlightSpan.style.backgroundColor = 'rgba(255, 165, 0, 0.3)';
+                                        break;
+                                    default:
+                                        highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                                }}
+                                
+                                highlightSpan.style.borderRadius = '2px';
+                                
+                                try {{
+                                    // Apply highlight
+                                    range.surroundContents(highlightSpan);
+                                    
+                                    // Clear selection
+                                    sel.removeAllRanges();
+                                }} catch (e) {{
+                                    console.error('Error highlighting text:', e);
+                                }}
+                            }}
+                        }}
+                        return text;
+                    }}
+                    return '';
+                }})();
+                """
+                self.web_view.page().runJavaScript(
+                    script,
+                    lambda result: self._process_highlight_text(result, color_name)
+                )
+                return
+            elif hasattr(self, 'text_edit') and self.text_edit:
+                # For text edit, get selection and apply highlight
+                cursor = self.text_edit.textCursor()
+                selected_text = cursor.selectedText()
+                if selected_text:
+                    # Apply highlighting to the selection
+                    format = QTextCharFormat()
+                    
+                    # Set color based on selection
+                    if color_name == 'yellow':
+                        format.setBackground(QColor(255, 255, 0, 100))
+                    elif color_name == 'green':
+                        format.setBackground(QColor(0, 255, 0, 100))
+                    elif color_name == 'blue':
+                        format.setBackground(QColor(0, 191, 255, 100))
+                    elif color_name == 'pink':
+                        format.setBackground(QColor(255, 105, 180, 100))
+                    elif color_name == 'orange':
+                        format.setBackground(QColor(255, 165, 0, 100))
+                    else:
+                        format.setBackground(QColor(255, 255, 0, 100))
+                        
+                    cursor.mergeCharFormat(format)
+                    self.text_edit.setTextCursor(cursor)
+                    self._process_highlight_text(selected_text, color_name)
+                else:
+                    QMessageBox.warning(
+                        self, "Highlight", 
+                        "Please select some text to highlight."
+                    )
+                    
+        except Exception as e:
+            logger.exception(f"Error creating highlight: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+    
+    def _process_highlight_text(self, selected_text, color_name='yellow'):
+        """Process text after highlighting from web view or text edit."""
+        try:
+            if not selected_text or len(selected_text.strip()) < 5:
+                QMessageBox.warning(
+                    self, "Highlight", 
+                    "Please select more text to highlight (at least 5 characters)."
+                )
+                return
+                
+            # Create web highlight record
+            from core.knowledge_base.models import WebHighlight
+            
+            highlight = WebHighlight(
+                document_id=self.document_id,
+                content=selected_text,
+                created_date=datetime.utcnow(),
+                color=color_name
+            )
+            
+            # Save highlight
+            self.db_session.add(highlight)
+            self.db_session.commit()
+            
+            QMessageBox.information(
+                self, "Highlight", 
+                f"Text highlighted successfully with {color_name} color."
+            )
+                
+        except Exception as e:
+            logger.exception(f"Error creating highlight: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+
+    def _on_mark_reading_progress(self):
+        """Mark the reading progress for the current document."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            document = self.db_session.query(Document).get(self.document_id)
+            if not document:
+                logger.warning(f"Document not found: {self.document_id}")
+                return
+            
+            # Get current position
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, get scroll position using JavaScript
+                self.web_view.page().runJavaScript(
+                    "window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;",
+                    lambda result: self._save_position_to_document(result)
+                )
+                return  # We'll continue in the callback
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
+                # For text edit or other scrollable widgets
+                scrollbar = self.content_edit.verticalScrollBar()
+                position = scrollbar.value()
+                self._save_position_to_document(position)
+            else:
+                QMessageBox.warning(
+                    self, "Reading Progress", 
+                    "Unable to determine reading position for this document type."
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error marking reading progress: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+    
+    def _save_position_to_document(self, position):
+        """Save the position to the document."""
+        try:
+            document = self.db_session.query(Document).get(self.document_id)
+            if document:
+                # Update document position directly
+                document.position = position
+                document.last_accessed = datetime.utcnow()
+                self.db_session.commit()
+                
+                QMessageBox.information(
+                    self, "Reading Progress", 
+                    "Reading position saved. You can continue from this point next time."
+                )
+                
+                logger.debug(f"Saved position {position} for document {self.document_id}")
+            else:
+                logger.warning(f"Document not found: {self.document_id}")
+                QMessageBox.warning(
+                    self, "Reading Progress", 
+                    "Document not found. Unable to save position."
+                )
+        except Exception as e:
+            logger.exception(f"Error saving reading position: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+
+    def _on_extract_selected(self, extract_id):
+        """Handle when an extract is selected in the extract view.
+        
+        Args:
+            extract_id (int): ID of the selected extract
+        """
+        try:
+            # Get the extract from the database
+            extract = self.db_session.query(Extract).get(extract_id)
+            
+            if not extract:
+                logger.warning(f"Extract not found: {extract_id}")
+                return
+                
+            # Highlight the extract text in the document if possible
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, find and highlight the text
+                script = f"""
+                (function() {{
+                    const text = {json.dumps(extract.content)};
+                    if (!text) return false;
+                    
+                    const selection = window.getSelection();
+                    const range = document.createRange();
+                    const allTextNodes = [];
+                    
+                    // Get all text nodes
+                    function getTextNodes(node) {{
+                        if (node.nodeType === 3) {{
+                            allTextNodes.push(node);
+                        }} else {{
+                            for (let i = 0; i < node.childNodes.length; i++) {{
+                                getTextNodes(node.childNodes[i]);
+                            }}
+                        }}
+                    }}
+                    
+                    getTextNodes(document.body);
+                    
+                    // Find the text in the document
+                    for (let i = 0; i < allTextNodes.length; i++) {{
+                        const nodeText = allTextNodes[i].textContent;
+                        const index = nodeText.indexOf(text);
+                        if (index >= 0) {{
+                            // Found the text
+                            range.setStart(allTextNodes[i], index);
+                            range.setEnd(allTextNodes[i], index + text.length);
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                            
+                            // Scroll to the text
+                            const rect = range.getBoundingClientRect();
+                            window.scrollTo({{
+                                top: window.scrollY + rect.top - 100,
+                                behavior: 'smooth'
+                            }});
+                            
+                            return true;
+                        }}
+                    }}
+                    
+                    return false;
+                }})();
+                """
+                self.web_view.page().runJavaScript(script)
+            elif hasattr(self, 'content_edit') and isinstance(self.content_edit, QTextEdit):
+                # For text edit, find and highlight the text
+                cursor = self.content_edit.textCursor()
+                cursor.setPosition(0)
+                self.content_edit.setTextCursor(cursor)
+                
+                if self.content_edit.find(extract.content):
+                    # Text found, it's now selected
+                    # Ensure visible
+                    self.content_edit.ensureCursorVisible()
+                else:
+                    logger.warning(f"Could not find extract text in document: {extract.content[:50]}...")
+            
+            logger.debug(f"Selected extract: {extract_id}")
+            
+        except Exception as e:
+            logger.exception(f"Error selecting extract: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred while selecting the extract: {str(e)}"
+            )
+

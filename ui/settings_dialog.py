@@ -1481,7 +1481,7 @@ class SettingsDialog(QDialog):
 
     def closeEvent(self, event):
         """Handle dialog close event - restore original theme if not saved."""
-        if self.result() == QDialog.Rejected:
+        if self.result() == QDialog.DialogCode.Rejected:
             # Restore the original theme if dialog was canceled
             app = QApplication.instance()
             if app:
