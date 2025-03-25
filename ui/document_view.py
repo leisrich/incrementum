@@ -2446,7 +2446,7 @@ window.addEventListener('load', function() {
     def _on_show_read_later_items(self):
         """Show Read Later items dialog."""
         try:
-            from read_later_feature import ReadLaterDialog
+            from ui.read_later_feature import ReadLaterDialog
 
             dialog = ReadLaterDialog(self.db_session, self)
             dialog.itemSelected.connect(self._on_read_later_item_selected)
