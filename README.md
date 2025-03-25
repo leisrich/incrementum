@@ -8,7 +8,7 @@ This guide will walk you through setting up and using Incrementum to create your
 
 ## Table of Contents
 
-1. [Installation](#installation)
+1. [Installation](https://github.com/leisrich/incrementum/blob/main/docs/INSTALL.md)
 2. [Getting Started](#getting-started)
 3. [Importing Documents](#importing-documents)
 4. [Extracting Knowledge](#extracting-knowledge)
@@ -30,62 +30,6 @@ This guide will walk you through setting up and using Incrementum to create your
 ![image](https://github.com/user-attachments/assets/081b178f-3ab3-4a31-b542-77125a2d1647)
 ![image](https://github.com/user-attachments/assets/5639d385-bacd-47ad-b012-216ec14d99e7)
 ![image](https://github.com/user-attachments/assets/ab57cfd3-cb76-4547-8bb1-148908b198e2)
-
-## Installation
-
-### Prerequisites
-
-- Python 3.8 or higher
-- pip (Python package manager)
-- Qt libraries (for PyQt6)
-
-### Install Steps
-
-1. **Clone or download the repository**
-
-```bash
-git clone https://github.com/melpomenex/incrementum.git
-cd incrementum
-```
-
-2. **Create a virtual environment**
-
-```bash
-python -m venv incrementum-env
-```
-
-3. **Activate the virtual environment**
-
-On Linux/macOS:
-```bash
-source incrementum-env/bin/activate
-```
-On Windows run this command to get going quickly in Powershell:
-```bash
-.\setup.ps1
-```
-On Windows:
-```bash
-incrementum-env\Scripts\activate
-```
-
-4. **Install dependencies**
-
-```bash
-pip install -r requirements.txt
-```
-
-5. **Initialize the database**
-
-```bash
-python init_db.py
-```
-
-6. **Run the application**
-
-```bash
-python main.py
-```
 
 ## Getting Started
 
@@ -377,3 +321,4 @@ Visit the Incrementum GitHub repository for:
 ---
 
 Remember that incremental learning is a process - start small, focus on quality extracts, and maintain a consistent review schedule for best results.
+
