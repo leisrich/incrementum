@@ -3412,3 +3412,234 @@ window.addEventListener('load', function() {
                 f"An error occurred while selecting the extract: {str(e)}"
             )
 
+    def _restore_highlights(self):
+        """Restore highlights for the current document."""
+        if not hasattr(self, 'document_id') or not self.document_id:
+            return
+
+        try:
+            # For PDFs, highlighting is handled by the PDFViewWidget
+            if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWidget) and 'pdf' in str(type(self.content_edit)).lower():
+                # PDFViewWidget has its own highlight loading
+                return
+                
+            # For web content
+            if hasattr(self, 'web_view') and self.web_view:
+                # Get highlights from database
+                highlights = self.db_session.query(WebHighlight).filter(WebHighlight.document_id == self.document_id).all()
+                
+                if not highlights:
+                    logger.debug(f"No highlights found for document {self.document_id}")
+                    return
+                    
+                logger.info(f"Restoring {len(highlights)} highlights for document {self.document_id}")
+                
+                # Build JavaScript to apply highlights
+                script = """
+                function applyHighlights() {
+                    if (typeof registerHighlightFunctions !== 'function') {
+                        console.error('Highlighting functions not available');
+                        return;
+                    }
+                    
+                    registerHighlightFunctions();
+                    
+                    const highlights = %s;
+                    highlights.forEach(h => {
+                        highlightText(h.text, h.color || 'yellow');
+                    });
+                }
+                
+                // Run when document is fully loaded
+                if (document.readyState === 'complete') {
+                    applyHighlights();
+                } else {
+                    window.addEventListener('load', applyHighlights);
+                }
+                """ % json.dumps([{"text": h.content, "color": h.color} for h in highlights])
+                
+                # Apply highlights
+                self.web_view.page().runJavaScript(script)
+                
+            # For text content in QTextEdit
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'textCursor'):
+                cursor = self.content_edit.textCursor()
+                
+                # Get highlights from database (using Highlight model for non-web documents)
+                highlights = self.db_session.query(WebHighlight).filter(WebHighlight.document_id == self.document_id).all()
+                
+                if not highlights:
+                    logger.debug(f"No highlights found for document {self.document_id}")
+                    return
+                    
+                logger.info(f"Restoring {len(highlights)} highlights for document {self.document_id}")
+                
+                # Prepare text format for highlighting
+                text_format = QTextCharFormat()
+                
+                doc = self.content_edit.document()
+                
+                for highlight in highlights:
+                    try:
+                        # Set color based on highlight color field
+                        if highlight.color == 'yellow':
+                            text_format.setBackground(QColor(255, 255, 0, 80))  # Yellow with transparency
+                        elif highlight.color == 'green':
+                            text_format.setBackground(QColor(0, 255, 0, 80))    # Green with transparency
+                        elif highlight.color == 'blue':
+                            text_format.setBackground(QColor(0, 255, 255, 80))  # Blue with transparency
+                        elif highlight.color == 'pink':
+                            text_format.setBackground(QColor(255, 192, 203, 80)) # Pink with transparency
+                        elif highlight.color == 'orange':
+                            text_format.setBackground(QColor(255, 165, 0, 80))   # Orange with transparency
+                        else:
+                            text_format.setBackground(QColor(255, 255, 0, 80))  # Default yellow
+                            
+                        # Find and highlight all occurrences of the text
+                        text_to_highlight = highlight.content
+                        
+                        # Start from the beginning
+                        cursor.setPosition(0)
+                        
+                        # Find and highlight all occurrences
+                        while cursor.position() < doc.characterCount():
+                            cursor = doc.find(text_to_highlight, cursor.position())
+                            if cursor.position() == -1:
+                                break
+                                
+                            cursor.mergeCharFormat(text_format)
+                            
+                    except Exception as e:
+                        logger.warning(f"Error applying highlight for '{highlight.content[:20]}...': {e}")
+                        
+        except Exception as e:
+            logger.exception(f"Error restoring highlights: {e}")
+    
+    def _highlight_with_color(self, color):
+        """Highlight selected text with specified color."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded, can't highlight")
+                return
+                
+            # For PDFs, we need to handle highlighting in the PDF view
+            if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWidget) and 'pdf' in str(type(self.content_edit)).lower():
+                if hasattr(self.content_edit, '_on_highlight_with_color'):
+                    self.content_edit._on_highlight_with_color(color)
+                return
+                
+            # Get selected text
+            selected_text = ""
+            
+            # For web view
+            if hasattr(self, 'web_view') and self.web_view:
+                # Execute JavaScript to get selected text and apply highlight
+                script = f"""
+                (function() {{
+                    const selection = window.getSelection();
+                    if (!selection || selection.rangeCount === 0 || selection.toString().trim() === '') {{
+                        return {{'success': false, 'error': 'No text selected'}};
+                    }}
+                    
+                    const text = selection.toString();
+                    
+                    // Call highlight function if available
+                    if (typeof highlightText === 'function') {{
+                        highlightText(text, '{color}');
+                        return {{'success': true, 'text': text}};
+                    }} else {{
+                        return {{'success': false, 'error': 'Highlight function not available'}};
+                    }}
+                }})();
+                """
+                
+                self.web_view.page().runJavaScript(script, self._handle_highlight_result_web)
+                return
+                
+            # For text content
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'textCursor'):
+                cursor = self.content_edit.textCursor()
+                if not cursor.hasSelection():
+                    logger.warning("No text selected for highlighting")
+                    return
+                    
+                selected_text = cursor.selectedText()
+                
+                # Create highlight format
+                highlight_format = QTextCharFormat()
+                
+                # Set color based on parameter
+                if color == 'yellow':
+                    highlight_format.setBackground(QColor(255, 255, 0, 80))  # Yellow with transparency
+                elif color == 'green':
+                    highlight_format.setBackground(QColor(0, 255, 0, 80))    # Green with transparency
+                elif color == 'blue':
+                    highlight_format.setBackground(QColor(0, 255, 255, 80))  # Blue with transparency
+                elif color == 'pink':
+                    highlight_format.setBackground(QColor(255, 192, 203, 80)) # Pink with transparency
+                elif color == 'orange':
+                    highlight_format.setBackground(QColor(255, 165, 0, 80))   # Orange with transparency
+                else:
+                    highlight_format.setBackground(QColor(255, 255, 0, 80))  # Default yellow
+                
+                # Apply highlight
+                cursor.mergeCharFormat(highlight_format)
+                
+                # Save highlight to database
+                self._process_highlight_text(selected_text, color)
+            
+        except Exception as e:
+            logger.exception(f"Error highlighting with color {color}: {e}")
+    
+    def _handle_highlight_result_web(self, result):
+        """Handle result from JavaScript highlight operation."""
+        try:
+            if isinstance(result, dict) and result.get('success'):
+                selected_text = result.get('text', '')
+                if selected_text:
+                    self._process_highlight_text(selected_text, result.get('color', 'yellow'))
+                    logger.info(f"Highlighted text: '{selected_text[:30]}...'")
+            else:
+                error = result.get('error', 'Unknown error') if isinstance(result, dict) else 'Invalid result'
+                logger.warning(f"Highlight failed: {error}")
+        except Exception as e:
+            logger.exception(f"Error processing highlight result: {e}")
+    
+    def _process_highlight_text(self, selected_text, color_name='yellow'):
+        """Process highlighted text and save to database."""
+        try:
+            if not selected_text or not hasattr(self, 'document_id') or not self.document_id:
+                return False
+                
+            if not color_name:
+                color_name = 'yellow'
+                
+            # Create new highlight
+            if hasattr(self, 'web_view') and self.web_view:
+                # Web highlights use WebHighlight model
+                highlight = WebHighlight(
+                    document_id=self.document_id,
+                    content=selected_text,
+                    color=color_name,
+                    created_date=datetime.utcnow()
+                )
+            else:
+                # Other documents use Highlight model
+                highlight = WebHighlight(
+                    document_id=self.document_id,
+                    content=selected_text,
+                    color=color_name,
+                    created_date=datetime.utcnow()
+                )
+                
+            # Add to database
+            self.db_session.add(highlight)
+            self.db_session.commit()
+            
+            logger.info(f"Created highlight {highlight.id} with color {color_name}")
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Error processing highlight: {e}")
+            return False
+
