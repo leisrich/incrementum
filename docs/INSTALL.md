@@ -1,321 +1,235 @@
-# Incrementum Installation and Setup Guide
+# Installation Guide for Incrementum
 
-This guide will walk you through the process of setting up Incrementum, an advanced incremental learning system, on your computer.
+This guide provides instructions on how to set up and run the Incrementum project primarily on an **Arch Linux-based system** (like CachyOS, EndeavourOS, Manjaro, Arch Linux). It uses `uv` for Python package management and `pacman` for system dependencies.
 
-## System Requirements
+## Prerequisites
 
-- **Operating System**: Linux (preferred), macOS, or Windows
-- **Python**: Version 3.8 or higher
-- **Disk Space**: At least 500MB for the application and dependencies
-- **Memory**: Minimum 4GB RAM (8GB or more recommended for large documents)
-- **Additional Requirements**: Qt libraries for GUI (included in the installation process)
+Before you begin, ensure you have the following installed on your system:
+
+1.  **Arch-based Linux:** These instructions are tailored for distributions using `pacman`.
+2.  **Git:** For cloning the repository.
+    ```bash
+    sudo pacman -Syu git
+    ```
+3.  **Python (Version 3.11 or 3.12 recommended):** This project relies on Python features and library compatibility from these versions. We'll use Python 3.11 in the examples.
+    ```bash
+    # Install Python 3.11 (or python312 if you prefer)
+    sudo pacman -S python311
+    ```
+4.  **uv:** The fast Python package installer used for managing dependencies.
+    ```bash
+    sudo pacman -S uv
+    ```
+5.  **Qt6 System Libraries:** PyQt6 relies on the underlying Qt C++ libraries. Install the necessary components using `pacman`. `requirements.txt` **does not** handle these system libraries.
+    ```bash
+    # Install core Qt6 libs + modules needed by Incrementum (WebEngine, Charts, SVG)
+    sudo pacman -S qt6-base qt6-declarative qt6-svg qt6-webengine qt6-charts
+    ```
+    *(Note: If you encounter `ModuleNotFoundError` later related to other Qt modules, you might need to install corresponding `qt6-<module>` packages here.)*
 
 ## Installation Steps
 
-### 1. Install Python Dependencies
-
-Before installing Incrementum, make sure you have the following prerequisites:
-
-#### On Linux (Ubuntu/Debian):
-
-```bash
-# Install Python and pip
-sudo apt update
-sudo apt install python3 python3-pip python3-venv
-
-# Install Qt dependencies
-sudo apt install qt6-base-dev libgl1-mesa-dev
-
-# Install other dependencies for PDF processing
-sudo apt install libpoppler-dev poppler-utils tesseract-ocr
-```
-
-#### On macOS:
-
-```bash
-# Install Homebrew if not already installed
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Install Python
-brew install python
-
-# Install Qt dependencies
-brew install qt@6
-
-# Install other dependencies
-brew install poppler tesseract
-```
-
-#### On Windows:
-
-1. Download and install Python 3.8 or higher from [python.org](https://www.python.org/downloads/)
-2. Make sure to check "Add Python to PATH" during installation
-3. Install Microsoft Visual C++ Build Tools if needed
-
-### 2. Set Up the Incrementum Repository
-
-```bash
-# Clone the repository
-git clone https://github.com/melpomenex/incrementum.git
-cd incrementum
-
-# Create and activate a virtual environment
-python -m venv incrementum-env
-
-# On Linux/macOS
-source incrementum-env/bin/activate
-
-# On Windows
-incrementum-env\Scripts\activate
-```
-
-### 3. Install Required Packages
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-```
-
-The `requirements.txt` file includes all necessary Python packages:
-
-```
-PyQt6==6.5.0
-SQLAlchemy==2.0.15
-alembic==1.10.4
-pdfminer.six==20221105
-PyPDF2==3.0.1
-beautifulsoup4==4.12.2
-lxml==4.9.2
-ebooklib==0.18
-markdown==3.4.3
-python-docx==0.8.11
-nltk==3.8.1
-scikit-learn==1.2.2
-spacy==3.5.3
-appdirs==1.4.4
-python-dateutil==2.8.2
-requests==2.30.0
-pymupdf==1.22.3
-pytesseract==0.3.10
-matplotlib==3.7.1
-networkx==3.1
-pygraphviz==1.10
-```
-
-### 4. Download Additional Resources
-
-Some components require additional resources:
-
-```bash
-# Download NLTK resources
-python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords'); nltk.download('wordnet')"
-
-# Download spaCy language model
-python -m spacy download en_core_web_sm
-```
-
-### 5. Initialize the Database
-
-```bash
-# Run the database initialization script
-python init_db.py
-```
-
-This will create the SQLite database in your user data directory and set up initial categories.
-
-### 6. Run Incrementum
-
-```bash
-# Launch the application
-python main.py
-```
-
-## Folder Structure
-
-After installation, your Incrementum folder should look like this:
-
-```
-incrementum/
-├── assets/                # Application assets and resources
-├── core/                  # Core application modules
-│   ├── content_extractor/     # Knowledge extraction components
-│   ├── document_processor/    # Document import and processing
-│   ├── knowledge_base/        # Database and storage
-│   ├── knowledge_network/     # Network visualization
-│   ├── spaced_repetition/     # SM-18 implementation
-│   └── utils/                 # Utility functions
-├── models/                # Data models
-├── ui/                    # User interface components
-│   ├── models/                # UI data models
-├── incrementum-env/       # Virtual environment (created during setup)
-├── main.py                # Application entry point
-├── init_db.py             # Database initialization
-├── requirements.txt       # Dependencies list
-└── README.md              # Project documentation
-```
-
-## Application Data Location
-
-Incrementum stores your data in the following locations:
-
-- **Linux**: `~/.local/share/Incrementum/Incrementum/`
-- **macOS**: `~/Library/Application Support/Incrementum/Incrementum/`
-- **Windows**: `C:\Users\USERNAME\AppData\Local\Incrementum\Incrementum\`
-
-These folders contain:
-- Your SQLite database
-- Document files
-- Backups
-- Configuration files
-
-## Troubleshooting Common Installation Issues
-
-### Python Version Issues
-
-If you encounter errors related to Python version:
-
-```bash
-# Check your Python version
-python --version
-
-# If it's below 3.8, install a newer version and update your virtual environment
-```
-
-### Missing Qt Dependencies
-
-If you see errors related to PyQt:
-
-```bash
-# On Linux
-sudo apt install python3-pyqt6
-
-# On macOS
-brew install pyqt@6
-
-# On Windows, reinstall PyQt6 with pip
-pip uninstall PyQt6
-pip install PyQt6
-```
-
-### PDF Processing Issues
-
-If PDF processing doesn't work correctly:
-
-```bash
-# Ensure poppler and related tools are installed
-# On Linux
-sudo apt install poppler-utils
-
-# On macOS
-brew install poppler
-
-# Check PyMuPDF installation
-pip uninstall pymupdf
-pip install pymupdf==1.22.3
-```
-
-### Database Initialization Failure
-
-If the database fails to initialize:
-
-1. Check permissions in your user data directory
-2. Delete any existing incrementum.db file and retry
-3. Make sure SQLAlchemy is installed correctly
-
-## Post-Installation Configuration
-
-### First-time Setup
-
-When you first run Incrementum, you may want to configure:
-
-1. **Settings**: Go to Tools > Settings
-   - Set your default document directory
-   - Configure auto-saving interval
-   - Choose your preferred theme
-   - Adjust spaced repetition parameters
-
-2. **Create Categories**: Right-click in the category panel to create your organizational structure
-   - Create subject categories
-   - Add subcategories for specific topics
-
-3. **Import Sample Documents**: Use File > Import File to add your first documents
-   - Try starting with a PDF document
-   - Experiment with extraction and learning item creation
-
-### Optional Components
-
-For advanced features, you might want to install:
-
-- **GraphViz**: For enhanced knowledge network visualization
-  ```bash
-  # Linux
-  sudo apt install graphviz
-  
-  # macOS
-  brew install graphviz
-  
-  # Windows - download from graphviz.org
-  ```
-
-- **Tesseract OCR**: For processing scanned documents
-  ```bash
-  # Linux
-  sudo apt install tesseract-ocr
-  
-  # macOS
-  brew install tesseract
-  
-  # Windows - download from github.com/UB-Mannheim/tesseract/wiki
-  ```
-
-## Upgrading
-
-To upgrade Incrementum to a newer version:
-
-```bash
-# Navigate to your Incrementum directory
-cd path/to/incrementum
-
-# Activate the virtual environment
-source incrementum-env/bin/activate  # On Linux/macOS
-incrementum-env\Scripts\activate     # On Windows
-
-# Pull the latest changes
-git pull
-
-# Update dependencies
-pip install -r requirements.txt
-
-# Run any database migrations
-python -m alembic upgrade head
-```
-
-Always backup your data before upgrading by using the built-in backup feature (Tools > Backup & Restore).
-
-## Running Incrementum in Development Mode
-
-If you're a developer or want to modify Incrementum:
-
-```bash
-# Enable debug logging
-python main.py --debug
-
-# Run with specific settings file
-python main.py --settings-file=custom_settings.json
-```
+1.  **Clone the Repository:**
+    Open your terminal and clone the Incrementum repository:
+    ```bash
+    git clone <URL_TO_YOUR_INCREMENTUM_REPO> # Replace with your repo URL
+    cd incrementum # Navigate into the cloned directory
+    ```
+
+2.  **Create a Python Virtual Environment:**
+    It's highly recommended to use a virtual environment to isolate project dependencies. Use `uv` with your chosen Python version (e.g., 3.11):
+    ```bash
+    # Create a virtual environment named .venv using python3.11
+    uv venv -p python3.11
+    ```
+    *(This creates a `.venv` directory within your project folder.)*
+
+3.  **Activate the Virtual Environment:**
+    Activate the environment before installing packages:
+    ```bash
+    source .venv/bin/activate
+    ```
+    *(Your terminal prompt should now be prefixed with `(.venv)`)*
+
+4.  **Install Python Dependencies:**
+    Use `uv` to install all required Python packages listed in the `requirements.txt` file:
+    ```bash
+    uv pip install -r requirements.txt
+    ```
+    *(This will install PyQt6, PyQt6-WebEngine, PyQt6-Charts, NLTK, and other necessary Python libraries.)*
+
+## Running the Application
+
+Once the installation is complete:
+
+1.  **Ensure the virtual environment is active:**
+    If you open a new terminal, reactivate it:
+    ```bash
+    source .venv/bin/activate
+    ```
+
+2.  **Run the main script:**
+    ```bash
+    python main.py
+    ```
+
+3.  **First Run Note:** On the very first run, the application might download necessary data files for the NLTK library (used for natural language processing tasks). This is normal and should only happen once.
+
+## Troubleshooting
+
+* **`ModuleNotFoundError: No module named 'PyQt6.Qt...'`:** This usually means a required *system* Qt library is missing. Double-check the `pacman -S qt6-...` command in the Prerequisites section and ensure all necessary modules (like `qt6-webengine`, `qt6-charts`) are installed.
+* **`uv: command not found` or `python3.11: command not found`:** Make sure you completed the Prerequisites section correctly.
+* **Errors during `uv pip install`:** Ensure you have the `base-devel` package group installed (`sudo pacman -S --needed base-devel`) for compiling any potential dependencies, although `uv` often uses pre-built wheels when available. Ensure the virtual environment is active.
+
+## Notes for Other Operating Systems
+
+While this guide focuses on Arch Linux, the general steps for other systems are:
+1.  Install Git, Python (3.11/3.12), and `uv` using your system's package manager (`apt`, `brew`, etc.).
+2.  Install the **Qt6 development libraries** using your system's package manager (package names will differ significantly, e.g., `qt6-base-dev`, `libqt6websockets6-dev`, `qml6-module-qtwebengine`, `qml6-module-qtcharts` on Debian/Ubuntu based systems). This is often the trickiest part.
+3.  Clone the repository.
+4.  Create and activate a virtual environment (`uv venv -p python3.11`, `source .venv/bin/activate`).
+5.  Install Python dependencies (`uv pip install -r requirements.txt`).
+6.  Run the application (`python main.py`).
+
+## Installation on Windows
+
+These instructions guide you through installing Incrementum on Windows. Setting up development environments, especially those involving compiled libraries like Qt, can sometimes be more complex on Windows.
+
+### Prerequisites (Windows)
+
+1.  **Git:** Download and install [Git for Windows](https://git-scm.com/download/win). Allow it to add Git to your PATH during installation.
+2.  **Python (Version 3.11 or 3.12 recommended):**
+    * Download the installer from [python.org](https://www.python.org/downloads/windows/).
+    * **Important:** During installation, check the box "Add Python x.x to PATH".
+    * We'll assume Python 3.11 for these instructions.
+3.  **`uv`:**
+    * Open PowerShell (you can search for it in the Start Menu).
+    * Run the following command to download and install `uv`:
+        ```powershell
+        irm [https://astral.sh/uv/install.ps1](https://astral.sh/uv/install.ps1) | iex
+        ```
+    * Alternatively, after installing Python, you can use pip: `pip install uv`.
+4.  **Qt6 Development Libraries (via Official Installer):** This is the most crucial and potentially complex step. `requirements.txt` only installs the Python *bindings*; you need the actual Qt C++ libraries.
+    * Download the **Qt Online Installer** from the [official Qt website](https://www.qt.io/download-qt-installer) (requires a free Qt Account).
+    * Run the installer. When you reach the component selection screen:
+        * Select a recent Qt 6 version (e.g., 6.7.x, 6.8.x).
+        * Under that version, select the component matching your Python installation, typically **MSVC 2019 64-bit** (or a newer MSVC version if appropriate for your setup). **Do not** select MinGW unless you specifically built Python with it.
+        * Ensure the following modules are checked under your chosen MSVC component: `Qt Base (Core, GUI, Widgets, etc.)`, `Qt SVG`, `Qt Declarative`, `Qt WebEngine`, `Qt Charts`.
+        * Complete the installation.
+    * **Add Qt to PATH:** You *must* add the `bin` directory of your installed Qt version to your system's PATH environment variable so Python and other tools can find the necessary DLLs.
+        * Find the path, typically like `C:\Qt\<Your_Qt_Version>\msvc2019_64\bin` (e.g., `C:\Qt\6.7.0\msvc2019_64\bin`).
+        * Search for "Environment Variables" in the Windows Start Menu, open "Edit the system environment variables".
+        * Click "Environment Variables...".
+        * Under "System variables" (or "User variables" if you prefer), find the `Path` variable, select it, and click "Edit...".
+        * Click "New" and paste the path to the Qt `bin` directory.
+        * Click OK on all dialogs. You may need to restart your terminal or even log out/in for the changes to take effect fully.
+5.  **C++ Build Tools (Optional but recommended):** If `uv pip install` fails on some packages requiring compilation, you might need Microsoft C++ Build Tools. Install "Desktop development with C++" via the [Visual Studio Installer](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (select Build Tools).
+
+### Installation Steps (Windows)
+
+1.  **Clone the Repository:**
+    Open Git Bash, Command Prompt, or PowerShell:
+    ```bash
+    git clone <URL_TO_YOUR_INCREMENTUM_REPO> # Replace with your repo URL
+    cd incrementum
+    ```
+
+2.  **Create Virtual Environment:**
+    ```bash
+    # This should find python 3.11 if it's in your PATH
+    uv venv -p python3.11
+    # If needed, provide the full path: uv venv -p C:\Path\To\Python311\python.exe
+    ```
+
+3.  **Activate Virtual Environment:**
+    * In Command Prompt (`cmd.exe`):
+        ```cmd
+        .\.venv\Scripts\activate
+        ```
+    * In PowerShell:
+        ```powershell
+        # You might need to allow script execution first:
+        # Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+        .venv\Scripts\Activate.ps1
+        ```
+    *(Your terminal prompt should now be prefixed with `(.venv)`)*
+
+4.  **Install Python Dependencies:**
+    ```bash
+    uv pip install -r requirements.txt
+    ```
+
+### Running the Application (Windows)
+
+1.  **Ensure the virtual environment is active** (see Step 3 above).
+2.  **Run the main script:**
+    ```bash
+    python main.py
+    ```
+3.  **First Run Note:** NLTK data downloads may occur automatically.
 
 ---
 
-## Getting Help
+## Installation on macOS
 
-If you encounter issues with installation or setup:
+These instructions guide you through installing Incrementum on macOS using Homebrew.
 
-1. Check the troubleshooting section of this guide
-2. Review the full documentation
-3. Check the GitHub repository issues section
+### Prerequisites (macOS)
 
-For bug reports or feature requests, please visit the GitHub repository.
+1.  **Homebrew:** The standard package manager for macOS. If you don't have it, install it by pasting the command from [brew.sh](https://brew.sh/) into your Terminal.
+2.  **Xcode Command Line Tools:** Provides Git and C/C++ compilers. Open Terminal (`/Applications/Utilities/Terminal.app`) and run:
+    ```bash
+    xcode-select --install
+    ```
+    *(If already installed, it will notify you).*
+3.  **Python (Version 3.11 or 3.12 recommended):** While macOS has a system Python, it's best to install a modern version via Homebrew.
+    ```bash
+    brew install python@3.11
+    # Or: brew install python@3.12
+    ```
+4.  **`uv`:** Install via Homebrew.
+    ```bash
+    brew install uv
+    ```
+5.  **Qt6 Libraries:** Install Qt Base and the required modules using Homebrew.
+    ```bash
+    brew install qt qtwebengine qtcharts
+    # `qt` includes base, svg, declarative. WebEngine and Charts are separate.
+    ```
+    *(Homebrew usually handles PATH setup for installed packages).*
 
----
+### Installation Steps (macOS)
 
-Now that you have successfully installed Incrementum, refer to the User Guide for instructions on how to use the application effectively.
+1.  **Clone the Repository:**
+    Open Terminal:
+    ```bash
+    git clone <URL_TO_YOUR_INCREMENTUM_REPO> # Replace with your repo URL
+    cd incrementum
+    ```
+
+2.  **Create Virtual Environment:**
+    Use `uv` and the Python version installed by Homebrew (e.g., 3.11):
+    ```bash
+    # Homebrew typically makes python3.11 available in the PATH
+    uv venv -p python3.11
+    ```
+
+3.  **Activate Virtual Environment:**
+    ```bash
+    source .venv/bin/activate
+    ```
+    *(Your terminal prompt should now be prefixed with `(.venv)`)*
+
+4.  **Install Python Dependencies:**
+    ```bash
+    uv pip install -r requirements.txt
+    ```
+
+### Running the Application (macOS)
+
+1.  **Ensure the virtual environment is active** (`source .venv/bin/activate`).
+2.  **Run the main script:**
+    ```bash
+    python main.py
+    ```
+3.  **First Run Note:** NLTK data downloads may occur automatically.
