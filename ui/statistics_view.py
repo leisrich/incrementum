@@ -173,7 +173,9 @@ class StatisticsWidget(QWidget):
         # Activity chart
         activity_group = QGroupBox("Activity Over Time")
         activity_layout = QVBoxLayout(activity_group)
-        self.activity_chart_view = QChartView()
+        self.activity_chart = QChart()
+        self.activity_chart.setTitle("Activity Over Time")
+        self.activity_chart_view = QChartView(self.activity_chart)
         self.activity_chart_view.setRenderHint(QPainter.RenderHint.Antialiasing)
         activity_layout.addWidget(self.activity_chart_view)
         layout.addWidget(activity_group)

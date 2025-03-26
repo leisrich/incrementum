@@ -12,6 +12,61 @@ Incrementum can import and view YouTube videos, with position tracking that reme
 - Save and restore watch position
 - Extract video metadata (title, author)
 - Create extracts from YouTube videos
+- Import and manage YouTube playlists
+- View playlist videos in a dedicated dock panel
+- Create documents from playlist videos
+
+### Playlist Support
+
+Incrementum supports importing and managing YouTube playlists. Here's how to use playlist features:
+
+1. **Opening Playlists**:
+   - Go to File -> Import -> YouTube Playlists
+   - Or use the YouTube playlists button in the toolbar
+   - A dock panel will open on the right side of the window
+
+2. **Adding Playlists**:
+   - Click the "+" button in the playlists panel
+   - Enter a YouTube playlist URL
+   - Supported formats:
+     - https://www.youtube.com/playlist?list=PLAYLIST_ID
+     - https://youtube.com/playlist?list=PLAYLIST_ID
+
+3. **Managing Playlists**:
+   - View all videos in a playlist
+   - Sort videos by title, duration, or position
+   - Search within playlist videos
+   - Remove playlists you no longer need
+
+4. **Working with Playlist Videos**:
+   - Click on any video to create a document
+   - The video will open in a dockable window
+   - Position tracking works the same as with individual videos
+   - Each video becomes a separate document in your library
+
+5. **Playlist Settings**:
+   - Configure playlist import options in Settings -> API
+   - Set your YouTube API key for playlist access
+   - Test your API connection before importing
+
+### Troubleshooting Playlists
+
+If you have issues with playlists:
+
+1. **API Key Issues**:
+   - Make sure you have a valid YouTube API key
+   - Check the API key in Settings -> API
+   - Test the connection using the "Test Connection" button
+
+2. **Playlist Access**:
+   - Verify the playlist is public or you have access
+   - Check if the playlist URL is correct
+   - Make sure you're not hitting API quotas
+
+3. **Video Creation**:
+   - If videos don't create documents, check the error message
+   - Verify your internet connection
+   - Make sure the video is available in your region
 
 ## Recent Fixes
 

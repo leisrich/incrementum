@@ -5,7 +5,7 @@ import re
 import logging
 import tempfile
 import json
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import urllib.parse
 import requests
 
@@ -24,6 +24,13 @@ class YouTubeHandler(DocumentHandler):
         )
         # Create directory if it doesn't exist
         os.makedirs(self.base_data_dir, exist_ok=True)
+        
+        # Directory for playlists
+        self.playlists_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            'data', 'youtube_playlists'
+        )
+        os.makedirs(self.playlists_dir, exist_ok=True)
         
         # Add temp_dir attribute using tempfile module's temp directory
         self.temp_dir = self.base_data_dir
@@ -425,3 +432,373 @@ class YouTubeHandler(DocumentHandler):
             }
         
         return metadata 
+    
+    def _extract_playlist_id(self, url: str) -> Optional[str]:
+        """Extract YouTube playlist ID from a URL.
+        
+        Args:
+            url: URL that may contain a YouTube playlist ID
+            
+        Returns:
+            Playlist ID if found, None otherwise
+        """
+        if not url:
+            return None
+            
+        # Check if input is already a playlist ID 
+        if re.match(r'^[a-zA-Z0-9_-]{13,42}$', url) and 'PL' in url:
+            return url
+            
+        try:
+            # Parse the URL
+            parsed_url = urllib.parse.urlparse(url)
+            
+            # Check if it's a youtube.com URL
+            if 'youtube.com' in parsed_url.netloc:
+                # Parse query parameters
+                query_params = urllib.parse.parse_qs(parsed_url.query)
+                
+                # Look for 'list' parameter which contains playlist ID
+                if 'list' in query_params:
+                    return query_params['list'][0]
+            
+            return None
+            
+        except Exception as e:
+            logger.exception(f"Error extracting playlist ID from URL: {e}")
+            return None
+    
+    def fetch_playlist_metadata(self, playlist_id: str, api_key: str = None) -> Dict[str, Any]:
+        """
+        Fetch metadata for a YouTube playlist.
+        
+        Args:
+            playlist_id: YouTube playlist ID
+            api_key: Optional YouTube API key. If not provided, will try to get from settings
+            
+        Returns:
+            Dictionary containing playlist metadata
+        """
+        try:
+            # Get API key from settings if not provided
+            if not api_key:
+                from core.utils.settings_manager import SettingsManager
+                settings = SettingsManager()
+                api_key = settings.get_setting("api", "youtube_api_key")  # Fixed path
+            
+            if not api_key:
+                logger.error("No YouTube API key found")
+                return None
+                
+            # Base URL for playlist items
+            base_url = "https://www.googleapis.com/youtube/v3/playlistItems"
+            
+            # Parameters for the API request
+            params = {
+                'part': 'snippet,contentDetails',
+                'maxResults': 50,  # Max allowed by API
+                'playlistId': playlist_id,
+                'key': api_key
+            }
+            
+            # Get playlist info first
+            playlist_url = "https://www.googleapis.com/youtube/v3/playlists"
+            playlist_params = {
+                'part': 'snippet',
+                'id': playlist_id,
+                'key': api_key
+            }
+            
+            playlist_response = requests.get(playlist_url, params=playlist_params)
+            playlist_response.raise_for_status()
+            playlist_data = playlist_response.json()
+            
+            if not playlist_data.get('items'):
+                logger.error(f"Playlist {playlist_id} not found")
+                return None
+                
+            playlist_info = playlist_data['items'][0]['snippet']
+            
+            # Initialize metadata
+            metadata = {
+                'playlist_id': playlist_id,
+                'title': playlist_info.get('title', ''),
+                'channel_title': playlist_info.get('channelTitle', ''),
+                'description': playlist_info.get('description', ''),
+                'thumbnail_url': playlist_info.get('thumbnails', {}).get('default', {}).get('url', ''),
+                'videos': []
+            }
+            
+            # Get all playlist items
+            while True:
+                response = requests.get(base_url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Process items
+                for item in data.get('items', []):
+                    video_data = {
+                        'video_id': item['contentDetails']['videoId'],
+                        'title': item['snippet']['title'],
+                        'description': item['snippet'].get('description', ''),
+                        'thumbnail_url': item['snippet'].get('thumbnails', {}).get('default', {}).get('url', ''),
+                        'position': item['snippet']['position'] + 1,  # Make 1-based
+                        'published_at': item['snippet'].get('publishedAt')
+                    }
+                    
+                    # Get video duration
+                    video_url = "https://www.googleapis.com/youtube/v3/videos"
+                    video_params = {
+                        'part': 'contentDetails',
+                        'id': video_data['video_id'],
+                        'key': api_key
+                    }
+                    
+                    video_response = requests.get(video_url, params=video_params)
+                    video_response.raise_for_status()
+                    video_info = video_response.json()
+                    
+                    if video_info.get('items'):
+                        duration_str = video_info['items'][0]['contentDetails']['duration']
+                        # Convert ISO 8601 duration to seconds
+                        import isodate
+                        duration = int(isodate.parse_duration(duration_str).total_seconds())
+                        video_data['duration'] = duration
+                    
+                    metadata['videos'].append(video_data)
+                
+                # Check if there are more pages
+                if 'nextPageToken' in data:
+                    params['pageToken'] = data['nextPageToken']
+                else:
+                    break
+            
+            return metadata
+            
+        except Exception as e:
+            logger.exception(f"Error fetching playlist metadata: {e}")
+            return None
+    
+    def fetch_playlist_videos(self, playlist_id: str, api_key: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch videos in a YouTube playlist.
+        
+        Args:
+            playlist_id: YouTube playlist ID
+            api_key: YouTube Data API key (optional)
+            
+        Returns:
+            List of video metadata dictionaries
+        """
+        videos = []
+        
+        try:
+            if not api_key:
+                api_key = os.environ.get('YOUTUBE_API_KEY')
+                
+            if not api_key:
+                logger.warning("No YouTube API key available for fetching playlist videos")
+                return videos
+                
+            # Initialize variables for pagination
+            next_page_token = None
+            position = 1  # 1-based position index
+            
+            while True:
+                # Build URL for playlist items request
+                playlist_items_url = (
+                    f"https://www.googleapis.com/youtube/v3/playlistItems"
+                    f"?part=snippet,contentDetails"
+                    f"&maxResults=50"
+                    f"&playlistId={playlist_id}"
+                    f"&key={api_key}"
+                )
+                
+                # Add page token if we have one
+                if next_page_token:
+                    playlist_items_url += f"&pageToken={next_page_token}"
+                
+                # Make API request
+                response = requests.get(playlist_items_url, timeout=10)
+                
+                if response.status_code != 200:
+                    logger.warning(f"YouTube API returned status code {response.status_code} for playlist items")
+                    break
+                    
+                data = response.json()
+                
+                # Process each video in the results
+                for item in data.get('items', []):
+                    snippet = item.get('snippet', {})
+                    content_details = item.get('contentDetails', {})
+                    
+                    video_id = content_details.get('videoId')
+                    if not video_id:
+                        continue
+                        
+                    # Get video details
+                    video_metadata = {
+                        'video_id': video_id,
+                        'title': snippet.get('title', f'Video {position}'),
+                        'description': snippet.get('description', ''),
+                        'position': position,
+                        'thumbnail_url': snippet.get('thumbnails', {}).get('high', {}).get('url', ''),
+                        'channel_title': snippet.get('videoOwnerChannelTitle', ''),
+                        'published_at': snippet.get('publishedAt', '')
+                    }
+                    
+                    # Fetch additional video details like duration if needed
+                    try:
+                        video_details_url = f"https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id={video_id}&key={api_key}"
+                        video_response = requests.get(video_details_url, timeout=10)
+                        
+                        if video_response.status_code == 200:
+                            video_data = video_response.json()
+                            if video_data.get('items'):
+                                content_details = video_data['items'][0].get('contentDetails', {})
+                                duration_iso = content_details.get('duration', '')  # ISO 8601 duration format
+                                
+                                # Convert ISO 8601 duration to seconds
+                                duration_seconds = self._parse_duration(duration_iso)
+                                video_metadata['duration'] = duration_seconds
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch additional video details for {video_id}: {e}")
+                    
+                    videos.append(video_metadata)
+                    position += 1
+                
+                # Check if there are more pages
+                next_page_token = data.get('nextPageToken')
+                if not next_page_token:
+                    break
+                    
+            logger.info(f"Fetched {len(videos)} videos from playlist {playlist_id}")
+            return videos
+            
+        except Exception as e:
+            logger.exception(f"Error fetching playlist videos: {e}")
+            return videos
+    
+    def _parse_duration(self, duration_iso: str) -> int:
+        """Parse ISO 8601 duration format to seconds.
+        
+        Args:
+            duration_iso: ISO 8601 duration string (e.g., "PT1H30M15S")
+            
+        Returns:
+            Duration in seconds
+        """
+        if not duration_iso:
+            return 0
+            
+        try:
+            # Remove PT prefix
+            duration = duration_iso[2:]
+            
+            hours = 0
+            minutes = 0
+            seconds = 0
+            
+            # Extract hours, minutes, seconds
+            h_match = re.search(r'(\d+)H', duration)
+            if h_match:
+                hours = int(h_match.group(1))
+                
+            m_match = re.search(r'(\d+)M', duration)
+            if m_match:
+                minutes = int(m_match.group(1))
+                
+            s_match = re.search(r'(\d+)S', duration)
+            if s_match:
+                seconds = int(s_match.group(1))
+                
+            # Calculate total seconds
+            return hours * 3600 + minutes * 60 + seconds
+            
+        except Exception as e:
+            logger.warning(f"Error parsing duration {duration_iso}: {e}")
+            return 0
+    
+    def _fetch_playlist_info_fallback(self, playlist_id: str) -> Dict[str, Any]:
+        """Fetch basic playlist info without using the YouTube Data API.
+        
+        Args:
+            playlist_id: YouTube playlist ID
+            
+        Returns:
+            Dictionary of playlist metadata
+        """
+        metadata = {
+            'playlist_id': playlist_id,
+            'title': f"YouTube Playlist {playlist_id}",
+            'channel_title': 'Unknown',
+            'description': '',
+            'thumbnail_url': '',
+            'videos': []
+        }
+        
+        try:
+            # Attempt to get information from playlist page
+            url = f"https://www.youtube.com/playlist?list={playlist_id}"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                html_content = response.text
+                
+                # Extract title
+                title_match = re.search(r'<title>(.*?)</title>', html_content)
+                if title_match:
+                    metadata['title'] = title_match.group(1).replace(' - YouTube', '')
+                
+                # Extract channel name
+                channel_match = re.search(r'<link itemprop="name" content="(.*?)">', html_content)
+                if channel_match:
+                    metadata['channel_title'] = channel_match.group(1)
+                
+                logger.info(f"Fetched basic playlist info for {playlist_id} using fallback method")
+                
+            return metadata
+                
+        except Exception as e:
+            logger.exception(f"Error in playlist fallback: {e}")
+            return metadata
+    
+    def download_playlist(self, playlist_url: str) -> Tuple[Optional[str], Dict[str, Any]]:
+        """Download metadata for a YouTube playlist.
+        
+        Args:
+            playlist_url: URL of YouTube playlist
+            
+        Returns:
+            Tuple of (local file path, metadata)
+        """
+        # Extract playlist ID from URL
+        playlist_id = self._extract_playlist_id(playlist_url)
+        if not playlist_id:
+            logger.error(f"Could not extract playlist ID from URL: {playlist_url}")
+            return None, {}
+        
+        # Fetch playlist metadata
+        try:
+            metadata = self.fetch_playlist_metadata(playlist_id)
+            
+            # Create a directory for this playlist
+            playlist_dir = os.path.join(self.playlists_dir, playlist_id)
+            os.makedirs(playlist_dir, exist_ok=True)
+            
+            # Save metadata to file
+            metadata_file = os.path.join(playlist_dir, "playlist_metadata.json")
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2)
+                
+            logger.info(f"Saved playlist metadata to {metadata_file}")
+            
+            return metadata_file, metadata
+            
+        except Exception as e:
+            logger.exception(f"Error downloading playlist: {e}")
+            return None, {} 

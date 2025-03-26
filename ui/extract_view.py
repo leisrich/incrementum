@@ -464,117 +464,38 @@ class ExtractView(QWidget):
     
     @pyqtSlot()
     def _on_generate_items(self):
-        """Generate learning items."""
-        # Create dialog with all components at once to avoid issues
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Generate Learning Items")
-        dialog.setMinimumWidth(300)
-        
-        layout = QVBoxLayout(dialog)
-        
-        # Type selection
-        type_group = QGroupBox("Item Type")
-        type_layout = QVBoxLayout(type_group)
-        
-        qa_radio = QRadioButton("Question-Answer")
-        qa_radio.setChecked(True)
-        type_layout.addWidget(qa_radio)
-        
-        cloze_radio = QRadioButton("Cloze Deletion")
-        type_layout.addWidget(cloze_radio)
-        
-        type_group.setLayout(type_layout)
-        layout.addWidget(type_group)
-        
-        # Count selection
-        count_form = QFormLayout()
-        count_spin = QSpinBox()
-        count_spin.setRange(1, 10)
-        count_spin.setValue(3)
-        count_form.addRow("Number of items:", count_spin)
-        layout.addLayout(count_form)
-        
-        # Open items option
-        open_check = QCheckBox("Open items in editor after generation")
-        open_check.setChecked(True)
-        layout.addWidget(open_check)
-        
-        # Buttons
-        button_layout = QHBoxLayout()
-        
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_button)
-        
-        generate_button = QPushButton("Generate")
-        generate_button.clicked.connect(dialog.accept)
-        button_layout.addWidget(generate_button)
-        
-        layout.addLayout(button_layout)
-        
-        # Show dialog and capture results immediately
-        dialog_result = dialog.exec()
-        if not dialog_result:
+        """Generate learning items from the extract."""
+        if not self.extract:
             return
             
-        # Immediately capture all widget values before proceeding
         try:
-            generate_qa = qa_radio.isChecked()
-            item_count = count_spin.value()
-            open_after_generate = open_check.isChecked()
-        except RuntimeError as e:
-            logger.error(f"Widget access error during generation: {e}")
-            QMessageBox.warning(
-                self, "Interface Error", 
-                "An error occurred accessing dialog components. Please try again."
-            )
-            return
-        except Exception as e:
-            logger.exception(f"Unexpected error capturing dialog values: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"An unexpected error occurred: {str(e)}"
-            )
-            return
+            # Generate Q&A pairs
+            qa_items = self.nlp_extractor.generate_qa_pairs(self.extract.id)
             
-        # Now we have the values safely stored, we can proceed with generation
-        try:
-            # Generate items
-            if generate_qa:
-                # Generate QA items
-                items = self.nlp_extractor.generate_qa_pairs(self.extract.id, max_pairs=item_count)
-            else:
-                # Generate cloze items
-                items = self.nlp_extractor.generate_cloze_deletions(self.extract.id, max_items=item_count)
+            # Generate cloze deletions
+            cloze_items = self.nlp_extractor.generate_cloze_deletions(self.extract.id)
             
-            if not items:
-                QMessageBox.warning(
-                    self, "Generation Failed", 
-                    "No learning items could be generated from this extract."
-                )
-                return
-                
-            # Mark extract as processed
-            self.extract.processed = True
+            # Add all items to the database
+            for item in qa_items + cloze_items:
+                self.db_session.add(item)
+            
             self.db_session.commit()
             
-            # Reload items
+            # Refresh the learning items list
             self._load_learning_items()
             
             # Show success message
             QMessageBox.information(
-                self, "Items Generated", 
-                f"Successfully generated {len(items)} learning items."
+                self,
+                "Success",
+                f"Generated {len(qa_items)} Q&A pairs and {len(cloze_items)} cloze deletions."
             )
-            
-            # Open first item if requested
-            if open_after_generate and items:
-                self._open_learning_item(items[0].id)
             
         except Exception as e:
             logger.exception(f"Error generating learning items: {e}")
             QMessageBox.warning(
-                self, "Generation Failed", 
+                self,
+                "Error",
                 f"Failed to generate learning items: {str(e)}"
             )
     

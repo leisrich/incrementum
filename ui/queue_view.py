@@ -2577,94 +2577,66 @@ class QueueView(QWidget):
         return True
 
     def _sync_with_application_palette(self):
-        """Synchronize the styling with the main application palette.
-        
-        This ensures that the queue view components match the overall application theme.
-        """
+        """Synchronize the queue view's palette with the application's theme."""
         try:
-            # Get the application palette
-            app_palette = QApplication.palette()
+            theme = self.settings_manager.get_setting('ui', 'theme', 'light')
+            if theme is None:
+                theme = 'light'
+            theme = theme.lower()
             
-            # Apply palette colors to all child widgets
-            for widget in self.findChildren(QWidget):
-                widget.setPalette(app_palette)
+            # Get the application's palette
+            palette = QApplication.palette()
             
-            # Apply stylesheet for consistent look
-            if hasattr(self, 'settings_manager') and self.settings_manager:
-                theme = self.settings_manager.get_setting('ui', 'theme', 'Default').lower()
-                is_custom = self.settings_manager.get_setting('ui', 'custom_theme', False)
-                
-                # Get base colors from the current theme
-                colors = self._get_theme_colors("Custom" if is_custom else theme.capitalize())
-                
-                # Create a stylesheet to apply consistent styling
-                style = f"""
-                    QTreeWidget, QTableWidget {{
-                        background-color: {colors['background']};
-                        color: {colors['foreground']};
-                        border: 1px solid {colors['border']};
-                        selection-background-color: {colors['selection_background']};
-                        selection-color: {colors['selection_foreground']};
-                        alternate-background-color: {colors['alternate_background']};
-                    }}
-                    
-                    QTreeWidget::item, QTableWidget::item {{
-                        padding: 2px;
-                    }}
-                    
-                    QHeaderView::section {{
-                        background-color: {colors['header_background']};
-                        color: {colors['header_foreground']};
-                        padding: 4px;
-                        border: 1px solid {colors['border']};
-                    }}
-                    
-                    QTabWidget::pane {{
-                        border: 1px solid {colors['border']};
-                    }}
-                    
-                    QTabBar::tab {{
-                        background-color: {colors['header_background']};
-                        color: {colors['header_foreground']};
-                        padding: 4px 10px;
-                        border: 1px solid {colors['border']};
-                        border-bottom: none;
-                        border-top-left-radius: 4px;
-                        border-top-right-radius: 4px;
-                        margin-right: 2px;
-                    }}
-                    
-                    QTabBar::tab:selected {{
-                        background-color: {colors['background']};
-                        border-bottom: 1px solid {colors['background']};
-                    }}
-                    
-                    QSplitter::handle {{
-                        background-color: {colors['border']};
-                    }}
-                    
-                    QGroupBox {{
-                        border: 1px solid {colors['border']};
-                        border-radius: 3px;
-                        margin-top: 0.5em;
-                        padding-top: 0.5em;
-                    }}
-                    
-                    QGroupBox::title {{
-                        subcontrol-origin: margin;
-                        subcontrol-position: top center;
-                        padding: 0 3px;
-                    }}
-                """
-                
-                # Apply the stylesheet
-                self.setStyleSheet(style)
-                
-                # Apply specific styling for SuperMemo-like theme if needed
-                if theme == "supermemo":
-                    self._apply_supermemo_styling()
+            # Set colors based on theme
+            if theme == 'dark':
+                self.setStyleSheet("""
+                    QWidget {
+                        background-color: #2b2b2b;
+                        color: #ffffff;
+                    }
+                    QListWidget {
+                        background-color: #2b2b2b;
+                        color: #ffffff;
+                        border: 1px solid #3b3b3b;
+                    }
+                    QListWidget::item {
+                        padding: 5px;
+                        border-bottom: 1px solid #3b3b3b;
+                    }
+                    QListWidget::item:selected {
+                        background-color: #3b3b3b;
+                        color: #ffffff;
+                    }
+                """)
+            else:  # light theme
+                self.setStyleSheet("""
+                    QWidget {
+                        background-color: #ffffff;
+                        color: #000000;
+                    }
+                    QListWidget {
+                        background-color: #ffffff;
+                        color: #000000;
+                        border: 1px solid #cccccc;
+                    }
+                    QListWidget::item {
+                        padding: 5px;
+                        border-bottom: 1px solid #eeeeee;
+                    }
+                    QListWidget::item:selected {
+                        background-color: #e0e0e0;
+                        color: #000000;
+                    }
+                """)
         except Exception as e:
-            logger.exception(f"Error synchronizing with application palette: {e}")
+            logger.error(f"Error synchronizing with application palette: {e}")
+            # Set a default style if there's an error
+            self.setStyleSheet("""
+                QWidget {
+                    background-color: #ffffff;
+                    color: #000000;
+                }
+            """)
 
     def _apply_supermemo_styling(self):
         """Apply SuperMemo-specific styling to the queue view."""

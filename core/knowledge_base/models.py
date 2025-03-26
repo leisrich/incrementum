@@ -400,6 +400,56 @@ class VideoLearning(Base):
         # Return next date
         return datetime.utcnow() + timedelta(days=self.interval)
 
+class YouTubePlaylist(Base):
+    """YouTube playlist data."""
+    __tablename__ = 'youtube_playlists'
+
+    id = Column(Integer, primary_key=True)
+    playlist_id = Column(String(100), nullable=False, unique=True)  # YouTube playlist ID
+    title = Column(String(255), nullable=False)
+    channel_title = Column(String(255))
+    description = Column(Text)
+    thumbnail_url = Column(String(512))
+    video_count = Column(Integer, default=0)
+    category_id = Column(Integer, ForeignKey('categories.id'), nullable=True)
+    imported_date = Column(DateTime, default=datetime.utcnow)
+    last_updated = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    category = relationship("Category", backref="youtube_playlists")
+    videos = relationship("YouTubePlaylistVideo", back_populates="playlist", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<YouTubePlaylist '{self.title}' ({self.playlist_id})>"
+
+class YouTubePlaylistVideo(Base):
+    """Video within a YouTube playlist with position and progress tracking."""
+    __tablename__ = 'youtube_playlist_videos'
+    
+    id = Column(Integer, primary_key=True)
+    playlist_id = Column(Integer, ForeignKey('youtube_playlists.id'), nullable=False)
+    video_id = Column(String(20), nullable=False)  # YouTube video ID
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=True)
+    title = Column(String(255))
+    position = Column(Integer)  # Position in playlist (1-based index)
+    duration = Column(Integer, default=0)  # Duration in seconds
+    watched_position = Column(Integer, default=0)  # Current watched position in seconds
+    watched_percent = Column(Float, default=0.0)  # Percentage of video watched (0-100)
+    last_watched = Column(DateTime, nullable=True)
+    marked_complete = Column(Boolean, default=False)  # Manually marked as complete
+    
+    # Relationships
+    playlist = relationship("YouTubePlaylist", back_populates="videos")
+    document = relationship("Document", backref="playlist_video")
+    
+    def __repr__(self):
+        return f"<YouTubePlaylistVideo pos={self.position} '{self.title}' ({self.video_id})>"
+        
+    @property
+    def is_watched(self):
+        """Consider a video watched if 90% complete or manually marked."""
+        return self.marked_complete or self.watched_percent >= 90.0
+
 # Database initialization
 def init_database():
     """Initialize the database."""

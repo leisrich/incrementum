@@ -460,7 +460,42 @@ class SettingsDialog(QDialog):
     def _create_api_tab(self):
         """Create the API settings tab."""
         tab = QWidget()
-        tab_layout = QVBoxLayout(tab)
+        layout = QVBoxLayout(tab)
+        
+        # YouTube API settings
+        youtube_group = QGroupBox("YouTube API")
+        youtube_layout = QFormLayout(youtube_group)
+        
+        # API Key
+        api_key_layout = QHBoxLayout()
+        self.youtube_api_key = QLineEdit()
+        self.youtube_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        api_key_layout.addWidget(self.youtube_api_key)
+        
+        # Show/Hide password button
+        self.youtube_show_password = QPushButton()
+        self.youtube_show_password.setIcon(QIcon.fromTheme("eye"))
+        self.youtube_show_password.setCheckable(True)
+        self.youtube_show_password.clicked.connect(
+            lambda checked: self._toggle_password_visibility(
+                self.youtube_api_key, 
+                self.youtube_show_password, 
+                checked
+            )
+        )
+        api_key_layout.addWidget(self.youtube_show_password)
+        
+        youtube_layout.addRow("API Key:", api_key_layout)
+        
+        # Test connection button
+        test_layout = QHBoxLayout()
+        self.youtube_test_button = QPushButton("Test Connection")
+        self.youtube_test_button.clicked.connect(self._test_youtube_connection)
+        test_layout.addWidget(self.youtube_test_button)
+        test_layout.addStretch()
+        youtube_layout.addRow("", test_layout)
+        
+        layout.addWidget(youtube_group)
         
         # Create tabs for different API services
         api_tabs = QTabWidget()
@@ -659,8 +694,8 @@ class SettingsDialog(QDialog):
         default_service_layout.addRow("Default LLM service:", self.default_llm_service)
         
         # Add tabs to main layout
-        tab_layout.addLayout(default_service_layout)
-        tab_layout.addWidget(api_tabs)
+        layout.addLayout(default_service_layout)
+        layout.addWidget(api_tabs)
         
         # Add tab
         self.tab_widget.addTab(tab, "API Settings")
@@ -933,6 +968,11 @@ class SettingsDialog(QDialog):
         index = self.default_llm_service.findText(default_llm)
         if index >= 0:
             self.default_llm_service.setCurrentIndex(index)
+        
+        # YouTube API settings
+        self.youtube_api_key.setText(
+            self.settings_manager.get_setting("api", "youtube_api_key", "")
+        )
     
     def _save_settings(self) -> bool:
         """Save settings from UI elements to settings manager."""
@@ -1077,6 +1117,7 @@ class SettingsDialog(QDialog):
             self.settings_manager.set_setting("api", "ollama_host", self.ollama_host.text())
             self.settings_manager.set_setting("api", "ollama_model", self.ollama_model.currentText())
             self.settings_manager.set_setting("api", "default_llm_service", self.default_llm_service.currentText())
+            self.settings_manager.set_setting("api", "youtube_api_key", self.youtube_api_key.text().strip())
             
             # Save to file
             if not self.settings_manager.save_settings():
@@ -1478,6 +1519,44 @@ class SettingsDialog(QDialog):
                                   f"Failed to fetch models: {response.status_code} {response.text}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error fetching models: {str(e)}")
+
+    def _test_youtube_connection(self):
+        """Test the YouTube API connection."""
+        api_key = self.youtube_api_key.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "Error", "Please enter a YouTube API key.")
+            return
+            
+        try:
+            # Import the YouTube handler
+            from core.document_processor.handlers.youtube_handler import YouTubeHandler
+            
+            # Create handler instance
+            handler = YouTubeHandler()
+            
+            # Test the connection by fetching a test playlist
+            test_playlist_id = "PLlrxD0HtieHhS8VzuMCfQD4uJ9yne1mE6"  # Microsoft's Python for Beginners playlist
+            metadata = handler.fetch_playlist_metadata(test_playlist_id, api_key)
+            
+            if metadata:
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    "Successfully connected to YouTube API!"
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    "Could not fetch test playlist. Please check your API key."
+                )
+                
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to connect to YouTube API: {str(e)}"
+            )
 
     def closeEvent(self, event):
         """Handle dialog close event - restore original theme if not saved."""

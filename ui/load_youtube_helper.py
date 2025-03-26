@@ -42,13 +42,23 @@ class EnhancedYouTubeCallback(QObject):
         self.last_save_position = 0
         self.player_state = -1
         
+        # For playlist support
+        self.playlist_video = None
+        self.is_playlist = False
+        
         # Auto-save timer
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.setInterval(5000)  # 5 seconds
         self.auto_save_timer.timeout.connect(self.autoSavePosition)
     
-    def setup(self, document, db_session):
-        """Set up the callback with document and database session."""
+    def setup(self, document, db_session, playlist_video=None):
+        """Set up the callback with document and database session.
+        
+        Args:
+            document: Document object
+            db_session: Database session
+            playlist_video: YouTubePlaylistVideo object for playlist support
+        """
         self.document = document
         self.db_session = db_session
         self.auto_save_timer.start()
@@ -57,6 +67,15 @@ class EnhancedYouTubeCallback(QObject):
         if hasattr(document, 'position') and document.position:
             self.current_position = document.position
             self.last_save_position = document.position
+            
+        # Set up playlist support if available
+        if playlist_video:
+            self.playlist_video = playlist_video
+            self.is_playlist = True
+            # If playlist video has a specific position, use that instead
+            if playlist_video.watched_position > 0:
+                self.current_position = playlist_video.watched_position
+                self.last_save_position = playlist_video.watched_position
     
     @pyqtSlot(int)
     def onTimeUpdate(self, position):
@@ -96,22 +115,46 @@ class EnhancedYouTubeCallback(QObject):
     
     @pyqtSlot()
     def savePosition(self):
-        """Save the current position to the document."""
+        """Save the current position to the document and playlist if applicable."""
         try:
-            if self.document and self.db_session:
-                # Only save if position has changed significantly (5+ seconds)
-                if abs(self.current_position - self.last_save_position) >= 5:
-                    # Update document's position
+            if not self.db_session:
+                return False
+                
+            should_save_doc = False
+            should_save_playlist = False
+            
+            # Only save if position has changed significantly (5+ seconds)
+            if abs(self.current_position - self.last_save_position) >= 5:
+                # Update document's position
+                if self.document:
                     self.document.position = self.current_position
                     self.document.last_modified = datetime.now()
+                    should_save_doc = True
+                
+                # Update playlist video position if applicable
+                if self.is_playlist and self.playlist_video:
+                    self.playlist_video.watched_position = self.current_position
+                    self.playlist_video.last_watched = datetime.now()
                     
-                    # Save to database
+                    # Calculate percentage watched
+                    if self.video_duration > 0:
+                        percent = (self.current_position / self.video_duration) * 100
+                        self.playlist_video.watched_percent = min(100.0, percent)
+                        
+                        # Auto-mark as complete if >95% watched
+                        if percent > 95:
+                            self.playlist_video.marked_complete = True
+                    
+                    should_save_playlist = True
+                
+                # Save to database if needed
+                if should_save_doc or should_save_playlist:
                     self.db_session.commit()
                     
-                    # Update last saved position
-                    self.last_save_position = self.current_position
-                    
-                    return True
+                # Update last saved position
+                self.last_save_position = self.current_position
+                
+                return True
             return False
         except Exception as e:
             print(f"Error saving position: {e}")
@@ -156,7 +199,7 @@ class WebViewCallback(QObject):
         """Save the current position."""
         pass
 
-def setup_youtube_webview(webview, document, video_id, target_position=0, db_session=None):
+def setup_youtube_webview(webview, document, video_id, target_position=0, db_session=None, playlist_video=None):
     """Set up a WebView to display a YouTube video.
     
     Args:
@@ -165,6 +208,7 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
         video_id: YouTube video ID
         target_position: Starting position in seconds
         db_session: Database session for saving positions
+        playlist_video: YouTubePlaylistVideo object for playlist support
     
     Returns:
         Tuple (success: bool, callback: EnhancedYouTubeCallback): A tuple containing a success flag and the callback object
@@ -174,7 +218,7 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
         callback = EnhancedYouTubeCallback(parent=webview, current_position=target_position)
         
         # Set up the callback with document and db_session
-        callback.setup(document, db_session)
+        callback.setup(document, db_session, playlist_video)
         
         # Create web channel to communicate with JavaScript
         channel = QWebChannel(webview.page())
@@ -186,6 +230,9 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
         settings.setAttribute(settings.WebAttribute.JavascriptEnabled, True)
         settings.setAttribute(settings.WebAttribute.PluginsEnabled, True)
         
+        # Check if this is part of a playlist for UI enhancements
+        is_playlist = playlist_video is not None
+        
         # Create video URL
         video_url = "https://www.youtube.com/embed/{0}?enablejsapi=1&origin=https://www.youtube.com&autoplay=1&start={1}&fs=1&rel=0&modestbranding=1&controls=1&showinfo=1".format(
             video_id, target_position
@@ -194,7 +241,7 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
         # Document title for display
         doc_title = document.title
         
-        # Build HTML content using string formatting
+        # Build HTML content with enhanced UI for playlists if needed
         html_content = """<!DOCTYPE html>
 <html>
 <head>
@@ -213,6 +260,10 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
         #status {{ position: fixed; bottom: 0; background: rgba(0,0,0,0.7); width: 100%; padding: 3px 5px; font-size: 12px; }}
         .time-input {{ display: flex; align-items: center; }}
         input[type="number"] {{ width: 60px; padding: 3px 5px; background: #333; color: white; border: 1px solid #555; }}
+        #playlist-controls {{ display: flex; justify-content: center; padding: 5px; background: #202020; }}
+        #playlist-controls button {{ margin: 0 10px; min-width: 80px; }}
+        .progress-container {{ height: 5px; background: #333; width: 100%; position: relative; }}
+        .progress-bar {{ height: 100%; background: #f00; width: 0%; transition: width 0.5s; }}
     </style>
     <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head>
@@ -224,10 +275,35 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
         <div class="video-container">
             <iframe id="player" src="{1}" allowfullscreen allow="autoplay; encrypted-media"></iframe>
         </div>
+        <div class="progress-container">
+            <div class="progress-bar" id="progress-bar"></div>
+        </div>
+""".format(doc_title, video_url)
+
+        # Add playlist controls if this is part of a playlist
+        if is_playlist:
+            position = playlist_video.position
+            playlist_id = playlist_video.playlist.id
+            playlist_title = playlist_video.playlist.title
+            
+            # Enhance the HTML with playlist navigation controls
+            html_content += """
+        <div id="playlist-controls">
+            <button id="prev-video" title="Previous Video">Previous</button>
+            <span id="playlist-position" style="padding: 5px 10px;">Video {0} in playlist</span>
+            <button id="next-video" title="Next Video">Next</button>
+        </div>
+        <div style="text-align: center; padding: 2px 5px; background: #111; font-size: 12px;">
+            <span>Playlist: {1}</span>
+        </div>
+""".format(position, playlist_title)
+
+        # Continue with the rest of the HTML
+        html_content += """
         <div id="controls">
-            <div>Position: <span id="time">{2}</span></div>
+            <div>Position: <span id="time">{0}</span></div>
             <div class="time-input">
-                <input type="number" id="time-input" placeholder="Time in seconds" min="0" value="{2}">
+                <input type="number" id="time-input" placeholder="Time in seconds" min="0" value="{0}">
                 <button id="seek-btn">Seek</button>
                 <button id="save-btn">Save Position</button>
             </div>
@@ -237,7 +313,7 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
     
     <script>
         // Basic variables
-        var currentTime = {2};
+        var currentTime = {0};
         var backend = null;
         var player = document.getElementById('player');
         
@@ -247,138 +323,333 @@ def setup_youtube_webview(webview, document, video_id, target_position=0, db_ses
         var seekButton = document.getElementById('seek-btn');
         var saveButton = document.getElementById('save-btn');
         var statusEl = document.getElementById('status');
+        var progressBar = document.getElementById('progress-bar');
+""".format(target_position)
+
+        # Add playlist-specific JavaScript if needed
+        if is_playlist:
+            html_content += """
+        // Playlist elements
+        var prevButton = document.getElementById('prev-video');
+        var nextButton = document.getElementById('next-video');
+        var playlistPosition = document.getElementById('playlist-position');
         
-        // Format time display
-        function formatTime(seconds) {{
-            var min = Math.floor(seconds / 60);
-            var sec = Math.floor(seconds % 60);
-            return min + ':' + (sec < 10 ? '0' : '') + sec;
-        }}
+        // Playlist navigation functions
+        function goToPrevVideo() {
+            if (backend) {
+                backend.savePosition();
+                window.location.href = "playlist:{0}:{1}:prev";
+            }
+        }
         
-        // Update time display
-        function updateTimeDisplay() {{
-            timeDisplay.textContent = formatTime(currentTime);
-        }}
+        function goToNextVideo() {
+            if (backend) {
+                backend.savePosition();
+                window.location.href = "playlist:{0}:{1}:next";
+            }
+        }
+        
+        // Set up playlist button listeners
+        if (prevButton) prevButton.addEventListener('click', goToPrevVideo);
+        if (nextButton) nextButton.addEventListener('click', goToNextVideo);
+        
+        // Handle end of video for auto-advancing to next
+        function onPlayerStateChange(event) {
+            if (event.data === 0) {  // Video ended (YT.PlayerState.ENDED)
+                console.log("Video ended, advancing to next video");
+                // Wait a moment to ensure position is saved
+                setTimeout(goToNextVideo, 500);
+            }
+        }
+""".format(playlist_id, position)
+
+        # Continue with the rest of the JavaScript
+        html_content += """
+        // Update progress bar
+        function updateProgressBar(currentTime, duration) {
+            if (duration && duration > 0) {
+                var percent = (currentTime / duration) * 100;
+                progressBar.style.width = percent + '%';
+            }
+        }
         
         // Connect to backend
-        function connectBackend() {{
-            if (typeof QWebChannel === 'undefined') {{
-                statusEl.textContent = 'QWebChannel not available';
-                setTimeout(connectBackend, 1000);
-                return;
-            }}
+        var retryCount = 0;
+        var maxRetries = 5;
+        
+        function connectToBackend() {
+            statusEl.innerHTML = "Connecting to backend...";
             
-            try {{
-                new QWebChannel(qt.webChannelTransport, function(channel) {{
+            if (retryCount >= maxRetries) {
+                statusEl.innerHTML = "Failed to connect to backend after " + maxRetries + " attempts.";
+                return;
+            }
+            
+            try {
+                new QWebChannel(qt.webChannelTransport, function(channel) {
                     backend = channel.objects.backend;
-                    if (backend) {{
-                        statusEl.textContent = 'Connected to backend';
-                        startTracking();
-                    }} else {{
-                        statusEl.textContent = 'Backend not found';
-                        setTimeout(connectBackend, 1000);
-                    }}
-                }});
-            }} catch (e) {{
-                statusEl.textContent = 'Connection error';
-                setTimeout(connectBackend, 1000);
-            }}
-        }}
-        
-        // Start position tracking
-        function startTracking() {{
-            // Update time every second
-            setInterval(function() {{
-                currentTime++;
-                updateTimeDisplay();
-                
-                if (backend && backend.onTimeUpdate) {{
-                    backend.onTimeUpdate(currentTime);
-                }}
-            }}, 1000);
-        }}
-        
-        // Save position
-        function savePosition() {{
-            if (backend && backend.savePosition) {{
-                try {{
-                    backend.savePosition();
-                    statusEl.textContent = 'Position saved';
                     
-                    // Visual feedback
-                    saveButton.textContent = '✓ Saved';
-                    setTimeout(function() {{
-                        saveButton.textContent = 'Save Position';
-                    }}, 2000);
-                }} catch (e) {{
-                    statusEl.textContent = 'Error saving position';
-                }}
-            }}
-        }}
+                    if (backend) {
+                        statusEl.innerHTML = "Connected to backend. Setting up player...";
+                        setupYouTubeAPI();
+                    } else {
+                        retryCount++;
+                        statusEl.innerHTML = "Backend connection attempt " + retryCount + " failed, retrying...";
+                        setTimeout(connectToBackend, 500);
+                    }
+                });
+            } catch (e) {
+                retryCount++;
+                statusEl.innerHTML = "Connection error: " + e + ". Retry " + retryCount + "...";
+                setTimeout(connectToBackend, 500);
+            }
+        }
         
-        // Seek to time
-        function seekToTime() {{
-            var time = parseInt(timeInput.value, 10);
-            if (isNaN(time) || time < 0) {{
-                statusEl.textContent = 'Invalid time value';
-                return;
-            }}
+        // Initialize YouTube API
+        var ytPlayer = null;
+        
+        function setupYouTubeAPI() {
+            // Function to be called when API is ready
+            window.onYouTubeIframeAPIReady = function() {
+                statusEl.innerHTML = "YouTube API ready, initializing player...";
+                
+                // Create YouTube player instance
+                ytPlayer = new YT.Player('player', {
+                    events: {
+                        'onReady': onPlayerReady,
+                        'onStateChange': onPlayerStateChange,
+                        'onError': onPlayerError
+                    }
+                });
+            };
             
-            try {{
-                // Update iframe URL with new start time
-                var iframe = document.getElementById('player');
-                var src = iframe.src;
-                var newSrc = src.replace(/(&start=)\\d+/, '$1' + time);
-                if (src === newSrc) {{
-                    // If no start parameter exists, add it
-                    if (src.indexOf('?') !== -1) {{
-                        newSrc = src + '&start=' + time;
-                    }} else {{
-                        newSrc = src + '?start=' + time;
-                    }}
-                }}
-                iframe.src = newSrc;
-                
-                // Update current time
-                currentTime = time;
-                updateTimeDisplay();
-                
-                // Update backend
-                if (backend && backend.onTimeUpdate) {{
-                    backend.onTimeUpdate(currentTime);
-                }}
-                
-                statusEl.textContent = 'Seeking to ' + formatTime(time);
-            }} catch (e) {{
-                statusEl.textContent = 'Error seeking: ' + e.message;
-            }}
-        }}
+            // Load YouTube iframe API
+            var tag = document.createElement('script');
+            tag.src = 'https://www.youtube.com/iframe_api';
+            var firstScriptTag = document.getElementsByTagName('script')[0];
+            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+        }
         
-        // Initialize
-        updateTimeDisplay();
-        saveButton.addEventListener('click', savePosition);
-        seekButton.addEventListener('click', seekToTime);
-        connectBackend();
+        // YouTube player event handlers
+        function onPlayerReady(event) {
+            statusEl.innerHTML = "Player ready.";
+            
+            // Connect player events for time tracking
+            setupPlayerTimeTracking();
+            
+            // Start from saved position if there is one
+            if (currentTime > 0) {
+                event.target.seekTo(currentTime, true);
+            }
+        }
         
-        // Save on unload
-        window.onbeforeunload = function() {{
-            if (backend && backend.savePosition) {{
+        function onPlayerError(event) {
+            console.error("Player error: " + event.data);
+            statusEl.innerHTML = "Player error: " + event.data;
+        }
+        
+        // Set up event listeners
+        seekButton.addEventListener('click', function() {
+            var time = parseInt(timeInput.value);
+            if (!isNaN(time) && ytPlayer) {
+                ytPlayer.seekTo(time, true);
+                statusEl.innerHTML = "Seeking to " + time + " seconds.";
+            }
+        });
+        
+        saveButton.addEventListener('click', function() {
+            if (backend) {
+                var success = backend.savePosition();
+                if (success) {
+                    statusEl.innerHTML = "Position saved: " + currentTime + " seconds.";
+                    setTimeout(function() {
+                        statusEl.innerHTML = "Ready.";
+                    }, 2000);
+                } else {
+                    statusEl.innerHTML = "Failed to save position.";
+                }
+            } else {
+                statusEl.innerHTML = "Backend not available.";
+            }
+        });
+        
+        // Set up time tracking
+        var lastReportedTime = 0;
+        var updateInterval = 1000; // Update every 1 second
+        var intervalId = null;
+        
+        function setupPlayerTimeTracking() {
+            if (intervalId) {
+                clearInterval(intervalId);
+            }
+            
+            intervalId = setInterval(function() {
+                if (ytPlayer && ytPlayer.getCurrentTime) {
+                    try {
+                        var time = Math.floor(ytPlayer.getCurrentTime());
+                        var state = ytPlayer.getPlayerState();
+                        var duration = ytPlayer.getDuration();
+                        
+                        // Only update if time has changed
+                        if (time !== lastReportedTime) {
+                            lastReportedTime = time;
+                            currentTime = time;
+                            
+                            // Update UI
+                            timeDisplay.innerHTML = formatTime(time) + ' / ' + formatTime(duration);
+                            timeInput.value = time;
+                            
+                            // Update progress bar
+                            updateProgressBar(time, duration);
+                            
+                            // Send to backend
+                            if (backend) {
+                                backend.onTimeUpdate(time);
+                                if (duration) {
+                                    backend.onDurationChange(Math.floor(duration));
+                                }
+                                if (typeof state !== 'undefined') {
+                                    backend.onPlayerStateChange(state);
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.error("Error getting player time: " + e);
+                    }
+                }
+            }, updateInterval);
+        }
+        
+        // Format time as MM:SS or HH:MM:SS
+        function formatTime(seconds) {
+            if (isNaN(seconds) || seconds < 0) return "00:00";
+            
+            var hours = Math.floor(seconds / 3600);
+            var minutes = Math.floor((seconds % 3600) / 60);
+            var secs = Math.floor(seconds % 60);
+            
+            if (hours > 0) {
+                return hours + ":" + 
+                       (minutes < 10 ? "0" + minutes : minutes) + ":" + 
+                       (secs < 10 ? "0" + secs : secs);
+            } else {
+                return (minutes < 10 ? "0" + minutes : minutes) + ":" + 
+                       (secs < 10 ? "0" + secs : secs);
+            }
+        }
+        
+        // Initialize connection to backend
+        window.addEventListener('load', connectToBackend);
+        
+        // Save position before page unloads
+        window.addEventListener('beforeunload', function() {
+            if (backend && currentTime > 0) {
                 backend.savePosition();
-            }}
-        }};
+            }
+        });
     </script>
 </body>
-</html>""".format(doc_title, video_url, target_position)
-
-        # Load the content
-        webview.setHtml(html_content, QUrl("https://www.youtube.com/"))
+</html>
+"""
         
-        # Return success and the callback object
+        # Set the HTML content
+        webview.setHtml(html_content)
+        
+        # Add navigation handler for playlist links
+        webview.page().urlChanged.connect(lambda url: _handle_playlist_navigation(url, webview, document, db_session))
+        
+        logger.info(f"YouTube player set up for video ID: {video_id}")
         return True, callback
         
     except Exception as e:
-        print("Error setting up YouTube webview: %s" % e)
+        logger.exception(f"Error setting up YouTube player: {e}")
+        webview.setHtml(f"<html><body><h2>Error loading YouTube player</h2><p>{str(e)}</p></body></html>")
         return False, None
+
+def _handle_playlist_navigation(url, webview, document, db_session):
+    """Handle navigation for playlist links.
+    
+    Args:
+        url: QUrl that was navigated to
+        webview: The QWebEngineView that's navigating
+        document: The current document
+        db_session: Database session
+    """
+    try:
+        url_string = url.toString()
+        
+        # Check if this is a playlist navigation URL
+        if url_string.startswith("playlist:"):
+            # Parse the URL: playlist:playlist_id:position:direction
+            parts = url_string.split(":")
+            if len(parts) >= 4:
+                playlist_id = int(parts[1])
+                current_position = int(parts[2])
+                direction = parts[3]  # "prev" or "next"
+                
+                # Get the playlist
+                from core.knowledge_base.models import YouTubePlaylist, YouTubePlaylistVideo
+                
+                playlist = db_session.query(YouTubePlaylist).filter_by(id=playlist_id).first()
+                if not playlist:
+                    logger.error(f"Playlist not found: {playlist_id}")
+                    return
+                
+                # Get the videos in this playlist
+                videos = db_session.query(YouTubePlaylistVideo).filter_by(playlist_id=playlist_id).order_by(YouTubePlaylistVideo.position).all()
+                if not videos:
+                    logger.error(f"No videos found in playlist: {playlist_id}")
+                    return
+                
+                # Find current video index
+                current_index = None
+                for i, video in enumerate(videos):
+                    if video.position == current_position:
+                        current_index = i
+                        break
+                
+                if current_index is None:
+                    logger.error(f"Current video position {current_position} not found in playlist {playlist_id}")
+                    return
+                
+                # Get target video based on direction
+                target_index = None
+                if direction == "prev":
+                    target_index = max(0, current_index - 1)
+                elif direction == "next":
+                    target_index = min(len(videos) - 1, current_index + 1)
+                
+                if target_index is None or target_index == current_index:
+                    logger.warning(f"No {direction} video available from position {current_position}")
+                    return
+                
+                # Get the target video
+                target_video = videos[target_index]
+                
+                # Update the player
+                from ui.document_view import DocumentView
+                parent_widget = webview.parent()
+                while parent_widget and not isinstance(parent_widget, DocumentView):
+                    parent_widget = parent_widget.parent()
+                
+                if parent_widget and isinstance(parent_widget, DocumentView):
+                    # Get target video document or create one if needed
+                    if target_video.document_id:
+                        # Load existing document
+                        parent_widget.load_document(target_video.document_id)
+                    else:
+                        # We need to create a document for this video
+                        # This should be handled by the DocumentView
+                        # Just navigate to the video for now
+                        logger.warning(f"Document not found for video {target_video.video_id}, opening in browser")
+                        from PyQt6.QtGui import QDesktopServices
+                        from PyQt6.QtCore import QUrl
+                        QDesktopServices.openUrl(QUrl(f"https://www.youtube.com/watch?v={target_video.video_id}"))
+                else:
+                    logger.error("Could not find parent DocumentView to navigate to next video")
+            
+    except Exception as e:
+        logger.exception(f"Error handling playlist navigation: {e}")
 
 def extract_video_id_from_document(document):
     """Extract YouTube video ID from document metadata or URL."""

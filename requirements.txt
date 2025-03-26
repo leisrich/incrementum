@@ -52,5 +52,16 @@ humanize
 feedparser
 pip
 PyQt6-Charts # For QT Charts
+isodate      # For parsing YouTube video durations
 # System dependencies
 # ffmpeg - Required for audio file handling (install via system package manager)
+
+sqlalchemy>=1.4.0
+PyQt6>=6.4.0
+PyQt6-WebEngine>=6.4.0
+spacy>=3.0.0
+nltk>=3.6.0
+scikit-learn>=0.24.0
+beautifulsoup4>=4.9.0
+requests>=2.25.0
+pdfminer.six>=20200726

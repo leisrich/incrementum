@@ -18,12 +18,12 @@ from PyQt6.QtWidgets import (
     QListView, QSizePolicy, QStyle, QComboBox,
     QLineEdit, QCompleter, QDialogButtonBox, QFrame,
     QInputDialog, QProgressBar, QListWidget, QTextEdit,
-    QGroupBox
+    QGroupBox, QProgressDialog
 )
 from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread, QByteArray, QUrl
 from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QAction
 
-from core.knowledge_base.models import init_database, Document, Category, Extract, LearningItem, Tag
+from core.knowledge_base.models import init_database, Document, Category, Extract, LearningItem, Tag, YouTubePlaylistVideo
 from core.document_processor.processor import DocumentProcessor
 from core.spaced_repetition import FSRSAlgorithm
 from core.content_extractor.nlp_extractor import NLPExtractor
@@ -64,6 +64,7 @@ from ui.dialogs.rss_feed_dialog import RSSFeedDialog
 from .rss_view import RSSView
 from .incremental_reading_view import IncrementalReadingView
 from .detailed_queue_view import DetailedQueueView
+from .youtube_playlist_view import YouTubePlaylistView
 
 logger = logging.getLogger(__name__)
 
@@ -74,42 +75,90 @@ class DockablePDFView(QDockWidget):
     navigate = pyqtSignal(str)  # Add navigation signal
     
     def __init__(self, document, db_session, parent=None):
-        title = f"PDF: {document.title}"
-        super().__init__(title, parent)
+        """Initialize the dockable PDF view.
         
-        # Set object name for state saving
-        self.setObjectName(f"PDFDock_{document.id}")
-        
+        Args:
+            document: Document object
+            db_session: Database session
+            parent: Parent widget
+        """
+        super().__init__(parent)
         self.document = document
         self.db_session = db_session
         
-        # Create PDF viewer widget
-        self.pdf_widget = PDFViewWidget(document, db_session)
-        self.pdf_widget.extractCreated.connect(self.extractCreated.emit)
+        # Set up the widget
+        self.setWindowTitle(f"Document: {document.title}")
+        self.setObjectName(f"pdf_view_{document.id}")
         
-        # Connect navigation signal
-        self.pdf_widget.navigate.connect(self.navigate.emit)
+        # Create central widget
+        self.central_widget = QWidget()
+        self.setWidget(self.central_widget)
         
-        # Set as dock widget content
-        self.setWidget(self.pdf_widget)
+        # Create layout
+        self.layout = QVBoxLayout(self.central_widget)
         
-        # Allow positioning in all areas
-        self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        # Create content viewer based on document type
+        if document.content_type == 'youtube':
+            # Create YouTube player
+            from PyQt6.QtWebEngineWidgets import QWebEngineView
+            self.web_view = QWebEngineView()
+            
+            # Get video ID from URL
+            video_id = None
+            if 'v=' in document.source_url:
+                video_id = document.source_url.split('v=')[1].split('&')[0]
+            elif 'youtu.be/' in document.source_url:
+                video_id = document.source_url.split('youtu.be/')[1].split('?')[0]
+            
+            if video_id:
+                # Create YouTube embed URL
+                embed_url = f"https://www.youtube.com/embed/{video_id}"
+                self.web_view.setUrl(QUrl(embed_url))
+                self.layout.addWidget(self.web_view)
+            else:
+                QMessageBox.warning(self, "Error", "Could not extract video ID from URL")
+                return
+                
+        else:
+            # Create PDF viewer
+            self.pdf_view = PDFViewer(document, db_session)
+            self.layout.addWidget(self.pdf_view)
+            
+            # Connect signals
+            self.pdf_view.extractCreated.connect(self.extractCreated.emit)
+            self.pdf_view.navigate.connect(self.navigate.emit)
+            
+        # Set up close button
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        self.layout.addWidget(self.close_button)
         
-        # Allow closable, floatable, and movable
-        self.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable |
-            QDockWidget.DockWidgetFeature.DockWidgetFloatable |
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
+        # Set up floating and allowed areas
+        self.setFloating(True)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea |
+            Qt.DockWidgetArea.RightDockWidgetArea |
+            Qt.DockWidgetArea.TopDockWidgetArea |
+            Qt.DockWidgetArea.BottomDockWidgetArea
         )
         
-        # Set initial size
-        self.setMinimumSize(600, 800)
-    
+        # Set up features
+        self.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable |
+            QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        
+        # Set up size
+        self.resize(800, 600)
+        
     def closeEvent(self, event):
-        """Handle close event to save the PDF position."""
-        if hasattr(self.pdf_widget, '_save_position'):
-            self.pdf_widget._save_position()
+        """Handle close event."""
+        # Clean up resources
+        if hasattr(self, 'web_view'):
+            self.web_view.deleteLater()
+        elif hasattr(self, 'pdf_view'):
+            self.pdf_view.deleteLater()
         super().closeEvent(event)
 
 class MainWindow(QMainWindow):
@@ -658,7 +707,12 @@ class MainWindow(QMainWindow):
         self.action_highlight = QAction("Highlight Selection", self)
         self.action_highlight.setShortcut(QKeySequence("Ctrl+H"))
         self.action_highlight.triggered.connect(self._on_highlight_selection)
-            
+        
+        # YouTube Playlists action
+        self.action_youtube_playlists = QAction(QIcon.fromTheme("video-display"), "YouTube Playlists", self)
+        self.action_youtube_playlists.setStatusTip("Manage YouTube playlists")
+        self.action_youtube_playlists.triggered.connect(self.open_youtube_playlists)
+        
     def _start_rss_updater(self):
         """Start the RSS feed update timer if enabled."""
         try:
@@ -850,11 +904,12 @@ class MainWindow(QMainWindow):
         self.tools_menu.addAction(self.action_statistics)
         self.tools_menu.addAction(self.action_summarize_document)
         
-        # NOW ADD THE RSS FEEDS ACTION TO THE TOOLS MENU
+        # RSS and YouTube
         self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.action_rss_feeds)
+        self.tools_menu.addAction(self.action_youtube_playlists)  # Add YouTube Playlists action
         
-        # NOW ADD THE ADDITIONAL TOOL ACTIONS THAT WERE ORIGINALLY IN _create_actions
+        # Other tools
         self.tools_menu.addAction(self.action_tag_manager)
         self.tools_menu.addAction(self.action_batch_processor)
         self.tools_menu.addAction(self.action_review_manager)
@@ -3004,11 +3059,12 @@ class MainWindow(QMainWindow):
         self.tools_menu.addAction(self.action_statistics)
         self.tools_menu.addAction(self.action_summarize_document)
         
-        # NOW ADD THE RSS FEEDS ACTION TO THE TOOLS MENU
+        # RSS and YouTube
         self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.action_rss_feeds)
+        self.tools_menu.addAction(self.action_youtube_playlists)  # Add YouTube Playlists action
         
-        # NOW ADD THE ADDITIONAL TOOL ACTIONS THAT WERE ORIGINALLY IN _create_actions
+        # Other tools
         self.tools_menu.addAction(self.action_tag_manager)
         self.tools_menu.addAction(self.action_batch_processor)
         self.tools_menu.addAction(self.action_review_manager)
@@ -3507,3 +3563,82 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.exception(f"Error clearing recent files: {e}")
             QMessageBox.warning(self, "Error", f"Failed to clear recent files: {str(e)}")
+
+    def open_youtube_playlists(self, playlist_id=None):
+        """Open the YouTube playlists manager.
+        
+        Args:
+            playlist_id: Optional playlist ID to select initially
+        """
+        try:
+            # Create a dock widget for YouTube playlists if it doesn't exist
+            if not hasattr(self, 'youtube_playlists_dock'):
+                from ui.youtube_playlist_view import YouTubePlaylistView
+                
+                # Create the view
+                self.youtube_playlists_view = YouTubePlaylistView(self.db_session, self)
+                
+                # Create the dock widget
+                self.youtube_playlists_dock = QDockWidget("YouTube Playlists", self)
+                self.youtube_playlists_dock.setWidget(self.youtube_playlists_view)
+                self.youtube_playlists_dock.setObjectName("youtube_playlists_dock")
+                
+                # Set up signals
+                self.youtube_playlists_view.videoSelected.connect(self._on_playlist_video_selected)
+                
+                # Add to main window
+                self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.youtube_playlists_dock)
+            
+            # Show the dock
+            self.youtube_playlists_dock.show()
+            self.youtube_playlists_dock.raise_()
+            
+            # Select specific playlist if provided
+            if playlist_id is not None and hasattr(self, 'youtube_playlists_view'):
+                self.youtube_playlists_view.select_playlist(playlist_id)
+                
+        except Exception as e:
+            logger.exception(f"Error opening YouTube playlists: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to open YouTube playlists: {str(e)}")
+            
+    def _on_playlist_video_selected(self, video_id, position):
+        """Handle video selection from playlist."""
+        try:
+            # Create a document from the video
+            from core.document_processor.handlers.youtube_handler import YouTubeHandler
+            handler = YouTubeHandler()
+            file_path, metadata = handler.download_from_url(f"https://www.youtube.com/watch?v={video_id}")
+            
+            if file_path and metadata:
+                # Add document to database
+                from core.knowledge_base.models import Document, init_database
+                db_session = init_database()
+                
+                document = Document(
+                    title=metadata.get('title', f'YouTube Video {video_id}'),
+                    source_url=metadata.get('source_url', f'https://www.youtube.com/watch?v={video_id}'),
+                    content_type='youtube',  # Changed from source_type to content_type
+                    file_path=file_path,
+                    metadata=metadata
+                )
+                
+                db_session.add(document)
+                db_session.commit()
+                
+                # Open the document
+                self._open_document(document.id)
+                
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    "Failed to create document from video"
+                )
+                
+        except Exception as e:
+            logger.exception(f"Failed to create document: {e}")
+            QMessageBox.warning(
+                self,
+                "Error",
+                f"Failed to create document: {str(e)}"
+            )
