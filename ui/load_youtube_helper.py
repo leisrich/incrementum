@@ -139,6 +139,23 @@ class EnhancedYouTubeCallback(QObject):
         except:
             pass
 
+class WebViewCallback(QObject):
+    """Class to handle basic callbacks from the YouTube player for compatibility."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.document_view = parent
+        
+    @pyqtSlot(int)
+    def onTimeUpdate(self, position):
+        """Handle time update event from JavaScript."""
+        pass
+    
+    @pyqtSlot()
+    def savePosition(self):
+        """Save the current position."""
+        pass
+
 def setup_youtube_webview(webview, document, video_id, target_position=0, db_session=None):
     """Set up a WebView to display a YouTube video.
     

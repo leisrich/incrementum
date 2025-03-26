@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
     QSizePolicy, QTabWidget, QApplication, QStyle, QComboBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QSize, QEvent
 from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -3352,7 +3352,7 @@ class DocumentView(QWidget):
                 raise Exception("WebEngine not available. YouTube viewing requires PyQt6 WebEngine.")
             
             # Extract video ID from document content or URL
-            from .load_youtube_helper import setup_youtube_webview, extract_video_id_from_document
+            from .load_youtube_helper import setup_youtube_webview, extract_video_id_from_document, WebViewCallback
             
             video_id = extract_video_id_from_document(self.document)
             
@@ -3365,7 +3365,6 @@ class DocumentView(QWidget):
             web_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             
             # Create a callback handler for communication with the player
-            from .load_youtube_helper import WebViewCallback
             self.youtube_callback = WebViewCallback(self)
             
             # Configure the YouTube player with our load_youtube_helper
@@ -3393,6 +3392,12 @@ class DocumentView(QWidget):
             # Store references
             self.web_view = web_view
             self.content_edit = web_view
+            
+            # Make web_view focusable to receive keyboard events
+            web_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            
+            # Add event filter to handle key presses for navigation
+            web_view.installEventFilter(self)
             
             # Add transcript view if available
             try:
@@ -3676,4 +3681,20 @@ window.addEventListener('load', function() {
 """
         
         return html_content
+
+    def eventFilter(self, watched, event):
+        """Filter events to handle key presses in the web view."""
+        if (watched == self.web_view or watched == self.content_edit) and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            
+            # Handle N/P keys for navigation
+            if key == Qt.Key.Key_N:
+                self._on_next()
+                return True
+            elif key == Qt.Key.Key_P:
+                self._on_previous()
+                return True
+                
+        # Let default handler process the event
+        return super().eventFilter(watched, event)
 
