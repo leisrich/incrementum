@@ -2273,8 +2273,8 @@ class MainWindow(QMainWindow):
         """Toggle visibility of the knowledge tree panel."""
         try:
             # Find the queue view that contains the knowledge tree
-            for index in range(self.tab_widget.count()):
-                widget = self.tab_widget.widget(index)
+            for index in range(self.content_tabs.count()):
+                widget = self.content_tabs.widget(index)
                 if hasattr(widget, 'tree_dock') and widget.tree_dock:
                     # If we found a widget with a tree dock, toggle its visibility
                     widget.tree_dock.setVisible(checked)
@@ -3338,7 +3338,7 @@ class MainWindow(QMainWindow):
         """Save the current document with a new name or location."""
         try:
             # Get the current document widget
-            current_widget = self.tab_widget.currentWidget()
+            current_widget = self.content_tabs.currentWidget()
             
             # Check if there's an active document
             if not current_widget or not hasattr(current_widget, 'document_id'):
@@ -3422,7 +3422,7 @@ class MainWindow(QMainWindow):
         """Export the current document as PDF."""
         try:
             # Get the current document widget
-            current_widget = self.tab_widget.currentWidget()
+            current_widget = self.content_tabs.currentWidget()
             
             # Check if there's an active document
             if not current_widget:
