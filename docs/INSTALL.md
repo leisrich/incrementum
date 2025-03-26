@@ -32,7 +32,7 @@ Before you begin, ensure you have the following installed on your system:
 1.  **Clone the Repository:**
     Open your terminal and clone the Incrementum repository:
     ```bash
-    git clone <URL_TO_YOUR_INCREMENTUM_REPO> # Replace with your repo URL
+    git clone https://www.github.com/leisrich/incrementum.git
     cd incrementum # Navigate into the cloned directory
     ```
 
@@ -130,7 +130,7 @@ These instructions guide you through installing Incrementum on Windows. Setting 
 1.  **Clone the Repository:**
     Open Git Bash, Command Prompt, or PowerShell:
     ```bash
-    git clone <URL_TO_YOUR_INCREMENTUM_REPO> # Replace with your repo URL
+    git clone https://www.github.com/leisrich/incrementum.git
     cd incrementum
     ```
 
@@ -203,7 +203,7 @@ These instructions guide you through installing Incrementum on macOS using Homeb
 1.  **Clone the Repository:**
     Open Terminal:
     ```bash
-    git clone <URL_TO_YOUR_INCREMENTUM_REPO> # Replace with your repo URL
+    git clone https://www.github.com/leisrich/incrementum.git
     cd incrementum
     ```
 
