@@ -101,19 +101,57 @@ class DockablePDFView(QDockWidget):
         if document.content_type == 'youtube':
             # Create YouTube player
             from PyQt6.QtWebEngineWidgets import QWebEngineView
+            from PyQt6.QtWebEngineCore import QWebEngineSettings
             self.web_view = QWebEngineView()
             
+            # Configure web settings
+            settings = self.web_view.settings()
+            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.AllowGeolocationOnInsecureOrigins, True)
+            
             # Get video ID from URL
-            video_id = None
-            if 'v=' in document.source_url:
-                video_id = document.source_url.split('v=')[1].split('&')[0]
-            elif 'youtu.be/' in document.source_url:
-                video_id = document.source_url.split('youtu.be/')[1].split('?')[0]
+            from ui.load_youtube_helper import setup_youtube_webview, extract_video_id_from_document
+            video_id = extract_video_id_from_document(document)
             
             if video_id:
-                # Create YouTube embed URL
-                embed_url = f"https://www.youtube.com/embed/{video_id}"
-                self.web_view.setUrl(QUrl(embed_url))
+                # Get target position from document, default to 0 if None
+                target_position = getattr(document, 'position', 0) or 0
+                
+                # Create simple HTML with direct iframe
+                html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1">
+                    <style>
+                        body {{ margin: 0; padding: 0; height: 100vh; overflow: hidden; }}
+                        .video-container {{ width: 100%; height: 100%; }}
+                        iframe {{ width: 100%; height: 100%; border: none; }}
+                    </style>
+                    <script>
+                        // Ensure target_position is a valid number
+                        const startPosition = {target_position};
+                        const validStartPosition = isNaN(startPosition) ? 0 : Math.max(0, startPosition);
+                    </script>
+                </head>
+                <body>
+                    <div class="video-container">
+                        <iframe 
+                            src="https://www.youtube.com/embed/{video_id}?autoplay=1&start={{validStartPosition}}&enablejsapi=1&origin=https://www.youtube.com" 
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            allowfullscreen>
+                        </iframe>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                # Load the HTML content
+                from PyQt6.QtCore import QUrl
+                self.web_view.setHtml(html, QUrl("https://www.youtube.com/"))
                 self.layout.addWidget(self.web_view)
             else:
                 QMessageBox.warning(self, "Error", "Could not extract video ID from URL")

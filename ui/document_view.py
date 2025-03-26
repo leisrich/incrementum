@@ -3482,65 +3482,80 @@ class DocumentView(QWidget):
             error_widget.setStyleSheet("color: red; padding: 20px;")
             self.content_layout.addWidget(error_widget)
             return False
-    
+
     def _load_youtube(self):
         """Load and display a YouTube video document."""
         try:
             if not HAS_WEBENGINE:
-                raise Exception("WebEngine not available. YouTube viewing requires PyQt6 WebEngine.")
+                raise Exception("WebEngine not available. Install 'python-pyqt6-webengine' package first.")
             
             # Extract video ID from document content or URL
             from .load_youtube_helper import setup_youtube_webview, extract_video_id_from_document, WebViewCallback
             
+            logger.debug(f"Loading YouTube video for document ID: {self.document_id}")
+            
+            # Extract video ID with fallbacks
             video_id = extract_video_id_from_document(self.document)
             
+            if not video_id and hasattr(self.document, 'url') and self.document.url:
+                import re
+                patterns = [
+                    r'youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})',
+                    r'youtu\.be/([a-zA-Z0-9_-]{11})'
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, self.document.url)
+                    if match:
+                        video_id = match.group(1)
+                        break
+            
             if not video_id:
-                raise ValueError("Could not extract YouTube video ID from document")
+                raise ValueError("Could not extract YouTube video ID. Check document URL or content format.")
+            
+            logger.debug(f"Using video ID: {video_id}")
             
             # Create a QWebEngineView for embedding YouTube
             from PyQt6.QtWebEngineWidgets import QWebEngineView
+            from PyQt6.QtCore import QUrl
             web_view = QWebEngineView()
             web_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             
-            # Create a callback handler for communication with the player
-            self.youtube_callback = WebViewCallback(self)
+            # Get position as integer with fallback to 0
+            target_position = 0
+            if hasattr(self.document, 'position') and self.document.position is not None:
+                try:
+                    target_position = int(self.document.position)
+                except (ValueError, TypeError):
+                    pass
             
-            # Check if this video is part of a playlist
-            playlist_video = None
-            try:
-                from core.knowledge_base.models import YouTubePlaylistVideo
-                playlist_video = self.db_session.query(YouTubePlaylistVideo).filter_by(
-                    document_id=self.document.id
-                ).first()
-                
-                if playlist_video:
-                    logger.info(f"Video is part of playlist: {playlist_video.playlist.title} (position {playlist_video.position})")
-            except Exception as e:
-                logger.warning(f"Error checking playlist info: {e}")
+            # Direct embedding approach that avoids JS errors
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body, html {{ margin: 0; padding: 0; height: 100%; }}
+                    .video-container {{ width: 100%; height: 100%; }}
+                    iframe {{ width: 100%; height: 100%; border: none; }}
+                </style>
+            </head>
+            <body>
+                <div class="video-container">
+                    <iframe 
+                        src="https://www.youtube.com/embed/{video_id}?autoplay=1&start={target_position}"
+                        frameborder="0" 
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                        allowfullscreen>
+                    </iframe>
+                </div>
+            </body>
+            </html>
+            """
             
-            # Configure the YouTube player with our load_youtube_helper
-            # Get the target position from the document if available
-            target_position = getattr(self.document, 'position', 0)
-            
-            # If this is a playlist video, use its watched position if available
-            if playlist_video and playlist_video.watched_position > 0:
-                target_position = playlist_video.watched_position
-            
-            # Use the proper setup_youtube_webview function with all required parameters
-            success, callback = setup_youtube_webview(
-                web_view, 
-                self.document, 
-                video_id, 
-                target_position=target_position,
-                db_session=self.db_session,
-                playlist_video=playlist_video
-            )
-            
-            if not success:
-                raise ValueError(f"Failed to set up YouTube player for video ID: {video_id}")
-                
-            # Store the enhanced callback
-            self.youtube_enhanced_callback = callback
+            # Use a proper base URL
+            base_url = QUrl("https://www.youtube.com/")
+            web_view.setHtml(html_content, base_url)
             
             # Add to layout
             self.content_layout.addWidget(web_view)
@@ -3551,69 +3566,59 @@ class DocumentView(QWidget):
             
             # Make web_view focusable to receive keyboard events
             web_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            
-            # Add event filter to handle key presses for navigation
             web_view.installEventFilter(self)
             
-            # Add playlist tools if this is part of a playlist
-            if playlist_video:
-                # Create a toolbar for playlist controls
-                from PyQt6.QtWidgets import QToolBar
-                from PyQt6.QtGui import QIcon
-                
-                playlist_toolbar = QToolBar("Playlist Controls")
-                playlist_toolbar.setIconSize(QSize(16, 16))
-                
-                # Add playlist information
-                playlist_title_label = QLabel(f"Playlist: {playlist_video.playlist.title}")
-                playlist_title_label.setStyleSheet("font-weight: bold; margin-right: 10px;")
-                playlist_toolbar.addWidget(playlist_title_label)
-                
-                # Add video position info
-                video_pos_label = QLabel(f"Video {playlist_video.position}")
-                playlist_toolbar.addWidget(video_pos_label)
-                
-                playlist_toolbar.addSeparator()
-                
-                # Add open playlist button
-                open_playlist_action = QAction(QIcon.fromTheme("document-open"), "View Full Playlist", self)
-                open_playlist_action.triggered.connect(lambda: self._open_playlist(playlist_video.playlist.id))
-                playlist_toolbar.addAction(open_playlist_action)
-                
-                # Add toolbar to layout
-                self.content_layout.insertWidget(0, playlist_toolbar)
-                
-                # Store reference to toolbar
-                self.playlist_toolbar = playlist_toolbar
+            # Look for transcript and add transcript view if available
+            transcript_file = None
             
-            # Add transcript view if available
-            try:
-                # Look for transcript in document metadata
-                transcript_file = None
-                if hasattr(self.document, 'file_path') and os.path.exists(self.document.file_path):
-                    base_dir = os.path.dirname(self.document.file_path)
-                    possible_transcript = os.path.join(base_dir, f"{video_id}.json")
-                    if os.path.exists(possible_transcript):
-                        transcript_file = possible_transcript
-                
-                if transcript_file:
-                    # Create a transcript view widget
-                    from ui.youtube_transcript_view import YouTubeTranscriptView
-                    transcript_view = YouTubeTranscriptView(self.db_session, self.document.id, transcript_file)
+            # Search in possible locations for transcript
+            possible_locations = []
+            
+            # Check document file path directory
+            if hasattr(self.document, 'file_path') and self.document.file_path:
+                base_dir = os.path.dirname(self.document.file_path)
+                possible_locations.append(os.path.join(base_dir, f"{video_id}.json"))
+            
+            # Check in the video data directory
+            data_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                'data', 'youtube_videos'
+            )
+            possible_locations.append(os.path.join(data_dir, f"{video_id}.json"))
+            possible_locations.append(os.path.join(data_dir, f"youtube_{video_id}.json"))
+            
+            # Check if document itself is a metadata file
+            if hasattr(self.document, 'file_path') and self.document.file_path and '.json' in self.document.file_path:
+                possible_locations.append(self.document.file_path)
+            
+            # Try each location
+            for location in possible_locations:
+                if os.path.exists(location):
+                    transcript_file = location
+                    logger.debug(f"Found transcript file at: {transcript_file}")
+                    break
+            
+            # If we found a transcript file, add the transcript view
+            if transcript_file:
+                try:
+                    from .youtube_transcript_view import YouTubeTranscriptView
+                    transcript_view = YouTubeTranscriptView(self.db_session, self.document_id, transcript_file)
                     transcript_view.setMaximumHeight(200)  # Limit height
-                    transcript_view.extractCreated.connect(self._on_extract_selected)
+                    transcript_view.extractCreated.connect(self.extractCreated.emit)
                     
                     # Add to layout below the video
                     self.content_layout.addWidget(transcript_view)
                     
                     # Store reference
                     self.transcript_view = transcript_view
-                
-            except Exception as e:
-                logger.warning(f"Could not load YouTube transcript: {e}")
-                # Continue without transcript
+                    
+                    logger.info(f"Added transcript view for video {video_id}")
+                except Exception as e:
+                    logger.warning(f"Could not add transcript view: {e}")
+            else:
+                logger.info(f"No transcript file found for video {video_id}")
             
-            logger.info(f"Loaded YouTube video: {video_id}")
+            logger.info(f"Successfully loaded YouTube video: {video_id}")
             return True
             
         except Exception as e:
@@ -3623,7 +3628,7 @@ class DocumentView(QWidget):
             error_widget.setStyleSheet("color: red; padding: 20px;")
             self.content_layout.addWidget(error_widget)
             return False
-            
+       
     def _open_playlist(self, playlist_id):
         """Open the playlist view for a given playlist ID."""
         try:
