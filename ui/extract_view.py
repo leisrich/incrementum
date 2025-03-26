@@ -193,6 +193,11 @@ class ExtractView(QWidget):
         # Load extract data
         self._load_extract_data()
     
+    @property
+    def extract_id(self):
+        """Return the extract ID for session saving."""
+        return self.extract.id if self.extract else None
+    
     def _create_ui(self):
         """Create the UI layout."""
         main_layout = QVBoxLayout(self)

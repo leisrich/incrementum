@@ -18,8 +18,124 @@ from PyQt6.QtMultimedia import (
     QMediaPlayer, QAudioOutput, 
     QMediaMetaData, QMediaFormat
 )
+from PyQt6.QtGui import QPainter, QBrush, QPen, QColor
 
 logger = logging.getLogger(__name__)
+
+class AudioVisualizer(QWidget):
+    """Audio visualizer that shows a visual representation of audio playback."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(60)
+        self.setMaximumHeight(100)
+        self.bars = 20  # Number of bars in the visualizer
+        self.bar_values = [0] * self.bars
+        self.bar_colors = []
+        self.is_active = False
+        self.animation_timer = QTimer(self)
+        self.animation_timer.timeout.connect(self.update_bars)
+        self.animation_timer.setInterval(50)  # 50ms update rate (20fps)
+        self.setStyleSheet("background-color: #222;")
+        
+        # Generate gradient colors from blue to red
+        for i in range(self.bars):
+            # Generate colors from blue to cyan to green to yellow to red
+            if i < self.bars / 5:
+                # Blue to cyan
+                r = 0
+                g = int(255 * (i / (self.bars / 5)))
+                b = 255
+            elif i < 2 * self.bars / 5:
+                # Cyan to green
+                r = 0
+                g = 255
+                b = int(255 * (1 - (i - self.bars / 5) / (self.bars / 5)))
+            elif i < 3 * self.bars / 5:
+                # Green to yellow
+                r = int(255 * ((i - 2 * self.bars / 5) / (self.bars / 5)))
+                g = 255
+                b = 0
+            elif i < 4 * self.bars / 5:
+                # Yellow to orange
+                r = 255
+                g = int(255 * (1 - (i - 3 * self.bars / 5) / (self.bars / 5)))
+                b = 0
+            else:
+                # Orange to red
+                r = 255
+                g = int(128 * (1 - (i - 4 * self.bars / 5) / (self.bars / 5)))
+                b = 0
+                
+            self.bar_colors.append(QColor(r, g, b))
+    
+    def start(self):
+        """Start the visualizer animation."""
+        self.is_active = True
+        self.animation_timer.start()
+        
+    def stop(self):
+        """Stop the visualizer animation."""
+        self.is_active = False
+        self.animation_timer.stop()
+        # Reset bars to zero
+        self.bar_values = [0] * self.bars
+        self.update()
+        
+    def update_bars(self):
+        """Update the bar values for animation."""
+        if not self.is_active:
+            return
+            
+        import random
+        # Generate new random values for each bar
+        for i in range(self.bars):
+            # Custom algorithm to make the bars look more like an audio visualizer
+            # Center bars tend to be higher, edges lower
+            center_weight = 1.0 - 0.6 * abs(i - self.bars / 2) / (self.bars / 2)
+            max_height = 0.3 + 0.7 * center_weight
+            
+            # Random movement with some persistence of previous value
+            target = random.random() * max_height
+            # Smooth transition - 70% new value, 30% old value
+            self.bar_values[i] = 0.3 * self.bar_values[i] + 0.7 * target
+        
+        # Request a repaint
+        self.update()
+        
+    def paintEvent(self, event):
+        """Paint the visualizer bars."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Get widget dimensions
+        width = self.width()
+        height = self.height()
+        
+        # Calculate bar width and spacing
+        bar_width = width / (self.bars * 1.5)  # Bar width with spacing
+        spacing = bar_width / 2  # Spacing between bars
+        
+        # Draw each bar
+        for i in range(self.bars):
+            # Calculate bar height and position
+            bar_height = self.bar_values[i] * height
+            x = i * (bar_width + spacing) + spacing
+            y = height - bar_height
+            
+            # Set brush and pen
+            painter.setBrush(QBrush(self.bar_colors[i]))
+            painter.setPen(QPen(Qt.GlobalColor.transparent))
+            
+            # Draw rounded rectangle for each bar
+            painter.drawRoundedRect(
+                int(x), 
+                int(y), 
+                int(bar_width), 
+                int(bar_height), 
+                2.0, 
+                2.0
+            )
 
 class AudioPlayerWidget(QWidget):
     """Custom audio player widget with playback controls and position tracking."""
@@ -81,6 +197,11 @@ class AudioPlayerWidget(QWidget):
         
         # Add info panel to main layout
         main_layout.addWidget(info_panel)
+        
+        # Add the visualizer
+        self.visualizer = AudioVisualizer(self)
+        self.visualizer.setMinimumHeight(80)
+        main_layout.addWidget(self.visualizer)
         
         # Controls panel
         controls_panel = QFrame()
@@ -203,10 +324,12 @@ class AudioPlayerWidget(QWidget):
     
     def toggle_play(self):
         """Toggle play/pause state."""
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self.player_state == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
+            self.visualizer.stop()
         else:
             self.player.play()
+            self.visualizer.start()
     
     def seek_position(self, position):
         """Seek to a position in the audio.
@@ -275,22 +398,25 @@ class AudioPlayerWidget(QWidget):
         self.status_label.setText(f"Audio loaded: {self.format_time(self.audio_duration)}")
     
     def on_state_changed(self, state):
-        """Handle player state changes.
-        
-        Args:
-            state: The new state of the player
-        """
+        """Handle changes in playback state."""
         self.player_state = state
         
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
             self.status_label.setText("Playing")
-        elif state == QMediaPlayer.PlaybackState.PausedState:
-            self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-            self.status_label.setText("Paused")
+            # Start visualizer animation
+            self.visualizer.start()
         else:
             self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-            self.status_label.setText("Stopped")
+            if state == QMediaPlayer.PlaybackState.PausedState:
+                self.status_label.setText("Paused")
+            else:
+                self.status_label.setText("Stopped")
+            # Stop visualizer animation when not playing
+            self.visualizer.stop()
+            
+        # Update UI
+        self.update()
     
     def on_error(self, error, errorString):
         """Handle player errors.
@@ -366,22 +492,24 @@ class AudioPlayerWidget(QWidget):
         return f"{minutes}:{secs:02d}"
     
     def closeEvent(self, event):
-        """Handle widget close event."""
+        """Handle the close event."""
         try:
             # Stop playback
-            self.player.stop()
+            if self.player:
+                self.player.stop()
             
-            # Save final position
-            if self.current_position > 0 and abs(self.current_position - self.last_save_position) >= 1:
-                self.save_position()
+            # Save the current position
+            self.save_position()
             
-            # Stop timer
+            # Stop visualizer and timers
+            self.visualizer.stop()
             if self.auto_save_timer.isActive():
                 self.auto_save_timer.stop()
+                
         except Exception as e:
-            logger.error(f"Error during close: {e}")
-        
-        # Accept the close event
+            logger.error(f"Error in AudioPlayerWidget.closeEvent: {e}")
+            
+        # Accept the event
         event.accept()
 
 def setup_audio_player(parent, document, db_session, target_position=0):

@@ -13,11 +13,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
-    QTabWidget, QLineEdit, QSizePolicy, QCheckBox, QSlider, 
-    QInputDialog, QComboBox, QStyle, QTextEdit
+    QSizePolicy, QTabWidget, QApplication, QStyle, QComboBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QPointF, QSize, QByteArray, QThread
-from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QKeyEvent, QIntValidator, QIcon
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QSize
+from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtWebEngineCore import QWebEngineSettings
@@ -858,11 +857,17 @@ class DocumentView(QWidget):
         self.progress_marker = None
         self.zoom_level = 100
         self.view_mode = "Default"
+        self.last_scroll_position = 0
+        self.auto_save_interval = 5000  # 5 seconds
         
         # Initialize web channel for communication with JavaScript
         if HAS_WEBENGINE:
             from PyQt6.QtWebChannel import QWebChannel
             self.web_channel = QWebChannel()
+        
+        # Create auto-save timer
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.timeout.connect(self._auto_save_position)
         
         # Create UI components
         self._create_ui()
@@ -870,6 +875,115 @@ class DocumentView(QWidget):
         # Load document if provided
         if document_id:
             self.load_document(document_id)
+            
+    def _auto_save_position(self):
+        """Automatically save the current position."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                return
+                
+            # For web view, get current position via JavaScript
+            if hasattr(self, 'web_view') and self.web_view:
+                script = """
+                (function() {
+                    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+                })();
+                """
+                self.web_view.page().runJavaScript(script, self._update_scroll_position)
+            
+            # For content edit with scrollbar
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
+                position = self.content_edit.verticalScrollBar().value()
+                self._update_scroll_position(position)
+                
+        except Exception as e:
+            logger.exception(f"Error in auto-save position: {e}")
+            
+    def _update_scroll_position(self, position):
+        """Update the stored scroll position and save to document if needed."""
+        try:
+            # Skip if position is None or not a number
+            if position is None or not isinstance(position, (int, float)):
+                return
+                
+            # Round to integer
+            position = int(position)
+            
+            # Store locally
+            self.last_scroll_position = position
+            
+            # Update document in database (if position changed significantly)
+            document = self.db_session.query(Document).get(self.document_id)
+            if document:
+                current_pos = document.position or 0
+                # Only save if changed by more than 20 pixels to avoid excessive DB writes
+                if abs(position - current_pos) > 20:
+                    document.position = position
+                    document.last_accessed = datetime.utcnow()
+                    self.db_session.commit()
+                    logger.debug(f"Auto-saved position {position} for document {self.document_id}")
+        except Exception as e:
+            logger.exception(f"Error updating scroll position: {e}")
+            
+    def _inject_position_tracking_js(self, web_view):
+        """Inject JavaScript to track scroll position."""
+        script = """
+        (function() {
+            // Track scroll position
+            let lastScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+            let ticking = false;
+            
+            function savePosition() {
+                if (!window.qt) return;
+                
+                const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+                
+                // Only update if changed
+                if (Math.abs(scrollY - lastScrollY) > 5) {
+                    lastScrollY = scrollY;
+                    
+                    if (!ticking) {
+                        window.requestAnimationFrame(function() {
+                            if (window.qt.webChannel && window.qt.webChannel.objects.selectionHandler) {
+                                // Use qtWebChannel to communicate back to Qt
+                                window.lastKnownPosition = scrollY;
+                            }
+                            ticking = false;
+                        });
+                        ticking = true;
+                    }
+                }
+            }
+            
+            // Listen for scroll events
+            document.addEventListener('scroll', savePosition, { passive: true });
+            
+            // Also track position on key events that might cause scrolling
+            document.addEventListener('keydown', function(e) {
+                // Delay slightly to let the browser scroll first
+                setTimeout(savePosition, 100);
+            }, { passive: true });
+            
+            // And when user clicks links that might jump within the document
+            document.addEventListener('click', function(e) {
+                setTimeout(savePosition, 100);
+            }, { passive: true });
+            
+            console.log('Document position tracking enabled');
+        })();
+        """
+        web_view.page().runJavaScript(script)
+        
+    def _init_auto_save_timer(self):
+        """Initialize or restart the auto-save timer."""
+        # Stop existing timer if running
+        if self.auto_save_timer.isActive():
+            self.auto_save_timer.stop()
+            
+        # Start the timer
+        if hasattr(self, 'document_id') and self.document_id:
+            self.auto_save_timer.start(self.auto_save_interval)
+            logger.debug(f"Started auto-save timer for document {self.document_id}")
     
     def _create_ui(self):
         """Create the UI components."""
@@ -1011,29 +1125,34 @@ class DocumentView(QWidget):
         super().keyPressEvent(event)
     
     def _create_webview_and_setup(self, html_content, base_url):
-        """Create and setup a QWebEngineView with the provided HTML content."""
+        """Create a web view with the given HTML content and set it up for use."""
+        if not HAS_WEBENGINE:
+            raise Exception("WebEngine is not available")
+            
         from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtWebEngineCore import QWebEngineSettings
-        from PyQt6.QtCore import QTimer, QObject, pyqtSlot
+        from PyQt6.QtCore import QUrl, QTimer
         
         # Create web view
-        webview = QWebEngineView()
+        web_view = QWebEngineView()
+        web_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
-        # Apply settings
-        settings = webview.settings()
-        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.ErrorPageEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, True)
+        # Set up web channel for JavaScript communication if needed
+        if not hasattr(self, 'web_channel'):
+            from PyQt6.QtWebChannel import QWebChannel
+            self.web_channel = QWebChannel()
         
-        # Set content with base URL
-        if base_url:
-            webview.setHtml(html_content, base_url)
-        else:
-            webview.setHtml(html_content)
+        # Track references to prevent garbage collection
+        self.keep_alive(web_view)
         
-        # Create callback handler
+        # Set up the content
+        if html_content:
+            # Process HTML content with any needed enhancements
+            html_content = self._inject_javascript_libraries(html_content)
+            
+            # Load the HTML content with the base URL
+            web_view.setHtml(html_content, base_url)
+        
+        # Track selection changes if the document supports text selection
         class SelectionHandler(QObject):
             @pyqtSlot(str)
             def selectionChanged(self, text):
@@ -1041,164 +1160,14 @@ class DocumentView(QWidget):
                 if hasattr(self.parent(), 'extract_button'):
                     self.parent().extract_button.setEnabled(bool(text and len(text.strip()) > 0))
         
-        # Add the handler to the page
+        # Create selection handler
         handler = SelectionHandler(self)
-        webview.page().setWebChannel(self.web_channel)
+        web_view.page().setWebChannel(self.web_channel)
         self.web_channel.registerObject("selectionHandler", handler)
         
-        # First, we need to inject the QWebChannel JavaScript API
-        # Get the path to qwebchannel.js
-        qwebchannel_js = """
-        // Define QWebChannel if needed
-        if (typeof QWebChannel === 'undefined') {
-            class QWebChannel {
-                constructor(transport, callback) {
-                    this.transport = transport;
-                    this.objects = {};
-                    
-                    // Add the callback handler object
-                    this.objects.selectionHandler = {
-                        selectionChanged: function(text) {
-                            if (window.qt && window.qt.selectionChanged) {
-                                window.qt.selectionChanged(text);
-                            }
-                        }
-                    };
-                    
-                    // Call the callback with this channel
-                    if (callback) {
-                        callback(this);
-                    }
-                }
-            }
-        }
-        """
-            
-        # Inject a script to track selection changes
-        selection_js = """
-        // Global variable to store selection
-        window.text_selection = '';
-        
-        // Track selection with standard event
-        document.addEventListener('selectionchange', function() {
-            var selection = window.getSelection();
-            var text = selection.toString();
-            if (text && text.trim().length > 0) {
-                window.text_selection = text;
-                
-                // Try to call Qt callback if it exists
-                if (window.qt && window.qt.selectionChanged) {
-                    window.qt.selectionChanged(text);
-                }
-            }
-        });
-        
-        // Track selection with mouse events for better reliability
-        document.addEventListener('mouseup', function() {
-            var selection = window.getSelection();
-            var text = selection.toString();
-            if (text && text.trim().length > 0) {
-                window.text_selection = text;
-                
-                // Try to call Qt callback if it exists
-                if (window.qt && window.qt.selectionChanged) {
-                    window.qt.selectionChanged(text);
-                }
-            }
-        });
-        
-        // Function to highlight extracted text
-        window.highlightExtractedText = function(color) {
-            var sel = window.getSelection();
-            if (sel.rangeCount > 0) {
-                var range = sel.getRangeAt(0);
-                
-                // Create highlight span
-                var highlightSpan = document.createElement('span');
-                highlightSpan.className = 'incrementum-highlight';
-                
-                // Set color based on parameter or default to yellow
-                if (!color) color = 'yellow';
-                
-                switch(color) {
-                    case 'yellow':
-                        highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
-                        break;
-                    case 'green':
-                        highlightSpan.style.backgroundColor = 'rgba(0, 255, 0, 0.3)';
-                        break;
-                    case 'blue':
-                        highlightSpan.style.backgroundColor = 'rgba(0, 191, 255, 0.3)';
-                        break;
-                    case 'pink':
-                        highlightSpan.style.backgroundColor = 'rgba(255, 105, 180, 0.3)';
-                        break;
-                    case 'orange':
-                        highlightSpan.style.backgroundColor = 'rgba(255, 165, 0, 0.3)';
-                        break;
-                    default:
-                        highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
-                }
-                
-                highlightSpan.style.borderRadius = '2px';
-                
-                try {
-                    // Apply highlight
-                    range.surroundContents(highlightSpan);
-                    
-                    // Clear selection
-                    sel.removeAllRanges();
-                    
-                    return true;
-                } catch (e) {
-                    console.error('Error highlighting text:', e);
-                    return false;
-                }
-            }
-            return false;
-        };
-        """
-        
-        # Inject JavaScript to connect with the handler
-        connect_js = """
-        // Connect with Qt web channel
-        if (typeof QWebChannel === 'undefined') {
-            console.error('QWebChannel is not defined. Using fallback method.');
-            // Direct fallback for selection handling
-            window.qt = {
-                selectionChanged: function(text) {
-                    // Handle in a simpler way
-                    window.text_selection = text;
-                }
-            };
-        } else {
-            try {
-                new QWebChannel(qt.webChannelTransport, function(channel) {
-                    window.qt = channel.objects.selectionHandler;
-                });
-            } catch (e) {
-                console.error('Error initializing QWebChannel:', e);
-                // Fallback
-                window.qt = {
-                    selectionChanged: function(text) {
-                        window.text_selection = text;
-                    }
-                };
-            }
-        }
-        """
-        
-        # Add SuperMemo SM-18 style incremental reading capabilities
-        self._add_supermemo_features(webview)
-        
-        # Inject scripts when the page is loaded - order matters!
-        webview.loadFinished.connect(lambda ok: webview.page().runJavaScript(qwebchannel_js))
-        webview.loadFinished.connect(lambda ok: webview.page().runJavaScript(selection_js))
-        webview.loadFinished.connect(lambda ok: webview.page().runJavaScript(connect_js))
-        
-        # Add a method to manually get the current selection
+        # Add method to check for selection
         def check_selection():
-            webview.page().runJavaScript(
+            web_view.page().runJavaScript(
                 """
                 (function() {
                     var selection = window.getSelection();
@@ -1209,13 +1178,10 @@ class DocumentView(QWidget):
                 self._handle_webview_selection
             )
         
-        # Store the method to check selection
-        webview.check_selection = check_selection
+        # Store method for later use
+        web_view.check_selection = check_selection
         
-        # Connect context menu request to check selection before showing menu
-        webview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        
-        # Create a wrapper that first checks selection
+        # Set up context menu
         def context_menu_wrapper(pos):
             # Check for selection first
             check_selection()
@@ -1224,774 +1190,99 @@ class DocumentView(QWidget):
             # Small delay to ensure selection is processed
             QTimer.singleShot(50, lambda: self._on_content_menu(pos))
         
-        webview.customContextMenuRequested.connect(context_menu_wrapper)
+        # Connect context menu
+        web_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        web_view.customContextMenuRequested.connect(context_menu_wrapper)
         
-        # Disable default context menu for better control
-        webview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        # Add position tracking
+        web_view.loadFinished.connect(lambda ok: self._inject_position_tracking_js(web_view))
         
-        return webview
+        return web_view
     
-    def _inject_javascript_libraries(self, html_content):
-        """Inject common JavaScript libraries into HTML content based on content needs."""
-        
-        # Check if the document already has a head tag
-        has_head = "<head>" in html_content
-        has_body = "<body>" in html_content
-        
-        # Library CDN URLs
-        libraries = {
-            'markdown': "https://cdn.jsdelivr.net/npm/marked/marked.min.js",
-            'mermaid': "https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js",
-            'plotly': "https://cdn.plot.ly/plotly-latest.min.js",
-            'katex': "https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js",
-            'katex-css': "https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css",
-            'katex-autorender': "https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js",
-            'three': "https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"
-        }
-        
-        # Determine which libraries to inject based on content
-        to_inject = []
-        
-        # Check for library markers in content
-        if "```mermaid" in html_content or "mermaid" in html_content:
-            to_inject.append('mermaid')
-        
-        if "```math" in html_content or "\\(" in html_content or "\\[" in html_content or "$" in html_content or "math" in html_content.lower():
-            to_inject.append('katex')
-            to_inject.append('katex-css')
-            to_inject.append('katex-autorender')
-        
-        if "```plotly" in html_content or "Plotly" in html_content:
-            to_inject.append('plotly')
-        
-        if "```markdown" in html_content or "marked" in html_content or "markdown" in html_content.lower():
-            to_inject.append('markdown')
-        
-        if "three.js" in html_content or "THREE." in html_content:
-            to_inject.append('three')
-        
-        # Return original content if no libraries needed or if we can't find insertion points
-        if not to_inject or (not has_head and not has_body):
-            return html_content
-        
-        # Build script tags
-        scripts = ""
-        styles = ""
-        
-        for lib in to_inject:
-            if lib.endswith('-css'):
-                styles += f'<link rel="stylesheet" href="{libraries[lib]}">\n'
-            else:
-                scripts += f'<script src="{libraries[lib]}"></script>\n'
-        
-        # Add initialization script
-        init_script = """
-<script>
-function initializeCustomLibraries() {
-    // Initialize mermaid if available
-    if (typeof mermaid !== 'undefined') {
-        try {
-            mermaid.initialize({
-                startOnLoad: true,
-                theme: 'neutral'
-            });
-        } catch (e) {
-            console.error('Mermaid init error:', e);
-        }
-    }
+    def _handle_webview_selection(self, result):
+        """Handle selection from web view JavaScript."""
+        if result and isinstance(result, str):
+            self.selected_text = result
+            if hasattr(self, 'extract_button'):
+                self.extract_button.setEnabled(bool(result and len(result.strip()) > 0))
     
-    // Initialize KaTeX if available
-    if (typeof katex !== 'undefined') {
-        console.log('KaTeX detected, initializing...');
-        
-        // First approach: Find specific elements with class names
-        document.querySelectorAll('.math, .katex').forEach(element => {
-            try {
-                // Get the raw text and trim whitespace
-                let texContent = element.textContent.trim();
-                console.log('Processing KaTeX element:', texContent.substring(0, 30) + '...');
+    def _inject_position_tracking_js(self, web_view):
+        """Inject JavaScript to track scrolling position in web view."""
+        js_code = """
+        (function() {
+            // Set up scroll position tracking
+            var lastPosition = 0;
+            var scrollableElement = document.scrollingElement || document.documentElement;
+            
+            // Function to get normalized position (0-1)
+            function getNormalizedPosition() {
+                var maxScroll = scrollableElement.scrollHeight - scrollableElement.clientHeight;
+                if (maxScroll <= 0) return 0;
                 
-                // Create a new element to render into (to avoid modifying the original)
-                let renderElement = document.createElement('div');
-                renderElement.className = 'katex-output';
-                element.innerHTML = ''; // Clear the original content
-                element.appendChild(renderElement);
-                
-                // Render the KaTeX
-                katex.render(texContent, renderElement, {
-                    throwOnError: false,
-                    displayMode: element.classList.contains('display')
-                });
-            } catch (e) {
-                console.error('KaTeX rendering error:', e);
-                element.innerHTML = '<span style="color:red">KaTeX Error: ' + e.message + '</span><br>' + element.textContent;
+                var currentPos = scrollableElement.scrollTop;
+                return currentPos / maxScroll;
             }
-        });
-        
-        // Render inline math
-        document.querySelectorAll('.math-inline').forEach(element => {
-            try {
-                let texContent = element.textContent.trim();
-                katex.render(texContent, element, {
-                    throwOnError: false,
-                    displayMode: false
-                });
-            } catch (e) {
-                console.error('KaTeX inline error:', e);
-                element.innerHTML = '<span style="color:red">Error</span>';
-            }
-        });
-        
-        // Second approach: Use the auto-render extension if available
-        if (typeof renderMathInElement !== 'undefined') {
-            console.log('Using KaTeX auto-render extension');
-            try {
-                // Automatically render math in the entire document
-                renderMathInElement(document.body, {
-                    delimiters: [
-                        {left: "$$", right: "$$", display: true},
-                        {left: "$", right: "$", display: false},
-                        {left: "\\(", right: "\\)", display: false},
-                        {left: "\\[", right: "\\]", display: true}
-                    ],
-                    throwOnError: false
-                });
-            } catch (e) {
-                console.error('KaTeX auto-render error:', e);
-            }
-        }
-    }
-    
-    // Initialize markdown if available
-    if (typeof marked !== 'undefined') {
-        console.log('Marked.js detected, initializing...');
-        
-        // Set up marked options for better rendering
-        marked.setOptions({
-            gfm: true,          // Enable GitHub flavored markdown
-            breaks: true,       // Convert line breaks to <br>
-            smartLists: true,   // Use smart list behavior
-            smartypants: true,  // Use smart punctuation
-            xhtml: true         // Return XHTML compliant output
-        });
-        
-        document.querySelectorAll('.markdown').forEach(element => {
-            try {
-                // Get the raw text
-                let mdContent = element.textContent.trim();
-                console.log('Processing Markdown element:', mdContent.substring(0, 30) + '...');
-                
-                // Parse markdown
-                let htmlContent = marked.parse(mdContent);
-                
-                // Create a wrapper to maintain any styling
-                let wrapper = document.createElement('div');
-                wrapper.className = 'markdown-output';
-                wrapper.innerHTML = htmlContent;
-                
-                // Replace content
-                element.innerHTML = '';
-                element.appendChild(wrapper);
-            } catch (e) {
-                console.error('Markdown error:', e);
-                element.innerHTML = '<div class="error">Markdown rendering error: ' + e.message + '</div>';
-            }
-        });
-    }
-    
-    console.log('Custom libraries initialization complete');
-}
-
-// Execute after DOM is fully loaded
-document.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM loaded, initializing custom libraries');
-    setTimeout(initializeCustomLibraries, 100);
-});
-
-// Add a button to manually trigger initialization if automatic doesn't work
-window.addEventListener('load', function() {
-    // Check if any library-specific elements exist but haven't been processed
-    let needsInit = (
-        (document.querySelector('.markdown') && !document.querySelector('.markdown-output')) ||
-        (document.querySelector('.math, .katex') && !document.querySelector('.katex-output'))
-    );
-    
-    if (needsInit) {
-        console.log('Library elements found that need initialization');
-        
-        // Create a button to manually trigger initialization
-        let btn = document.createElement('button');
-        btn.textContent = 'Initialize Custom Content';
-        btn.style.position = 'fixed';
-        btn.style.bottom = '10px';
-        btn.style.right = '10px';
-        btn.style.zIndex = '9999';
-        btn.style.padding = '8px 16px';
-        btn.style.backgroundColor = '#0066cc';
-        btn.style.color = 'white';
-        btn.style.border = 'none';
-        btn.style.borderRadius = '4px';
-        btn.style.cursor = 'pointer';
-        
-        btn.onclick = function() {
-            initializeCustomLibraries();
-            btn.textContent = 'Initialization Complete';
-            setTimeout(function() { 
-                btn.style.display = 'none'; 
-            }, 2000);
-        };
-        
-        document.body.appendChild(btn);
-        
-        // Try one more time automatically
-        setTimeout(initializeCustomLibraries, 1000);
-    }
-});
-</script>
-"""
-        
-        # Inject into HTML
-        if has_head:
-            # Insert before the closing head tag
-            html_content = html_content.replace("</head>", styles + scripts + init_script + "</head>")
-        elif has_body:
-            # Insert after the opening body tag
-            html_content = html_content.replace("<body>", "<body>\n" + styles + scripts + init_script)
-        else:
-            # Wrap the entire content
-            html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Document</title>
-    {styles}
-    {scripts}
-    {init_script}
-</head>
-<body>
-    {html_content}
-</body>
-</html>
-"""
-        
-        return html_content
-    
-    def keep_alive(self, obj):
-        """Keep a reference to an object to prevent garbage collection."""
-        if not hasattr(self, '_kept_references'):
-            self._kept_references = []
-        self._kept_references.append(obj)
-        
-    def load_document(self, document_id):
-        """Load a document for viewing.
-        
-        Args:
-            document_id (int): ID of the document to load.
-        """
-        try:
-            # Keep any existing references alive
-            if hasattr(self, 'webview'):
-                self.keep_alive(self.webview)
-            if hasattr(self, 'youtube_callback'):
-                self.keep_alive(self.youtube_callback)
-            if hasattr(self, 'audio_player'):
-                self.keep_alive(self.audio_player)
-                
-            # Clear the document area
-            self._clear_content_layout()
             
-            # Get the document
-            self.document_id = document_id
-            self.document = self.db_session.query(Document).filter_by(id=document_id).first()
-            
-            if not self.document:
-                raise ValueError(f"Document not found: {document_id}")
-            
-            # Update extracts view
-            if hasattr(self, 'extract_view') and self.extract_view:
-                self.extract_view.load_extracts_for_document(document_id)
-            
-            # Load the document content based on its type
-            doc_type = self.document.content_type.lower() if hasattr(self.document, 'content_type') and self.document.content_type else "text"
-            
-            logger.debug(f"Loading document: {self.document.title} (Type: {doc_type})")
-            
-            # Handle different document types
-            if doc_type == "youtube":
-                self._load_youtube()
-            elif doc_type == "epub":
-                self._load_epub(self.db_session, self.document)
-            elif doc_type == "pdf":
-                self._load_pdf()
-            elif doc_type == "html" or doc_type == "htm":
-                self._load_html()
-            elif doc_type == "txt":
-                self._load_text()
-            elif doc_type in ["mp3", "wav", "ogg", "flac", "m4a", "aac"]:
-                self._load_audio()
-            else:
-                # Default to text view
-                self._load_text()
-            
-            # Set window title to document title
-            if hasattr(self, 'setWindowTitle') and callable(self.setWindowTitle):
-                self.setWindowTitle(self.document.title)
-                
-            return True
-        except Exception as e:
-            logger.exception(f"Error loading document {document_id}: {e}")
-            
-            # Show error in view
-            error_widget = QLabel(f"Error loading document: {str(e)}")
-            error_widget.setWordWrap(True)
-            error_widget.setStyleSheet("color: red; padding: 20px;")
-            
-            self._clear_content_layout()
-            if hasattr(self, 'content_layout'):
-                self.content_layout.addWidget(error_widget)
-                
-            return False
-    
-    def _load_pdf(self):
-        """Load and display a PDF document."""
-        try:
-            file_path = self.document.file_path
-            
-            # Check if file exists
-            if not os.path.isfile(file_path):
-                logger.error(f"PDF file not found: {file_path}")
-                
-                # Try alternative file path if in temporary directory
-                if '/tmp/' in file_path:
-                    tmp_dir = os.path.dirname(file_path)
-                    if os.path.exists(tmp_dir):
-                        files = os.listdir(tmp_dir)
-                        pdf_files = [f for f in files if f.endswith('.pdf')]
-                        if pdf_files:
-                            new_path = os.path.join(tmp_dir, pdf_files[0])
-                            logger.info(f"Using alternative PDF file found in the same directory: {new_path}")
-                            file_path = new_path
-                            
-                            # Update the document's file_path
-                            self.document.file_path = file_path
-                            self.db_session.commit()
-                        else:
-                            logger.error(f"No PDF files found in {tmp_dir}")
-                            raise FileNotFoundError(f"PDF file not found: {file_path}")
-                    else:
-                        logger.error(f"Temporary directory not found: {tmp_dir}")
-                        raise FileNotFoundError(f"PDF file not found: {file_path}")
-                else:
-                    raise FileNotFoundError(f"PDF file not found: {file_path}")
-            
-            # First try using PyMuPDF for advanced features
-            try:
-                import fitz  # PyMuPDF
-                
-                # Custom PDF viewer using PyMuPDF
-                from ui.pdf_view import PDFViewWidget
-                
-                # Create the PDF view widget
-                pdf_widget = PDFViewWidget(self.document, self.db_session)
-                
-                # Connect extract created signal if available
-                if hasattr(self, 'extractCreated') and hasattr(pdf_widget, 'extractCreated'):
-                    pdf_widget.extractCreated.connect(self.extractCreated.emit)
-                
-                # Add to layout
-                self.content_layout.addWidget(pdf_widget)
-                
-                # Store content edit for later use
-                self.content_edit = pdf_widget
-                
-                logger.info(f"Loaded PDF with PyMuPDF: {file_path}")
-                return
-                
-            except (ImportError, Exception) as e:
-                logger.warning(f"Could not use PyMuPDF for PDF: {str(e)}. Falling back to QPdfView.")
-                # Fall back to QPdfView
-                pass
-                
-            # Fallback: Use QPdfView from Qt
-            from PyQt6.QtPdf import QPdfDocument
-            from PyQt6.QtPdfWidgets import QPdfView
-            
-            # Create PDF view
-            pdf_view = QPdfView()
-            
-            # Create PDF document
-            pdf_document = QPdfDocument()
-            
-            # Load the PDF file
-            pdf_document.load(file_path)
-            
-            # Set the document to the view
-            pdf_view.setDocument(pdf_document)
-            
-            # Add to layout
-            self.content_layout.addWidget(pdf_view)
-            
-            # Store content edit for later use (position tracking)
-            self.content_edit = pdf_view
-            
-            # Extract text content for context
-            # This would require a PDF text extraction library
-            self.content_text = "PDF content"
-            
-            # Restore reading position if available
-            self._restore_position()
-            
-            logger.info(f"Loaded PDF with QPdfView: {file_path}")
-            
-        except ImportError:
-            logger.error("PDF viewing requires PyQt6.QtPdf and PyQt6.QtPdfWidgets")
-            label = QLabel("PDF viewing requires additional modules that are not installed.")
-            self.content_layout.addWidget(label)
-        except Exception as e:
-            logger.exception(f"Error loading PDF: {e}")
-            label = QLabel(f"Error loading PDF: {str(e)}")
-            self.content_layout.addWidget(label)
-
-    def _load_youtube(self):
-        """Load and display a YouTube video document."""
-        try:
-            if not HAS_WEBENGINE:
-                raise Exception("WebEngine not available. YouTube viewing requires PyQt6 WebEngine.")
-            
-            # Extract video ID from document content or URL
-            video_id = extract_video_id_from_document(self.document)
-            
-            if not video_id:
-                raise ValueError("Could not extract YouTube video ID from document")
-            
-            # Create a QWebEngineView for embedding YouTube
-            web_view = QWebEngineView()
-            web_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            
-            # Create a callback handler for communication with the player
-            self.youtube_callback = WebViewCallback(self)
-            
-            # Configure the YouTube player with our load_youtube_helper
-            # Get the target position from the document if available
-            target_position = getattr(self.document, 'position', 0)
-            
-            # Use the proper setup_youtube_webview function with all required parameters
-            success, callback = setup_youtube_webview(
-                web_view, 
-                self.document, 
-                video_id, 
-                target_position=target_position,
-                db_session=self.db_session
-            )
-            
-            if not success:
-                raise ValueError(f"Failed to set up YouTube player for video ID: {video_id}")
-                
-            # Store the enhanced callback
-            self.youtube_enhanced_callback = callback
-            
-            # Add to layout
-            self.content_layout.addWidget(web_view)
-            
-            # Store references
-            self.web_view = web_view
-            self.content_edit = web_view
-            
-            # Add transcript view if available
-            try:
-                # Create a transcript view widget
-                transcript_view = YouTubeTranscriptView(video_id, self.db_session)
-                transcript_view.setMaximumHeight(200)  # Limit height
-                
-                # Connect transcript navigation signals if available
-                if hasattr(transcript_view, 'seekToTime'):
-                    transcript_view.seekToTime.connect(
-                        lambda time_sec: web_view.page().runJavaScript(
-                            f"if(typeof player !== 'undefined' && player) {{ player.seekTo({time_sec}, true); }}"
-                        )
-                    )
-                
-                # Add to layout below the video
-                self.content_layout.addWidget(transcript_view)
-                
-                # Store reference
-                self.transcript_view = transcript_view
-                
-            except Exception as e:
-                logger.warning(f"Could not load YouTube transcript: {e}")
-                # Continue without transcript
-            
-            logger.info(f"Loaded YouTube video: {video_id}")
-            
-        except Exception as e:
-            logger.exception(f"Error loading YouTube video: {e}")
-            error_widget = QLabel(f"Error loading YouTube video: {str(e)}")
-            error_widget.setWordWrap(True)
-            error_widget.setStyleSheet("color: red; padding: 20px;")
-            self.content_layout.addWidget(error_widget)
-
-    def _load_epub(self, db_session, document):
-        """
-        Load document in EPUB format.
-        
-        Args:
-            db_session: SQLAlchemy session
-            document: Document object
-            
-        Returns:
-            bool: True if document was loaded successfully
-        """
-        try:
-            if not HAS_WEBENGINE:
-                raise Exception("Web engine not available.")
-            
-            # Create the web view
-            from PyQt6.QtWebEngineWidgets import QWebEngineView
-            from PyQt6.QtCore import QUrl, QObject, pyqtSlot, QTimer
-            content_edit = QWebEngineView()
-            
-            # Load the EPUB into the handler
-            try:
-                from core.document_processor.handlers.epub_handler import EPUBHandler
-                # Load the file data and prepare it for the webview
-                epub_handler = EPUBHandler()
-                content_results = epub_handler.extract_content(document.file_path)
-                html_content = content_results['html']
-                
-                # Process the HTML content
-                html_content = self._inject_javascript_libraries(html_content)
-                
-                # Set up the web channel for JavaScript communication
-                if not hasattr(self, 'web_channel'):
-                    from PyQt6.QtWebChannel import QWebChannel
-                    self.web_channel = QWebChannel()
-                
-                # Set the EPUB content to the web view
-                content_edit.setHtml(html_content, QUrl.fromLocalFile(document.file_path))
-                
-                # Store the web view for later use (important for context menu)
-                self.web_view = content_edit
-                
-                # Set up the selection handling and context menu
-                from PyQt6.QtCore import QObject, pyqtSlot
-                
-                class SelectionHandler(QObject):
-                    @pyqtSlot(str)
-                    def selectionChanged(self, text):
-                        self.parent().selected_text = text
-                        if hasattr(self.parent(), 'extract_button'):
-                            self.parent().extract_button.setEnabled(bool(text and len(text.strip()) > 0))
-                
-                # Add the handler to the page
-                handler = SelectionHandler(self)
-                content_edit.page().setWebChannel(self.web_channel)
-                self.web_channel.registerObject("selectionHandler", handler)
-                
-                # First, inject the QWebChannel JavaScript API fallback
-                qwebchannel_js = """
-                // Define QWebChannel if needed
-                if (typeof QWebChannel === 'undefined') {
-                    class QWebChannel {
-                        constructor(transport, callback) {
-                            this.transport = transport;
-                            this.objects = {};
-                            
-                            // Add the callback handler object
-                            this.objects.selectionHandler = {
-                                selectionChanged: function(text) {
-                                    if (window.qt && window.qt.selectionChanged) {
-                                        window.qt.selectionChanged(text);
-                                    }
-                                }
-                            };
-                            
-                            // Call the callback with this channel
-                            if (callback) {
-                                callback(this);
-                            }
-                        }
+            // Save position periodically
+            window.setInterval(function() {
+                var newPosition = getNormalizedPosition();
+                if (Math.abs(newPosition - lastPosition) > 0.01) {
+                    lastPosition = newPosition;
+                    if (window.qt && window.qt.savePosition) {
+                        window.qt.savePosition(newPosition);
                     }
                 }
-                """
-                
-                # Inject custom JavaScript for selection handling
-                selection_js = """
-                // Global variable to store selection
-                window.text_selection = '';
-                
-                // Track selection with standard event
-                document.addEventListener('selectionchange', function() {
-                    var selection = window.getSelection();
-                    var text = selection.toString();
-                    if (text && text.trim().length > 0) {
-                        window.text_selection = text;
-                        
-                        // Try to call Qt callback if it exists
-                        if (window.qt && window.qt.selectionChanged) {
-                            window.qt.selectionChanged(text);
-                        }
-                    }
-                });
-                
-                // Track selection with mouse events for better reliability
-                document.addEventListener('mouseup', function() {
-                    var selection = window.getSelection();
-                    var text = selection.toString();
-                    if (text && text.trim().length > 0) {
-                        window.text_selection = text;
-                        
-                        // Try to call Qt callback if it exists
-                        if (window.qt && window.qt.selectionChanged) {
-                            window.qt.selectionChanged(text);
-                        }
-                    }
-                });
-                
-                // Function to highlight extracted text
-                window.highlightExtractedText = function(color) {
-                    var sel = window.getSelection();
-                    if (sel.rangeCount > 0) {
-                        var range = sel.getRangeAt(0);
-                        
-                        // Create highlight span
-                        var highlightSpan = document.createElement('span');
-                        highlightSpan.className = 'incrementum-highlight';
-                        
-                        // Set color based on parameter or default to yellow
-                        if (!color) color = 'yellow';
-                        
-                        switch(color) {
-                            case 'yellow':
-                                highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
-                                break;
-                            case 'green':
-                                highlightSpan.style.backgroundColor = 'rgba(0, 255, 0, 0.3)';
-                                break;
-                            case 'blue':
-                                highlightSpan.style.backgroundColor = 'rgba(0, 191, 255, 0.3)';
-                                break;
-                            case 'pink':
-                                highlightSpan.style.backgroundColor = 'rgba(255, 105, 180, 0.3)';
-                                break;
-                            case 'orange':
-                                highlightSpan.style.backgroundColor = 'rgba(255, 165, 0, 0.3)';
-                                break;
-                            default:
-                                highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
-                        }
-                        
-                        highlightSpan.style.borderRadius = '2px';
-                        
-                        try {
-                            // Apply highlight
-                            range.surroundContents(highlightSpan);
-                            
-                            // Clear selection
-                            sel.removeAllRanges();
-                            
-                            return true;
-                        } catch (e) {
-                            console.error('Error highlighting text:', e);
-                            return false;
-                        }
-                    }
-                    return false;
-                };
-                """
-                
-                # Inject JavaScript to connect with the handler
-                connect_js = """
-                // Connect with Qt web channel
-                if (typeof QWebChannel === 'undefined') {
-                    console.error('QWebChannel is not defined. Using fallback method.');
-                    // Direct fallback for selection handling
-                    window.qt = {
-                        selectionChanged: function(text) {
-                            // Handle in a simpler way
-                            window.text_selection = text;
-                        }
-                    };
-                } else {
-                    try {
-                        new QWebChannel(qt.webChannelTransport, function(channel) {
-                            window.qt = channel.objects.selectionHandler;
-                        });
-                    } catch (e) {
-                        console.error('Error initializing QWebChannel:', e);
-                        // Fallback
-                        window.qt = {
-                            selectionChanged: function(text) {
-                                window.text_selection = text;
-                            }
-                        };
-                    }
+            }, 5000);
+            
+            // Set up position object
+            if (!window.qt) window.qt = {};
+            
+            // Add a function to restore position
+            window.qt.restorePosition = function(position) {
+                if (position >= 0 && position <= 1) {
+                    var maxScroll = scrollableElement.scrollHeight - scrollableElement.clientHeight;
+                    scrollableElement.scrollTop = position * maxScroll;
+                    lastPosition = position;
+                    return true;
                 }
-                """
+                return false;
+            };
+            
+            // Notify that initialization is complete
+            if (window.qt && window.qt.positionTrackingReady) {
+                window.qt.positionTrackingReady();
+            }
+            
+            return "Position tracking initialized";
+        })();
+        """
+        
+        # Execute the JavaScript
+        web_view.page().runJavaScript(js_code, lambda result: logger.debug(f"Position tracking result: {result}"))
+        
+        # Set up position handler if needed
+        class PositionHandler(QObject):
+            @pyqtSlot(float)
+            def savePosition(self, position):
+                self.parent()._save_document_position(position)
                 
-                # Add SuperMemo SM-18 style incremental reading capabilities
-                self._add_supermemo_features(content_edit)
-                
-                # Inject the scripts after the page has loaded - order matters!
-                content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(qwebchannel_js))
-                content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(selection_js))
-                content_edit.loadFinished.connect(lambda ok: content_edit.page().runJavaScript(connect_js))
-                
-                # Set up context menu
-                content_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-                
-                # Create a method to check for selection
-                def check_selection():
-                    content_edit.page().runJavaScript(
-                        """
-                        (function() {
-                            var selection = window.getSelection();
-                            var text = selection.toString();
-                            return text || window.text_selection || '';
-                        })();
-                        """,
-                        self._handle_webview_selection
-                    )
-                
-                # Store the method for later use
-                content_edit.check_selection = check_selection
-                
-                # Connect context menu
-                def context_menu_wrapper(pos):
-                    # Check for selection first
-                    check_selection()
-                    # Process events to ensure we get the selection
-                    QApplication.processEvents()
-                    # Small delay to ensure selection is processed
-                    QTimer.singleShot(50, lambda: self._on_content_menu(pos))
-                
-                content_edit.customContextMenuRequested.connect(context_menu_wrapper)
-                
-                # Add it to our layout
-                self.content_layout.addWidget(content_edit)
-                
-                # Store content for later use
-                self.content_edit = content_edit
-                self.content_text = content_results['text']
-                
-                return True
-                
-            except Exception as e:
-                logger.exception(f"Error loading EPUB content: {e}")
-                error_widget = QLabel(f"Error loading EPUB: {str(e)}")
-                error_widget.setWordWrap(True)
-                error_widget.setStyleSheet("color: red; padding: 20px;")
-                self.content_layout.addWidget(error_widget)
-                return False
-                
-        except Exception as e:
-            logger.exception(f"Error setting up EPUB viewer: {e}")
-            error_widget = QLabel(f"Error setting up EPUB viewer: {str(e)}")
-            error_widget.setWordWrap(True)
-            error_widget.setStyleSheet("color: red; padding: 20px;")
-            self.content_layout.addWidget(error_widget)
-            return False
+            @pyqtSlot()
+            def positionTrackingReady(self):
+                self.parent()._restore_webview_position()
+        
+        # Create handler if needed
+        if not hasattr(self, 'position_handler'):
+            self.position_handler = PositionHandler(self)
+            self.web_channel.registerObject("positionHandler", self.position_handler)
+    
+    def _restore_webview_position(self):
+        """Restore saved position in a web view."""
+        if hasattr(self, 'document') and self.document and hasattr(self, 'web_view'):
+            position = getattr(self.document, 'position', 0) or 0
+            
+            if position > 0:
+                js_code = f"window.qt.restorePosition({position});"
+                self.web_view.page().runJavaScript(js_code, lambda result: logger.debug(f"Restore position result: {result}"))
     
     def _on_extract(self):
         """Create extract from selected text."""
@@ -2375,44 +1666,78 @@ window.addEventListener('load', function() {
         logger.debug("Added SuperMemo features to web view")
     
     def _restore_position(self):
-        """Restore previous reading position for the document."""
+        """Restore the saved document position."""
+        if self.document and hasattr(self.document, 'position'):
+            try:
+                position = self.document.position
+                
+                # Different position restoration based on content type
+                if position and position > 0:
+                    if hasattr(self, 'web_view'):
+                        # For web-based content
+                        self._restore_webview_position()
+                    elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
+                        # For scrollable widgets
+                        scroll_bar = self.content_edit.verticalScrollBar()
+                        if scroll_bar:
+                            max_value = scroll_bar.maximum()
+                            if max_value > 0:
+                                target_pos = int(position * max_value)
+                                scroll_bar.setValue(target_pos)
+                                logger.debug(f"Restored position to {position} ({target_pos}/{max_value})")
+                    
+                    # Add other content type position restoration here
+                    
+                    return True
+            except Exception as e:
+                logger.exception(f"Error restoring position: {e}")
+        
+        return False
+    
+    def _save_document_position(self, position=None):
+        """Save the current document position."""
+        if not self.document or not self.db_session:
+            return False
+        
         try:
-            if not hasattr(self, 'document_id') or not self.document_id:
-                return
+            # If position is not provided, calculate it
+            if position is None:
+                # For web content
+                if hasattr(self, 'web_view'):
+                    # Position should be saved by JavaScript callback
+                    # Return early, nothing to do
+                    return False
                 
-            # Check if we have a stored position for this document
-            document = self.db_session.query(Document).get(self.document_id)
+                # For scrollable widgets
+                elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
+                    scroll_bar = self.content_edit.verticalScrollBar()
+                    if scroll_bar:
+                        max_value = scroll_bar.maximum()
+                        if max_value > 0:
+                            current_pos = scroll_bar.value()
+                            position = current_pos / max_value
+                        else:
+                            position = 0
+                
+                # Add other content type position calculation here
+                
+                # If we couldn't calculate a position, return
+                if position is None:
+                    return False
             
-            if not document or document.position is None:
-                logger.debug(f"No reading position found for document {self.document_id}")
-                return
-                
-            # Restore position based on content type
-            if hasattr(self, 'web_view') and self.web_view:
-                # For web view, use JavaScript to set scroll position with a delay
-                # to ensure document is fully loaded
-                from PyQt6.QtCore import QTimer
-                
-                def apply_scroll():
-                    scroll_script = f"window.scrollTo(0, {document.position});"
-                    self.web_view.page().runJavaScript(scroll_script)
-                    logger.debug(f"Restored web view scroll position to {document.position}")
-                
-                # Use timer to delay scroll position application
-                QTimer.singleShot(500, apply_scroll)
-                
-            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
-                # For widgets with scroll bars, set the value directly
-                scrollbar = self.content_edit.verticalScrollBar()
-                if scrollbar:
-                    scrollbar.setValue(document.position)
-                    logger.debug(f"Restored scroll position to {document.position}")
-                
-            logger.debug(f"Successfully restored reading position for document {self.document_id}")
-                
+            # Save position to document
+            self.document.position = position
+            
+            # Save to database
+            self.db_session.add(self.document)
+            self.db_session.commit()
+            
+            logger.debug(f"Saved document position: {position}")
+            return True
+            
         except Exception as e:
-            logger.exception(f"Error restoring reading position: {e}")
-            # Continue without restoring position
+            logger.exception(f"Error saving document position: {e}")
+            return False
 
     def _handle_webview_selection(self, text):
         """Handle text selection in the WebView."""
@@ -3642,4 +2967,713 @@ window.addEventListener('load', function() {
         except Exception as e:
             logger.exception(f"Error processing highlight: {e}")
             return False
+
+    def load_document(self, document_id):
+        """Load a document for viewing.
+        
+        Args:
+            document_id (int): ID of the document to load.
+            
+        Returns:
+            bool: True if the document was loaded successfully
+        """
+        try:
+            # Keep any existing references alive
+            if hasattr(self, 'webview'):
+                self.keep_alive(self.webview)
+            if hasattr(self, 'youtube_callback'):
+                self.keep_alive(self.youtube_callback)
+            if hasattr(self, 'audio_player'):
+                self.keep_alive(self.audio_player)
+                
+            # Clear the document area
+            self._clear_content_layout()
+            
+            # Get the document
+            self.document_id = document_id
+            self.document = self.db_session.query(Document).filter_by(id=document_id).first()
+            
+            if not self.document:
+                raise ValueError(f"Document not found: {document_id}")
+            
+            # Update extracts view
+            if hasattr(self, 'extract_view') and self.extract_view:
+                self.extract_view.load_extracts_for_document(document_id)
+            
+            # Load the document content based on its type
+            doc_type = self.document.content_type.lower() if hasattr(self.document, 'content_type') and self.document.content_type else "text"
+            
+            logger.debug(f"Loading document: {self.document.title} (Type: {doc_type})")
+            
+            # Handle different document types
+            if doc_type == "youtube":
+                self._load_youtube()
+            elif doc_type == "epub":
+                self._load_epub(self.db_session, self.document)
+            elif doc_type == "pdf":
+                self._load_pdf()
+            elif doc_type == "html" or doc_type == "htm":
+                self._load_html()
+            elif doc_type == "txt":
+                self._load_text()
+            elif doc_type in ["mp3", "wav", "ogg", "flac", "m4a", "aac"]:
+                self._load_audio()
+            else:
+                # Default to text view
+                self._load_text()
+            
+            # Set window title to document title
+            if hasattr(self, 'setWindowTitle') and callable(self.setWindowTitle):
+                self.setWindowTitle(self.document.title)
+                
+            # After loading document successfully, start auto-save timer
+            self._init_auto_save_timer()
+            
+            # Restore reading position if available
+            self._restore_position()
+            
+            return True
+        except Exception as e:
+            logger.exception(f"Error loading document {document_id}: {e}")
+            
+            # Show error in view
+            error_widget = QLabel(f"Error loading document: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            
+            self._clear_content_layout()
+            if hasattr(self, 'content_layout'):
+                self.content_layout.addWidget(error_widget)
+                
+            return False
+    
+    def keep_alive(self, obj):
+        """Keep a reference to an object to prevent garbage collection."""
+        if not hasattr(self, '_kept_references'):
+            self._kept_references = []
+        self._kept_references.append(obj)
+        
+    def _load_text(self):
+        """Load and display a text document."""
+        try:
+            # Load text from file
+            file_path = self.document.file_path
+            
+            # Create text edit
+            text_edit = QTextEdit()
+            text_edit.setReadOnly(True)
+            
+            # Try to detect and use correct encoding
+            encodings = ['utf-8', 'latin-1', 'cp1252']
+            content = None
+            
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                # Last resort - try binary mode and decode with errors ignored
+                with open(file_path, 'rb') as f:
+                    content = f.read().decode('utf-8', errors='replace')
+            
+            # Set text content
+            text_edit.setText(content)
+            
+            # Store content for later use
+            self.content_text = content
+            
+            # Add to layout
+            self.content_layout.addWidget(text_edit)
+            
+            # Store content edit for later use
+            self.content_edit = text_edit
+            
+            # Restore position if available
+            self._restore_position()
+            
+            logger.info(f"Loaded text document: {file_path}")
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Error loading text: {e}")
+            error_widget = QLabel(f"Error loading text: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_widget)
+            return False
+            
+    def _load_html(self):
+        """Load and display an HTML document."""
+        try:
+            # Load HTML from file
+            file_path = self.document.file_path
+            
+            # Create webview if available, otherwise fall back to text view
+            if HAS_WEBENGINE:
+                # Read file content
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    html_content = f.read()
+                
+                # Create web view
+                from PyQt6.QtCore import QUrl
+                
+                # Create web view with HTML content
+                webview = self._create_webview_and_setup(html_content, QUrl.fromLocalFile(os.path.dirname(file_path)))
+                
+                # Add to layout
+                self.content_layout.addWidget(webview)
+                
+                # Store references
+                self.web_view = webview
+                self.content_edit = webview
+                
+                # Store content text for later use
+                import re
+                # Simple text extraction from HTML
+                self.content_text = re.sub(r'<[^>]+>', ' ', html_content)
+                
+                logger.info(f"Loaded HTML document with WebEngine: {file_path}")
+                return True
+                
+            else:
+                # Fall back to text view if web engine not available
+                logger.warning("WebEngine not available, falling back to text view for HTML")
+                return self._load_text()
+                
+        except Exception as e:
+            logger.exception(f"Error loading HTML: {e}")
+            error_widget = QLabel(f"Error loading HTML: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_widget)
+            return False
+    
+    def _load_pdf(self):
+        """Load and display a PDF document."""
+        try:
+            file_path = self.document.file_path
+            
+            # Check if file exists
+            if not os.path.isfile(file_path):
+                logger.error(f"PDF file not found: {file_path}")
+                raise FileNotFoundError(f"PDF file not found: {file_path}")
+            
+            # First try using PyMuPDF for advanced features
+            try:
+                import fitz  # PyMuPDF
+                
+                # Custom PDF viewer using PyMuPDF
+                from ui.pdf_view import PDFViewWidget
+                
+                # Create the PDF view widget
+                pdf_widget = PDFViewWidget(self.document, self.db_session)
+                
+                # Connect extract created signal if available
+                if hasattr(self, 'extractCreated') and hasattr(pdf_widget, 'extractCreated'):
+                    pdf_widget.extractCreated.connect(self.extractCreated.emit)
+                
+                # Add to layout
+                self.content_layout.addWidget(pdf_widget)
+                
+                # Store content edit for later use
+                self.content_edit = pdf_widget
+                
+                logger.info(f"Loaded PDF with PyMuPDF: {file_path}")
+                return True
+                
+            except (ImportError, Exception) as e:
+                logger.warning(f"Could not use PyMuPDF for PDF: {str(e)}. Falling back to QPdfView.")
+                # Fall back to QPdfView
+                pass
+                
+            # Fallback: Use QPdfView from Qt
+            try:
+                from PyQt6.QtPdf import QPdfDocument
+                from PyQt6.QtPdfWidgets import QPdfView
+                
+                # Create PDF view
+                pdf_view = QPdfView()
+                
+                # Create PDF document
+                pdf_document = QPdfDocument()
+                
+                # Load the PDF file
+                pdf_document.load(file_path)
+                
+                # Set the document to the view
+                pdf_view.setDocument(pdf_document)
+                
+                # Add to layout
+                self.content_layout.addWidget(pdf_view)
+                
+                # Store content edit for later use (position tracking)
+                self.content_edit = pdf_view
+                
+                # Extract text content for context
+                # This would require a PDF text extraction library
+                self.content_text = "PDF content"
+                
+                # Restore reading position if available
+                self._restore_position()
+                
+                logger.info(f"Loaded PDF with QPdfView: {file_path}")
+                return True
+            except ImportError:
+                logger.error("PDF viewing requires PyQt6.QtPdf and PyQt6.QtPdfWidgets")
+                raise ImportError("PDF viewing requires additional modules that are not installed.")
+                
+        except Exception as e:
+            logger.exception(f"Error loading PDF: {e}")
+            error_widget = QLabel(f"Error loading PDF: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_widget)
+            return False
+    
+    def _load_epub(self, db_session, document):
+        """Load document in EPUB format."""
+        try:
+            if not HAS_WEBENGINE:
+                raise Exception("Web engine not available for EPUB viewing.")
+            
+            # Create the web view
+            from PyQt6.QtWebEngineWidgets import QWebEngineView
+            from PyQt6.QtCore import QUrl
+            
+            content_edit = QWebEngineView()
+            
+            # Load the EPUB into the handler
+            try:
+                from core.document_processor.handlers.epub_handler import EPUBHandler
+                
+                # Load the file data and prepare it for the webview
+                epub_handler = EPUBHandler()
+                content_results = epub_handler.extract_content(document.file_path)
+                html_content = content_results['html']
+                
+                # Process the HTML content
+                html_content = self._inject_javascript_libraries(html_content)
+                
+                # Set up the web channel for JavaScript communication
+                if not hasattr(self, 'web_channel'):
+                    from PyQt6.QtWebChannel import QWebChannel
+                    self.web_channel = QWebChannel()
+                
+                # Set the EPUB content to the web view
+                content_edit.setHtml(html_content, QUrl.fromLocalFile(document.file_path))
+                
+                # Store the web view for later use (important for context menu)
+                self.web_view = content_edit
+                
+                # Create callback handler
+                class SelectionHandler(QObject):
+                    @pyqtSlot(str)
+                    def selectionChanged(self, text):
+                        self.parent().selected_text = text
+                        if hasattr(self.parent(), 'extract_button'):
+                            self.parent().extract_button.setEnabled(bool(text and len(text.strip()) > 0))
+                
+                # Add the handler to the page
+                handler = SelectionHandler(self)
+                content_edit.page().setWebChannel(self.web_channel)
+                self.web_channel.registerObject("selectionHandler", handler)
+                
+                # Create a method to check for selection
+                def check_selection():
+                    content_edit.page().runJavaScript(
+                        """
+                        (function() {
+                            var selection = window.getSelection();
+                            var text = selection.toString();
+                            return text || window.text_selection || '';
+                        })();
+                        """,
+                        self._handle_webview_selection
+                    )
+                
+                # Store the method for later use
+                content_edit.check_selection = check_selection
+                
+                # Connect context menu
+                def context_menu_wrapper(pos):
+                    # Check for selection first
+                    check_selection()
+                    # Process events to ensure we get the selection
+                    QApplication.processEvents()
+                    # Small delay to ensure selection is processed
+                    QTimer.singleShot(50, lambda: self._on_content_menu(pos))
+                
+                # Set up context menu
+                content_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                content_edit.customContextMenuRequested.connect(context_menu_wrapper)
+                
+                # Add position tracking
+                content_edit.loadFinished.connect(lambda ok: self._inject_position_tracking_js(content_edit))
+                
+                # Add it to our layout
+                self.content_layout.addWidget(content_edit)
+                
+                # Store content for later use
+                self.content_edit = content_edit
+                self.content_text = content_results.get('text', '')
+                
+                # Start auto-save timer
+                self._init_auto_save_timer()
+                
+                # Restore position
+                self._restore_position()
+                
+                return True
+                
+            except Exception as e:
+                logger.exception(f"Error loading EPUB content: {e}")
+                error_widget = QLabel(f"Error loading EPUB: {str(e)}")
+                error_widget.setWordWrap(True)
+                error_widget.setStyleSheet("color: red; padding: 20px;")
+                self.content_layout.addWidget(error_widget)
+                return False
+                
+        except Exception as e:
+            logger.exception(f"Error setting up EPUB viewer: {e}")
+            error_widget = QLabel(f"Error setting up EPUB viewer: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_widget)
+            return False
+    
+    def _load_youtube(self):
+        """Load and display a YouTube video document."""
+        try:
+            if not HAS_WEBENGINE:
+                raise Exception("WebEngine not available. YouTube viewing requires PyQt6 WebEngine.")
+            
+            # Extract video ID from document content or URL
+            from .load_youtube_helper import setup_youtube_webview, extract_video_id_from_document
+            
+            video_id = extract_video_id_from_document(self.document)
+            
+            if not video_id:
+                raise ValueError("Could not extract YouTube video ID from document")
+            
+            # Create a QWebEngineView for embedding YouTube
+            from PyQt6.QtWebEngineWidgets import QWebEngineView
+            web_view = QWebEngineView()
+            web_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Create a callback handler for communication with the player
+            from .load_youtube_helper import WebViewCallback
+            self.youtube_callback = WebViewCallback(self)
+            
+            # Configure the YouTube player with our load_youtube_helper
+            # Get the target position from the document if available
+            target_position = getattr(self.document, 'position', 0)
+            
+            # Use the proper setup_youtube_webview function with all required parameters
+            success, callback = setup_youtube_webview(
+                web_view, 
+                self.document, 
+                video_id, 
+                target_position=target_position,
+                db_session=self.db_session
+            )
+            
+            if not success:
+                raise ValueError(f"Failed to set up YouTube player for video ID: {video_id}")
+                
+            # Store the enhanced callback
+            self.youtube_enhanced_callback = callback
+            
+            # Add to layout
+            self.content_layout.addWidget(web_view)
+            
+            # Store references
+            self.web_view = web_view
+            self.content_edit = web_view
+            
+            # Add transcript view if available
+            try:
+                # Create a transcript view widget
+                from ui.youtube_transcript_view import YouTubeTranscriptView
+                transcript_view = YouTubeTranscriptView(video_id, self.db_session)
+                transcript_view.setMaximumHeight(200)  # Limit height
+                
+                # Connect transcript navigation signals if available
+                if hasattr(transcript_view, 'seekToTime'):
+                    transcript_view.seekToTime.connect(
+                        lambda time_sec: web_view.page().runJavaScript(
+                            f"if(typeof player !== 'undefined' && player) {{ player.seekTo({time_sec}, true); }}"
+                        )
+                    )
+                
+                # Add to layout below the video
+                self.content_layout.addWidget(transcript_view)
+                
+                # Store reference
+                self.transcript_view = transcript_view
+                
+            except Exception as e:
+                logger.warning(f"Could not load YouTube transcript: {e}")
+                # Continue without transcript
+            
+            logger.info(f"Loaded YouTube video: {video_id}")
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Error loading YouTube video: {e}")
+            error_widget = QLabel(f"Error loading YouTube video: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.content_layout.addWidget(error_widget)
+            return False
+    
+    def _inject_javascript_libraries(self, html_content):
+        """Inject common JavaScript libraries into HTML content based on content needs."""
+        
+        # Check if the document already has a head tag
+        has_head = "<head>" in html_content
+        has_body = "<body>" in html_content
+        
+        # Library CDN URLs
+        libraries = {
+            'markdown': "https://cdn.jsdelivr.net/npm/marked/marked.min.js",
+            'mermaid': "https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js",
+            'plotly': "https://cdn.plot.ly/plotly-latest.min.js",
+            'katex': "https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js",
+            'katex-css': "https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css",
+            'katex-autorender': "https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js",
+            'three': "https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"
+        }
+        
+        # Determine which libraries to inject based on content
+        to_inject = []
+        
+        # Check for library markers in content
+        if "```mermaid" in html_content or "mermaid" in html_content:
+            to_inject.append('mermaid')
+        
+        if "```math" in html_content or "\\(" in html_content or "\\[" in html_content or "$" in html_content or "math" in html_content.lower():
+            to_inject.append('katex')
+            to_inject.append('katex-css')
+            to_inject.append('katex-autorender')
+        
+        if "```plotly" in html_content or "Plotly" in html_content:
+            to_inject.append('plotly')
+        
+        if "```markdown" in html_content or "marked" in html_content or "markdown" in html_content.lower():
+            to_inject.append('markdown')
+        
+        if "three.js" in html_content or "THREE." in html_content:
+            to_inject.append('three')
+        
+        # Return original content if no libraries needed or if we can't find insertion points
+        if not to_inject or (not has_head and not has_body):
+            return html_content
+        
+        # Build script tags
+        scripts = ""
+        styles = ""
+        
+        for lib in to_inject:
+            if lib.endswith('-css'):
+                styles += f'<link rel="stylesheet" href="{libraries[lib]}">\n'
+            else:
+                scripts += f'<script src="{libraries[lib]}"></script>\n'
+        
+        # Add initialization script
+        init_script = """
+<script>
+function initializeCustomLibraries() {
+    // Initialize mermaid if available
+    if (typeof mermaid !== 'undefined') {
+        try {
+            mermaid.initialize({
+                startOnLoad: true,
+                theme: 'neutral'
+            });
+        } catch (e) {
+            console.error('Mermaid init error:', e);
+        }
+    }
+    
+    // Initialize KaTeX if available
+    if (typeof katex !== 'undefined') {
+        console.log('KaTeX detected, initializing...');
+        
+        // First approach: Find specific elements with class names
+        document.querySelectorAll('.math, .katex').forEach(element => {
+            try {
+                // Get the raw text and trim whitespace
+                let texContent = element.textContent.trim();
+                console.log('Processing KaTeX element:', texContent.substring(0, 30) + '...');
+                
+                // Create a new element to render into (to avoid modifying the original)
+                let renderElement = document.createElement('div');
+                renderElement.className = 'katex-output';
+                element.innerHTML = ''; // Clear the original content
+                element.appendChild(renderElement);
+                
+                // Render the KaTeX
+                katex.render(texContent, renderElement, {
+                    throwOnError: false,
+                    displayMode: element.classList.contains('display')
+                });
+            } catch (e) {
+                console.error('KaTeX rendering error:', e);
+                element.innerHTML = '<span style="color:red">KaTeX Error: ' + e.message + '</span><br>' + element.textContent;
+            }
+        });
+        
+        // Render inline math
+        document.querySelectorAll('.math-inline').forEach(element => {
+            try {
+                let texContent = element.textContent.trim();
+                katex.render(texContent, element, {
+                    throwOnError: false,
+                    displayMode: false
+                });
+            } catch (e) {
+                console.error('KaTeX inline error:', e);
+                element.innerHTML = '<span style="color:red">Error</span>';
+            }
+        });
+        
+        // Second approach: Use the auto-render extension if available
+        if (typeof renderMathInElement !== 'undefined') {
+            console.log('Using KaTeX auto-render extension');
+            try {
+                // Automatically render math in the entire document
+                renderMathInElement(document.body, {
+                    delimiters: [
+                        {left: "$$", right: "$$", display: true},
+                        {left: "$", right: "$", display: false},
+                        {left: "\\(", right: "\\)", display: false},
+                        {left: "\\[", right: "\\]", display: true}
+                    ],
+                    throwOnError: false
+                });
+            } catch (e) {
+                console.error('KaTeX auto-render error:', e);
+            }
+        }
+    }
+    
+    // Initialize markdown if available
+    if (typeof marked !== 'undefined') {
+        console.log('Marked.js detected, initializing...');
+        
+        // Set up marked options for better rendering
+        marked.setOptions({
+            gfm: true,          // Enable GitHub flavored markdown
+            breaks: true,       // Convert line breaks to <br>
+            smartLists: true,   // Use smart list behavior
+            smartypants: true,  // Use smart punctuation
+            xhtml: true         // Return XHTML compliant output
+        });
+        
+        document.querySelectorAll('.markdown').forEach(element => {
+            try {
+                // Get the raw text
+                let mdContent = element.textContent.trim();
+                console.log('Processing Markdown element:', mdContent.substring(0, 30) + '...');
+                
+                // Parse markdown
+                let htmlContent = marked.parse(mdContent);
+                
+                // Create a wrapper to maintain any styling
+                let wrapper = document.createElement('div');
+                wrapper.className = 'markdown-output';
+                wrapper.innerHTML = htmlContent;
+                
+                // Replace content
+                element.innerHTML = '';
+                element.appendChild(wrapper);
+            } catch (e) {
+                console.error('Markdown error:', e);
+                element.innerHTML = '<div class="error">Markdown rendering error: ' + e.message + '</div>';
+            }
+        });
+    }
+    
+    console.log('Custom libraries initialization complete');
+}
+
+// Execute after DOM is fully loaded
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOM loaded, initializing custom libraries');
+    setTimeout(initializeCustomLibraries, 100);
+});
+
+// Add a button to manually trigger initialization if automatic doesn't work
+window.addEventListener('load', function() {
+    // Check if any library-specific elements exist but haven't been processed
+    let needsInit = (
+        (document.querySelector('.markdown') && !document.querySelector('.markdown-output')) ||
+        (document.querySelector('.math, .katex') && !document.querySelector('.katex-output'))
+    );
+    
+    if (needsInit) {
+        console.log('Library elements found that need initialization');
+        
+        // Create a button to manually trigger initialization
+        let btn = document.createElement('button');
+        btn.textContent = 'Initialize Custom Content';
+        btn.style.position = 'fixed';
+        btn.style.bottom = '10px';
+        btn.style.right = '10px';
+        btn.style.zIndex = '9999';
+        btn.style.padding = '8px 16px';
+        btn.style.backgroundColor = '#0066cc';
+        btn.style.color = 'white';
+        btn.style.border = 'none';
+        btn.style.borderRadius = '4px';
+        btn.style.cursor = 'pointer';
+        
+        btn.onclick = function() {
+            initializeCustomLibraries();
+            btn.textContent = 'Initialization Complete';
+            setTimeout(function() { 
+                btn.style.display = 'none'; 
+            }, 2000);
+        };
+        
+        document.body.appendChild(btn);
+        
+        // Try one more time automatically
+        setTimeout(initializeCustomLibraries, 1000);
+    }
+});
+</script>
+"""
+        
+        # Inject into HTML
+        if has_head:
+            # Insert before the closing head tag
+            html_content = html_content.replace("</head>", styles + scripts + init_script + "</head>")
+        elif has_body:
+            # Insert after the opening body tag
+            html_content = html_content.replace("<body>", "<body>\n" + styles + scripts + init_script)
+        else:
+            # Wrap the entire content
+            html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Document</title>
+    {styles}
+    {scripts}
+    {init_script}
+</head>
+<body>
+    {html_content}
+</body>
+</html>
+"""
+        
+        return html_content
 
