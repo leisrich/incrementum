@@ -4,6 +4,7 @@ import os
 import sys
 import logging
 import json
+import shutil
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from sqlalchemy import func
@@ -34,6 +35,8 @@ from core.utils.settings_manager import SettingsManager
 from core.utils.theme_manager import ThemeManager
 from core.utils.rss_feed_manager import RSSFeedManager
 from core.spaced_repetition.queue_manager import QueueManager
+from core.content_extractor.extract_processor import ExtractProcessor
+from core.learning.item_generator import LearningItemGenerator
 
 from .document_view import DocumentView
 from .pdf_view import PDFViewWidget
@@ -116,10 +119,13 @@ class MainWindow(QMainWindow):
     document_changed = pyqtSignal(int)
     
     def __init__(self):
+        """Initialize the main window."""
         super().__init__()
         
         # Flag to track initialization status
         self._initialization_complete = False
+        
+        self.setWindowTitle("Incrementum - Knowledge Management System")
         
         # Set application icon
         self._set_application_icon()
@@ -127,31 +133,41 @@ class MainWindow(QMainWindow):
         # Initialize database session
         self.db_session = init_database()
         
-        # Initialize models
-        self.category_model = CategoryModel(self.db_session)
-        self.document_model = DocumentModel(self.db_session)
+        # Initialize settings manager
+        self.settings_manager = SettingsManager()
         
-        # Initialize managers and components
+        # Initialize models
+        # self.extract_model = ExtractModel(self.db_session) # Not implemented yet
+        self.document_model = DocumentModel(self.db_session)
+        self.category_model = CategoryModel(self.db_session)
+        # self.queue_model = QueueModel(self.db_session) # Not implemented yet
+        # self.learning_item_model = LearningItemModel(self.db_session) # Not implemented yet
+        # self.document_tag_model = DocumentTagModel(self.db_session) # Not implemented yet
+        # self.tag_model = TagModel(self.db_session) # Not implemented yet
+        
+        # Initialize managers
+        self.extract_processor = ExtractProcessor(self.db_session)
+        self.item_generator = LearningItemGenerator(self.extract_processor)
         self.document_processor = DocumentProcessor(self.db_session)
-        self.spaced_repetition = FSRSAlgorithm(self.db_session)
-        self.nlp_extractor = NLPExtractor(self.db_session)
-        self.search_engine = SearchEngine(self.db_session)
-        self.tag_manager = TagManager(self.db_session)
         self.export_manager = ExportManager(self.db_session)
         self.network_builder = KnowledgeNetworkBuilder(self.db_session)
-        self.settings_manager = SettingsManager()
         self.theme_manager = ThemeManager(self.settings_manager)
         self.queue_manager = FSRSAlgorithm(self.db_session)
         self.rss_manager = RSSFeedManager(self.db_session, self.settings_manager)
-        
+        self.tag_manager = TagManager(self.db_session)  
+        self.spaced_repetition = self.queue_manager 
+
         # Set window properties
-        self.setWindowTitle("Incrementum - Incremental Learning System")
         self.setMinimumSize(1200, 800)
         
         # Create UI components
         self._create_actions()
         self._create_menu_bar()
         self._create_tool_bar()
+        
+        # Initialize recent files menu
+        self._update_recent_files_menu()
+        
         self._create_status_bar()
         self._create_central_widget()
         self._create_docks()
@@ -443,74 +459,90 @@ class MainWindow(QMainWindow):
                 # Fall back to default layout
     
     def _create_actions(self):
-        """Create actions for menus and toolbars with keyboard shortcuts."""
+        """Create and set up the application actions."""
         # File menu actions
-        self.action_import_file = QAction("Import File...", self)
-        self.action_import_file.setShortcut(ShortcutManager.IMPORT_FILE)
+        self.action_import_file = QAction("Import Document...", self)
+        self.action_import_file.setShortcut(QKeySequence("Ctrl+O"))
         self.action_import_file.triggered.connect(self._on_import_file)
         
-        self.action_import_url = QAction("Import from URL...", self)
-        self.action_import_url.setShortcut(ShortcutManager.IMPORT_URL)
+        self.action_import_url = QAction("Import URL...", self)
+        self.action_import_url.setShortcut(QKeySequence("Ctrl+U"))
         self.action_import_url.triggered.connect(self._on_import_url)
         
-        self.action_import_knowledge = QAction("Import Knowledge Items...", self)
+        self.action_import_arxiv = QAction("Import arXiv Paper...", self)
+        self.action_import_arxiv.triggered.connect(self._on_import_arxiv)
+        
+        self.action_import_knowledge = QAction("Import Knowledge...", self)
         self.action_import_knowledge.triggered.connect(self._on_import_knowledge)
         
-        self.action_export_knowledge = QAction("Export Knowledge Items...", self)
+        self.action_export_knowledge = QAction("Export Knowledge...", self)
         self.action_export_knowledge.triggered.connect(self._on_export_knowledge)
         
+        self.action_export_all_data = QAction("Export All Data...", self)
+        self.action_export_all_data.triggered.connect(self._on_export_all_data)
+        
+        # Add the missing save action
         self.action_save = QAction("Save", self)
-        self.action_save.setShortcut(ShortcutManager.SAVE)
+        self.action_save.setShortcut(QKeySequence("Ctrl+S"))
+        self.action_save.setIcon(QIcon.fromTheme("document-save"))
         self.action_save.triggered.connect(self._on_save)
         
+        # Add Save As action
+        self.action_save_as = QAction("Save As...", self)
+        self.action_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.action_save_as.triggered.connect(self._on_save_as)
+        
+        # Add Export to PDF action
+        self.action_export_pdf = QAction("Export as PDF...", self)
+        self.action_export_pdf.triggered.connect(self._on_export_pdf)
+        
+        # Create Recent Files menu
+        self.recent_files_menu = QMenu("Recent Files", self)
+        self.action_clear_recent = QAction("Clear Recent Files", self)
+        self.action_clear_recent.triggered.connect(self._on_clear_recent_files)
+        
         self.action_exit = QAction("Exit", self)
-        self.action_exit.setShortcut(QKeySequence.StandardKey.Quit)
+        self.action_exit.setShortcut(QKeySequence("Ctrl+Q"))
         self.action_exit.triggered.connect(self.close)
         
         # Edit menu actions
         self.action_new_extract = QAction("New Extract...", self)
-        self.action_new_extract.setShortcut(ShortcutManager.CREATE_EXTRACT)
+        self.action_new_extract.setShortcut(QKeySequence("Ctrl+E"))
         self.action_new_extract.triggered.connect(self._on_new_extract)
         
         self.action_new_learning_item = QAction("New Learning Item...", self)
-        self.action_new_learning_item.setShortcut(ShortcutManager.NEW_LEARNING_ITEM)
+        self.action_new_learning_item.setShortcut(QKeySequence("Ctrl+L"))
         self.action_new_learning_item.triggered.connect(self._on_new_learning_item)
-        
-        self.action_add_bookmark = QAction("Add Bookmark", self)
-        self.action_add_bookmark.setShortcut(ShortcutManager.ADD_BOOKMARK)
-        self.action_add_bookmark.triggered.connect(self._on_add_bookmark)
-        
-        self.action_highlight = QAction("Highlight Selection", self)
-        self.action_highlight.setShortcut(ShortcutManager.HIGHLIGHT)
-        self.action_highlight.triggered.connect(self._on_highlight_selection)
         
         self.action_manage_tags = QAction("Manage Tags...", self)
         self.action_manage_tags.triggered.connect(self._on_manage_tags)
         
-        # View menu actions
-        self.action_toggle_category_panel = QAction("Show Category Panel", self)
+        # View menu actions - panel toggles
+        self.action_toggle_category_panel = QAction("Category Panel", self)
         self.action_toggle_category_panel.setCheckable(True)
         self.action_toggle_category_panel.setChecked(True)
-        self.action_toggle_category_panel.setShortcut(ShortcutManager.TOGGLE_CATEGORY_PANEL)
         self.action_toggle_category_panel.triggered.connect(self._on_toggle_category_panel)
         
-        self.action_toggle_search_panel = QAction("Show Search Panel", self)
+        self.action_toggle_search_panel = QAction("Search Panel", self)
         self.action_toggle_search_panel.setCheckable(True)
-        self.action_toggle_search_panel.setChecked(False)
-        self.action_toggle_search_panel.setShortcut(ShortcutManager.TOGGLE_SEARCH_PANEL)
+        self.action_toggle_search_panel.setChecked(True)
         self.action_toggle_search_panel.triggered.connect(self._on_toggle_search_panel)
         
-        self.action_toggle_stats_panel = QAction("Show Statistics Panel", self)
+        self.action_toggle_stats_panel = QAction("Statistics Panel", self)
         self.action_toggle_stats_panel.setCheckable(True)
-        self.action_toggle_stats_panel.setChecked(False)
-        self.action_toggle_stats_panel.setShortcut(ShortcutManager.TOGGLE_STATS_PANEL)
+        self.action_toggle_stats_panel.setChecked(True)
         self.action_toggle_stats_panel.triggered.connect(self._on_toggle_stats_panel)
         
-        self.action_toggle_queue_panel = QAction("Show Queue Panel", self)
+        self.action_toggle_queue_panel = QAction("Reading Queue Panel", self)
         self.action_toggle_queue_panel.setCheckable(True)
-        self.action_toggle_queue_panel.setChecked(False)
+        self.action_toggle_queue_panel.setChecked(True)
         self.action_toggle_queue_panel.triggered.connect(self._on_toggle_queue_panel)
-        self.action_toggle_queue_panel.setShortcut(ShortcutManager.TOGGLE_QUEUE_PANEL)
+        
+        # Add Knowledge Tree panel toggle action
+        self.action_toggle_knowledge_tree = QAction("Knowledge Tree Panel", self)
+        self.action_toggle_knowledge_tree.setCheckable(True)
+        self.action_toggle_knowledge_tree.setChecked(True)
+        self.action_toggle_knowledge_tree.triggered.connect(self._on_toggle_knowledge_tree)
         
         # Queue and document navigation
         self.action_read_next = QAction("Read Next in Queue", self)
@@ -616,7 +648,17 @@ class MainWindow(QMainWindow):
         # Add RSS feed manager action
         self.action_rss_feeds = QAction("Manage RSS Feeds", self)
         self.action_rss_feeds.triggered.connect(self._on_manage_rss_feeds)
-        
+
+        # Bookmark action
+        self.action_add_bookmark = QAction("Add Bookmark", self)
+        self.action_add_bookmark.setShortcut(QKeySequence("Ctrl+B"))
+        self.action_add_bookmark.triggered.connect(self._on_add_bookmark)
+
+        # Highlight action
+        self.action_highlight = QAction("Highlight Selection", self)
+        self.action_highlight.setShortcut(QKeySequence("Ctrl+H"))
+        self.action_highlight.triggered.connect(self._on_highlight_selection)
+            
     def _start_rss_updater(self):
         """Start the RSS feed update timer if enabled."""
         try:
@@ -737,37 +779,29 @@ class MainWindow(QMainWindow):
             
    
     def _create_menu_bar(self):
-        """Create the menu bar with main menus."""
+        """Create application menu bar and menus."""
         menu_bar = self.menuBar()
         
         # File menu
         file_menu = menu_bar.addMenu("&File")
         file_menu.addAction(self.action_import_file)
         file_menu.addAction(self.action_import_url)
-        
-        # Add arxiv import action
-        self.action_import_arxiv = QAction("Import from Arxiv...", self)
-        self.action_import_arxiv.triggered.connect(self._on_import_arxiv)
         file_menu.addAction(self.action_import_arxiv)
-        
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_import_knowledge)
-        file_menu.addAction(self.action_export_knowledge)
-        
-        # Add export all data action
-        self.action_export_all_data = QAction("Export All Data...", self)
-        self.action_export_all_data.triggered.connect(self._on_export_all_data)
-        file_menu.addAction(self.action_export_all_data)
-        
         file_menu.addSeparator()
         file_menu.addAction(self.action_save)
+        file_menu.addAction(self.action_save_as)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_export_pdf)
+        file_menu.addAction(self.action_import_knowledge)
+        file_menu.addAction(self.action_export_knowledge)
+        file_menu.addAction(self.action_export_all_data)
         file_menu.addSeparator()
         
-        # Recent documents submenu
-        self.recent_menu = QMenu("Recent Documents", self)
-        file_menu.addMenu(self.recent_menu)
-        
+        # Add Recent Files menu
+        file_menu.addMenu(self.recent_files_menu)
+        self._update_recent_files_menu()
         file_menu.addSeparator()
+        
         file_menu.addAction(self.action_exit)
         
         # Edit menu
@@ -786,6 +820,7 @@ class MainWindow(QMainWindow):
         panels_menu.addAction(self.action_toggle_search_panel)
         panels_menu.addAction(self.action_toggle_stats_panel)
         panels_menu.addAction(self.action_toggle_queue_panel)  # Add queue panel toggle
+        panels_menu.addAction(self.action_toggle_knowledge_tree)  # Add knowledge tree toggle
         
         # Add dock arrangement actions
         self.view_menu.addSeparator()
@@ -1232,21 +1267,22 @@ class MainWindow(QMainWindow):
     def _load_recent_documents(self):
         """Load and populate recent documents menu."""
         # This is a simplified version - in a real app, we'd load from settings
-        self.recent_menu.clear()
-        
+        self.recent_files_menu.clear()  # Changed from self.recent_menu
+
         # Get max recent documents from settings
         max_recent = self.settings_manager.get_setting("general", "max_recent_documents", 10)
-        
+
         # Get recent documents from database
         recent_docs = self.db_session.query(Document).order_by(
             Document.last_accessed.desc()
         ).limit(max_recent).all()
-        
+
         for doc in recent_docs:
-            action = self.recent_menu.addAction(doc.title)
+            action = self.recent_files_menu.addAction(doc.title)  # Changed from self.recent_menu
             action.setData(doc.id)
             action.triggered.connect(self._on_recent_document_selected)
-    
+
+   
     def _update_status(self):
         """Update status bar information."""
         # Count due items
@@ -2135,12 +2171,42 @@ class MainWindow(QMainWindow):
     
     @pyqtSlot(bool)
     def _on_toggle_queue_panel(self, checked):
-        """Handler for toggling queue panel visibility."""
-        if checked:
-            self.queue_dock.show()
-        else:
-            self.queue_dock.hide()
-    
+        """Toggle visibility of the queue panel."""
+        if hasattr(self, 'queue_dock'):
+            self.queue_dock.setVisible(checked)
+
+    @pyqtSlot(bool)
+    def _on_toggle_knowledge_tree(self, checked):
+        """Toggle visibility of the knowledge tree panel."""
+        try:
+            # Find the queue view that contains the knowledge tree
+            for index in range(self.tab_widget.count()):
+                widget = self.tab_widget.widget(index)
+                if hasattr(widget, 'tree_dock') and widget.tree_dock:
+                    # If we found a widget with a tree dock, toggle its visibility
+                    widget.tree_dock.setVisible(checked)
+                    return
+                    
+            # If we didn't find a docked tree panel, look for the main queue view
+            queue_view = self.findChild(QWidget, 'queue_view')
+            if queue_view and hasattr(queue_view, '_make_tree_dockable'):
+                # If the knowledge tree is not dockable yet, make it dockable first
+                if not hasattr(queue_view, 'tree_dock') or not queue_view.tree_dock:
+                    queue_view._make_tree_dockable()
+                
+                # Then set visibility based on checked state
+                if hasattr(queue_view, 'tree_dock') and queue_view.tree_dock:
+                    queue_view.tree_dock.setVisible(checked)
+                else:
+                    # Fall back to toggling tree panel in splitter mode
+                    if hasattr(queue_view, 'tree_panel') and hasattr(queue_view, '_toggle_tree_panel'):
+                        if checked and not queue_view.tree_panel.isVisible():
+                            queue_view._toggle_tree_panel()
+                        elif not checked and queue_view.tree_panel.isVisible():
+                            queue_view._toggle_tree_panel()
+        except Exception as e:
+            logger.exception(f"Error toggling knowledge tree: {e}")
+
     @pyqtSlot(QModelIndex)
     def _on_category_selected(self, index):
         """Handler for category selection."""
@@ -2908,6 +2974,7 @@ class MainWindow(QMainWindow):
         panels_menu.addAction(self.action_toggle_search_panel)
         panels_menu.addAction(self.action_toggle_stats_panel)
         panels_menu.addAction(self.action_toggle_queue_panel)  # Add queue panel toggle
+        panels_menu.addAction(self.action_toggle_knowledge_tree)  # Add knowledge tree toggle
         
         # Add dock arrangement actions
         self.view_menu.addSeparator()
@@ -3171,3 +3238,272 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.exception(f"Error displaying markdown file: {e}")
             text_edit.setHtml(f"<p>Error displaying file: {str(e)}</p>")
+
+    @pyqtSlot()
+    def _on_save_as(self):
+        """Save the current document with a new name or location."""
+        try:
+            # Get the current document widget
+            current_widget = self.tab_widget.currentWidget()
+            
+            # Check if there's an active document
+            if not current_widget or not hasattr(current_widget, 'document_id'):
+                QMessageBox.warning(self, "Save As", "No document is currently open.")
+                return
+                
+            document_id = current_widget.document_id
+            
+            # Get document from database
+            document = self.db_session.query(Document).get(document_id)
+            if not document:
+                QMessageBox.warning(self, "Error", "Document not found in database.")
+                return
+                
+            # Ask for new file name and location
+            options = QFileDialog.Options()
+            default_name = document.title if document.title else "Document"
+            
+            # Get appropriate extension based on document type
+            if hasattr(document, 'mime_type'):
+                if 'pdf' in document.mime_type.lower():
+                    default_name += ".pdf"
+                    file_filter = "PDF Files (*.pdf);;All Files (*)"
+                elif 'word' in document.mime_type.lower() or 'docx' in document.mime_type.lower():
+                    default_name += ".docx"
+                    file_filter = "Word Documents (*.docx);;All Files (*)"
+                elif 'html' in document.mime_type.lower():
+                    default_name += ".html"
+                    file_filter = "HTML Files (*.html *.htm);;All Files (*)"
+                elif 'text' in document.mime_type.lower():
+                    default_name += ".txt"
+                    file_filter = "Text Files (*.txt);;All Files (*)"
+                else:
+                    default_name += ".txt"
+                    file_filter = "All Files (*)"
+            else:
+                default_name += ".txt"
+                file_filter = "All Files (*)"
+            
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Document As", default_name, file_filter, options=options
+            )
+            
+            if not file_path:
+                return  # User canceled
+                
+            # Copy document content to the new file
+            if hasattr(document, 'file_path') and document.file_path and os.path.exists(document.file_path):
+                # If original file exists, copy it
+                try:
+                    shutil.copy2(document.file_path, file_path)
+                    QMessageBox.information(self, "Save As", f"Document saved as '{file_path}'")
+                    
+                    # Add to recent files
+                    self._add_to_recent_files(file_path)
+                    
+                except Exception as e:
+                    logger.exception(f"Error copying document: {e}")
+                    QMessageBox.warning(self, "Error", f"Could not save document: {str(e)}")
+            else:
+                # If no original file, try to save content from database
+                try:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        content = document.content if hasattr(document, 'content') and document.content else ""
+                        f.write(content)
+                    QMessageBox.information(self, "Save As", f"Document saved as '{file_path}'")
+                    
+                    # Add to recent files
+                    self._add_to_recent_files(file_path)
+                    
+                except Exception as e:
+                    logger.exception(f"Error saving document content: {e}")
+                    QMessageBox.warning(self, "Error", f"Could not save document content: {str(e)}")
+        
+        except Exception as e:
+            logger.exception(f"Error in Save As operation: {e}")
+            QMessageBox.warning(self, "Error", f"An error occurred: {str(e)}")
+
+    @pyqtSlot()
+    def _on_export_pdf(self):
+        """Export the current document as PDF."""
+        try:
+            # Get the current document widget
+            current_widget = self.tab_widget.currentWidget()
+            
+            # Check if there's an active document
+            if not current_widget:
+                QMessageBox.warning(self, "Export PDF", "No document is currently open.")
+                return
+                
+            # If widget has built-in PDF export
+            if hasattr(current_widget, 'export_pdf'):
+                current_widget.export_pdf()
+                return
+                
+            # Otherwise, use Qt's printing system to generate PDF
+            from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
+            
+            # Create printer with PDF output
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            
+            # Set default PDF name based on document title if available
+            if hasattr(current_widget, 'document_id'):
+                document_id = current_widget.document_id
+                document = self.db_session.query(Document).get(document_id)
+                if document and document.title:
+                    default_name = f"{document.title}.pdf"
+                else:
+                    default_name = "document.pdf"
+                
+                printer.setOutputFileName(default_name)
+            
+            # Show print dialog for PDF settings
+            dialog = QPrintDialog(printer, self)
+            dialog.setWindowTitle("Export to PDF")
+            
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return  # User canceled
+                
+            # Attempt to print to PDF based on widget type
+            success = False
+            
+            if hasattr(current_widget, 'print_'):
+                # Direct print method
+                current_widget.print_(printer)
+                success = True
+            elif hasattr(current_widget, 'document') and hasattr(current_widget.document(), 'print'):
+                # QTextEdit and similar widgets
+                current_widget.document().print(printer)
+                success = True
+            elif hasattr(current_widget, 'page') and hasattr(current_widget.page(), 'print'):
+                # QWebEngineView
+                def handle_print_finished(print_success):
+                    if print_success:
+                        QMessageBox.information(self, "Export PDF", f"Document exported to PDF: {printer.outputFileName()}")
+                        self._add_to_recent_files(printer.outputFileName())
+                    else:
+                        QMessageBox.warning(self, "Export PDF", "Failed to export document to PDF.")
+                
+                current_widget.page().print(printer, handle_print_finished)
+                return  # Async operation, return immediately
+                
+            if success:
+                QMessageBox.information(self, "Export PDF", f"Document exported to PDF: {printer.outputFileName()}")
+                self._add_to_recent_files(printer.outputFileName())
+            else:
+                QMessageBox.warning(self, "Export PDF", "This document type doesn't support PDF export.")
+        
+        except Exception as e:
+            logger.exception(f"Error exporting to PDF: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to export PDF: {str(e)}")
+
+    def _update_recent_files_menu(self):
+        """Update the Recent Files menu with the list of recent files."""
+        try:
+            # Clear the menu
+            self.recent_files_menu.clear()
+            
+            # Get recent files from settings
+            recent_files = self.settings_manager.get_setting("ui", "recent_files", [])
+            
+            if recent_files:
+                # Add recent file entries
+                for file_path in recent_files:
+                    if os.path.exists(file_path):
+                        # Create a shorter display name
+                        display_name = os.path.basename(file_path)
+                        
+                        # Create action with the file path as data
+                        action = QAction(display_name, self)
+                        action.setToolTip(file_path)
+                        action.setData(file_path)
+                        action.triggered.connect(self._on_recent_file_selected)
+                        self.recent_files_menu.addAction(action)
+                
+                # Add separator and clear action
+                self.recent_files_menu.addSeparator()
+                self.recent_files_menu.addAction(self.action_clear_recent)
+            else:
+                # Add a disabled "No Recent Files" entry
+                action = QAction("No Recent Files", self)
+                action.setEnabled(False)
+                self.recent_files_menu.addAction(action)
+                self.recent_files_menu.addSeparator()
+                self.recent_files_menu.addAction(self.action_clear_recent)
+                self.action_clear_recent.setEnabled(False)
+    
+        except Exception as e:
+            logger.exception(f"Error updating recent files menu: {e}")
+
+    def _add_to_recent_files(self, file_path):
+        """Add a file to the recent files list."""
+        try:
+            # Get current list
+            recent_files = self.settings_manager.get_setting("ui", "recent_files", [])
+            
+            # Remove if already in list
+            if file_path in recent_files:
+                recent_files.remove(file_path)
+            
+            # Add to beginning of list
+            recent_files.insert(0, file_path)
+            
+            # Limit to 10 entries
+            recent_files = recent_files[:10]
+            
+            # Save updated list
+            self.settings_manager.set_setting("ui", "recent_files", recent_files)
+            
+            # Update menu
+            self._update_recent_files_menu()
+        
+        except Exception as e:
+            logger.exception(f"Error adding to recent files: {e}")
+
+    @pyqtSlot()
+    def _on_recent_file_selected(self):
+        """Handle selection of a file from the Recent Files menu."""
+        try:
+            action = self.sender()
+            if action and action.data():
+                file_path = action.data()
+                
+                if not os.path.exists(file_path):
+                    QMessageBox.warning(self, "File Not Found", f"The file '{file_path}' no longer exists.")
+                    # Remove from recent files
+                    self._remove_from_recent_files(file_path)
+                    return
+                    
+                # Import the file
+                self._import_document(file_path)
+        
+        except Exception as e:
+            logger.exception(f"Error opening recent file: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to open file: {str(e)}")
+
+    def _remove_from_recent_files(self, file_path):
+        """Remove a file from the recent files list."""
+        try:
+            recent_files = self.settings_manager.get_setting("ui", "recent_files", [])
+            
+            if file_path in recent_files:
+                recent_files.remove(file_path)
+                self.settings_manager.set_setting("ui", "recent_files", recent_files)
+                
+            # Update menu
+            self._update_recent_files_menu()
+        
+        except Exception as e:
+            logger.exception(f"Error removing from recent files: {e}")
+
+    @pyqtSlot()
+    def _on_clear_recent_files(self):
+        """Clear the recent files list."""
+        try:
+            self.settings_manager.set_setting("ui", "recent_files", [])
+            self._update_recent_files_menu()
+        
+        except Exception as e:
+            logger.exception(f"Error clearing recent files: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to clear recent files: {str(e)}")

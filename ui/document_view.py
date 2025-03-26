@@ -1,18 +1,19 @@
 import os
 import logging
 from typing import Optional, List, Dict
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import time
 import tempfile
 from io import BytesIO
 from pathlib import Path
 import base64
-
-from ui.document_position_manager import DocumentPositionManager
-from ui.read_later_feature import ReadLaterManager, ReadLaterDialog
-from ui.reading_stats_widget import ReadingStatsWidget, ReadingStatsDialog
-from ui.position_autosave import DocumentPositionAutoSave
+import re
+import zipfile
+import io
+import shutil
+import requests
+from urllib.parse import urlparse
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -20,8 +21,9 @@ from PyQt6.QtWidgets import (
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
     QSizePolicy, QTabWidget, QApplication, QStyle, QComboBox
 )
+
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QSize, QEvent
-from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat
+from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QIcon, QAction
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtWebEngineCore import QWebEngineSettings
@@ -29,15 +31,6 @@ try:
     HAS_WEBENGINE = True
 except ImportError:
     HAS_WEBENGINE = False
-
-# Separate try block for QtMultimedia since we've had issues with it
-QT_MULTIMEDIA_AVAILABLE = False
-try:
-    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-    QT_MULTIMEDIA_AVAILABLE = True
-except (ImportError, RuntimeError) as multimedia_err:
-    logger = logging.getLogger(__name__)
-    logger.error(f"Failed to import QtMultimedia: {multimedia_err}")
 
 from core.knowledge_base.models import Document, Extract, WebHighlight
 from core.content_extractor.extractor import ContentExtractor
@@ -885,18 +878,6 @@ class DocumentView(QWidget):
         
         # Create UI components
         self._create_ui()
-
-        # Initialize position tracking
-        self.position_manager = DocumentPositionManager(self)
-
-        # Initialize Read Later manager
-        self.read_later_manager = ReadLaterManager(self.db_session)
-
-        # Initialize position auto-save
-        self.position_autosave = DocumentPositionAutoSave(self)
-
-        # Connect signals
-        self.position_autosave.positionSaved.connect(self._on_position_saved)
         
         # Load document if provided
         if document_id:
@@ -1107,173 +1088,6 @@ class DocumentView(QWidget):
                         widget.deleteLater()
         except Exception as e:
             logger.error(f"Error clearing content layout: {e}")
-
-    def cleanup(self):
-        """Cleanup resources when document view is destroyed."""
-        try:
-            # Make a final position save before cleanup
-            if hasattr(self, 'position_autosave'):
-                try:
-                    # Stop the timer first to prevent any more callbacks
-                    if hasattr(self.position_autosave, 'timer') and self.position_autosave.timer:
-                        self.position_autosave.timer.stop()
-                    # Save current position one last time
-                    self.position_autosave.save_position()
-                except Exception as e:
-                    logger.exception(f"Error stopping position autosave timer: {e}")
-
-            # Stop timers
-            if hasattr(self, 'position_manager'):
-                self.position_manager.cleanup()
-
-            # Save references to avoid creating new variables
-            web_view_ref = None
-            content_edit_ref = None
-            
-            if hasattr(self, 'web_view'):
-                web_view_ref = self.web_view
-                self.web_view = None
-                
-            if hasattr(self, 'content_edit'):  
-                content_edit_ref = self.content_edit
-                self.content_edit = None
-                
-            # Process events to ensure Qt handles the reference changes
-            from PyQt6.QtCore import QCoreApplication
-            QCoreApplication.processEvents()
-            
-            # Now safely delete any remaining references
-            if web_view_ref is not None:
-                try:
-                    web_view_ref.deleteLater()
-                except Exception:
-                    # Already deleted, just ignore
-                    pass
-                    
-            if content_edit_ref is not None and content_edit_ref != web_view_ref:
-                try:
-                    content_edit_ref.deleteLater()
-                except Exception:
-                    # Already deleted, just ignore
-                    pass
-
-            logger.debug("DocumentView cleanup completed")
-        except Exception as e:
-            logger.exception(f"Error during cleanup: {e}")
-
-    def closeEvent(self, event):
-        """Handle widget close event."""
-        try:
-            logger.debug(f"Closing document view for document ID: {self.document_id}")
-            
-            # Save the document position before closing
-            if hasattr(self, 'document_id') and self.document_id:
-                if hasattr(self, 'position_manager') and self.position_manager:
-                    try:
-                        # Force a final position save
-                        self.position_manager.save_position()
-                        logger.debug(f"Final position saved for document {self.document_id}")
-                    except Exception as e:
-                        logger.warning(f"Error saving final position for document {self.document_id}: {e}")
-                
-                # Clean up position autosave if present
-                if hasattr(self, 'position_autosave') and self.position_autosave:
-                    try:
-                        self.position_autosave.stop()
-                        logger.debug(f"Position autosave stopped for document {self.document_id}")
-                    except Exception as e:
-                        logger.warning(f"Error stopping position autosave: {e}")
-            
-            # Perform general cleanup
-            self.cleanup()
-            
-        except Exception as e:
-            logger.exception(f"Error during document view close: {e}")
-        
-        # Accept the close event
-        event.accept()
-
-    def _on_js_position_changed(self, position):
-        """Handle position changed event from JavaScript."""
-        # Update document position
-        if hasattr(self, 'document') and self.document:
-            self.document.position = position
-            self.db_session.commit()
-
-    def _update_bookmark_note(self, position, note):
-        """Update note for bookmark at the specified position."""
-        if not hasattr(self, 'read_later_manager'):
-            return
-
-        # Find and update bookmark
-        for item in self.read_later_manager.read_later_items:
-            if item.document_id == self.document_id and abs(item.position - position) < 100:
-                item.note = note
-                self.read_later_manager.save_items()
-
-                # Update bookmark menu
-                self.update_bookmark_menu()
-                break
-
-    def _remove_bookmark(self, position):
-        """Remove bookmark at the specified position."""
-        if not hasattr(self, 'read_later_manager'):
-            return
-
-        # Remove bookmark
-        self.read_later_manager.remove_item(self.document_id, position)
-
-        # Update bookmark menu
-        self.update_bookmark_menu()
-
-    def update_bookmark_menu(self):
-        """Update the bookmark menu with current document bookmarks."""
-        if not hasattr(self, 'bookmark_button') or not self.bookmark_button:
-            return
-
-        # Get menu
-        menu = self.bookmark_button.menu()
-        if not menu:
-            return
-
-        # Clear existing document bookmarks
-        for action in menu.actions():
-            if hasattr(action, 'is_bookmark') and action.is_bookmark:
-                menu.removeAction(action)
-
-        # Add current document bookmarks if available
-        if hasattr(self, 'document_id') and self.document_id and hasattr(self, 'read_later_manager'):
-            items = self.read_later_manager.get_items_for_document(self.document_id)
-
-            if items:
-                # Get document
-                from core.knowledge_base.models import Document
-                document = self.db_session.query(Document).get(self.document_id)
-
-                # Add document header
-                doc_header = QAction(f"Bookmarks for {document.title}", self.bookmark_button)
-                doc_header.setEnabled(False)
-                doc_header.is_bookmark = True
-                menu.addAction(doc_header)
-
-                # Add bookmark items
-                for item in items:
-                    # Create descriptive label
-                    label = f"Position: {item.position:.0f}"
-                    if item.note:
-                        label = f"{label} - {item.note}"
-
-                    # Create action
-                    bookmark_action = QAction(label, self.bookmark_button)
-                    bookmark_action.is_bookmark = True
-                    bookmark_action.triggered.connect(lambda checked=False, pos=item.position: self._restore_read_later_position(pos))
-                    menu.addAction(bookmark_action)
-            else:
-                # No bookmarks message
-                no_bookmarks = QAction("No bookmarks for this document", self.bookmark_button)
-                no_bookmarks.setEnabled(False)
-                no_bookmarks.is_bookmark = True
-                menu.addAction(no_bookmarks)
     
     def _update_vim_status_visibility(self):
         """Update the visibility of the Vim status bar based on Vim mode state."""
@@ -1287,12 +1101,6 @@ class DocumentView(QWidget):
     
     def keyPressEvent(self, event):
         """Handle key press events for document view."""
-        # Check for 'n' key to navigate to next document
-        if event.key() == Qt.Key.Key_N:
-            self.navigate.emit("next")
-            event.accept()
-            return
-        
         # Check for Ctrl+E shortcut for extract
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_E:
             self._on_extract()
@@ -1430,17 +1238,6 @@ class DocumentView(QWidget):
                     if (window.qt && window.qt.savePosition) {
                         window.qt.savePosition(newPosition);
                     }
-                    
-                    // Create global namespace
-                    window.qt = {
-                        webChannelTransport: {},
-                        selectionChanged: function(text) {
-                            console.log('Selection fallback called with:', text);
-                            window.text_selection = text;
-                        }
-                    };
-                    
-                    console.log('QWebChannel fallback implementation complete');
                 }
             }, 5000);
             
@@ -1949,17 +1746,11 @@ class DocumentView(QWidget):
             logger.exception(f"Error saving document position: {e}")
             return False
 
-
     def _handle_webview_selection(self, text):
         """Handle text selection in the WebView."""
         if text and text.strip():
             self.selected_text = text.strip()
             logger.debug(f"Selected text in WebView: {text[:50]}...")
-
-    def _on_position_saved(self, document_id, position):
-        """Handle position saved event."""
-        # This can be used for UI feedback if needed
-        pass
             
     def _on_create_extract(self):
         """Create an extract from the selected text."""
@@ -2136,16 +1927,6 @@ class DocumentView(QWidget):
                     orange_action = QAction("Orange", self)
                     orange_action.triggered.connect(lambda: self._highlight_with_color("orange"))
                     highlight_menu.addAction(orange_action)
-
-                    # Add Read Later option
-                    read_later_action = QAction("Read Later (🔖)", self)
-                    read_later_action.triggered.connect(self._on_add_read_later)
-                    menu.addAction(read_later_action)
-
-                    # Add reading stats option
-                    stats_action = QAction("Reading Statistics 📊", self)
-                    stats_action.triggered.connect(self._on_show_reading_stats)
-                    menu.addAction(stats_action)
                     
                     menu.addMenu(highlight_menu)
                     
@@ -2508,10 +2289,6 @@ class DocumentView(QWidget):
     def _load_audio(self):
         """Load an audio file for playback with position tracking."""
         try:
-            # First check if QtMultimedia is available
-            if not QT_MULTIMEDIA_AVAILABLE:
-                raise ImportError("PyQt6.QtMultimedia is not available. Audio playback requires this module to be properly installed.")
-                
             from ui.load_audio_helper import setup_audio_player
             
             # Calculate initial position
@@ -2534,157 +2311,203 @@ class DocumentView(QWidget):
             self.document.last_accessed = datetime.now()
             self.db_session.commit()
             
-        except (ImportError, RuntimeError) as e:
-            logger.exception(f"Error loading audio file: {e}")
-            error_label = QLabel(f"Error loading audio file: {str(e)}\n\nThis may be caused by an incompatible version of PyQt6-Multimedia.\nTry updating it with: pip install PyQt6-Multimedia==6.6.1 -U")
-            error_label.setStyleSheet("color: red; padding: 10px;")
-            error_label.setWordWrap(True)
-            self.content_layout.addWidget(error_label)
-            
-            # Try to provide alternative playback options
-            alt_label = QLabel("You can try opening this audio file with your system's default audio player:")
-            alt_label.setStyleSheet("padding: 10px;")
-            self.content_layout.addWidget(alt_label)
-            
-            # Add a button to open the file with the system's default player
-            open_button = QPushButton("Open with System Player")
-            open_button.clicked.connect(lambda: self._open_with_system_player())
-            open_button.setMaximumWidth(200)
-            self.content_layout.addWidget(open_button)
-            
         except Exception as e:
-            logger.exception(f"Unexpected error loading audio file: {e}")
+            logger.exception(f"Error loading audio file: {e}")
             error_label = QLabel(f"Error loading audio file: {str(e)}")
             error_label.setStyleSheet("color: red;")
             self.content_layout.addWidget(error_label)
-            
-    def _open_with_system_player(self):
-        """Open the audio file with the system's default player."""
-        try:
-            if not hasattr(self, 'document') or not hasattr(self.document, 'file_path'):
-                return
-                
-            from PyQt6.QtGui import QDesktopServices
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self.document.file_path))
-            
-        except Exception as e:
-            logger.exception(f"Error opening file with system player: {e}")
-            QMessageBox.warning(self, "Error", f"Could not open the file with system player: {str(e)}")
 
     def _create_toolbar(self):
-        """Create toolbar with common document actions."""
-        toolbar = QToolBar()
-        toolbar.setIconSize(QSize(16, 16))
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        """Create the document toolbar."""
+        toolbar = QToolBar("Document Toolbar")
+        toolbar.setIconSize(QSize(24, 24))
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
         
-        # Navigation actions
-        self.prev_button = QAction("Previous", self)
-        self.prev_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft))
-        self.prev_button.setStatusTip("Go to previous document")
-        self.prev_button.triggered.connect(self._on_previous)
-        toolbar.addAction(self.prev_button)
+        # Create actions for toolbar
+        from PyQt6.QtGui import QIcon
         
-        self.next_button = QAction("Next", self)
-        self.next_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
-        self.next_button.setStatusTip("Go to next document")
-        self.next_button.triggered.connect(self._on_next)
-        toolbar.addAction(self.next_button)
-        
-        toolbar.addSeparator()
-        
-        # Extract action
-        self.extract_button = QAction("Extract", self)
-        self.extract_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
-        self.extract_button.setStatusTip("Extract selected text")
-        self.extract_button.triggered.connect(self._on_extract)
-        toolbar.addAction(self.extract_button)
-        
-        # Highlight action
-        self.highlight_button = QAction("Highlight", self)
-        self.highlight_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
-        self.highlight_button.setStatusTip("Highlight selected text")
-        self.highlight_button.triggered.connect(self._on_highlight)
-        toolbar.addAction(self.highlight_button)
-        
-        # Color picker for highlighting
-        self.highlight_color_combo = QComboBox()
-        self.highlight_color_combo.addItem("Yellow", "yellow")
-        self.highlight_color_combo.addItem("Green", "green")
-        self.highlight_color_combo.addItem("Blue", "blue")
-        self.highlight_color_combo.addItem("Pink", "pink")
-        self.highlight_color_combo.addItem("Orange", "orange")
-        self.highlight_color_combo.setCurrentIndex(0)
-        self.highlight_color_combo.setToolTip("Select highlight color")
-        self.highlight_color_combo.setStatusTip("Select highlight color")
-        self.highlight_color_combo.setMaximumWidth(80)
-        toolbar.addWidget(self.highlight_color_combo)
-        
-        toolbar.addSeparator()
-        
-        # Zoom actions
-        self.zoom_out_button = QAction("Zoom Out", self)
-        self.zoom_out_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_MediaSeekBackward))
-        self.zoom_out_button.setStatusTip("Zoom out")
-        self.zoom_out_button.triggered.connect(self._on_zoom_out)
-        toolbar.addAction(self.zoom_out_button)
-        
-        self.zoom_in_button = QAction("Zoom In", self)
-        self.zoom_in_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward))
-        self.zoom_in_button.setStatusTip("Zoom in")
-        self.zoom_in_button.triggered.connect(self._on_zoom_in)
-        toolbar.addAction(self.zoom_in_button)
-        
-        toolbar.addSeparator()
-        
-        # Incremental reading action
-        self.ir_button = QAction("Add to IR", self)
-        self.ir_button.setStatusTip("Add to incremental reading queue")
-        self.ir_button.triggered.connect(self._on_add_to_incremental_reading)
-        toolbar.addAction(self.ir_button)
-
-        # Add Read Later button
-        self.read_later_button = QAction("Read Later", self)
-        self.read_later_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
-        self.read_later_button.setStatusTip("Save position for reading later")
-        self.read_later_button.triggered.connect(self._on_add_read_later)
-        toolbar.addAction(self.read_later_button)
-
-        # Add bookmark button with dropdown menu
-        bookmark_button = QToolButton()
-        bookmark_button.setText("Bookmarks")
-        bookmark_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
-        bookmark_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        bookmark_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-
-        # Create menu for bookmarks
-        bookmark_menu = QMenu(bookmark_button)
-
-        # Add action to show all bookmarks
-        show_all_action = QAction("Show All Bookmarks", bookmark_button)
-        show_all_action.triggered.connect(self._on_show_read_later_items)
-        bookmark_menu.addAction(show_all_action)
-
-        # Add separator
-        bookmark_menu.addSeparator()
-
-        # Set the menu to the button
-        bookmark_button.setMenu(bookmark_menu)
-
-        # Connect button click to show all bookmarks
-        bookmark_button.clicked.connect(self._on_show_read_later_items)
-
-        # Add to toolbar
-        toolbar.addWidget(bookmark_button)
-        self.bookmark_button = bookmark_button  # Save reference
-
-        # Add reading stats button
-        self.stats_button = QAction("Reading Stats", self)
-        self.stats_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogInfoView))
-        self.stats_button.setStatusTip("Show reading statistics")
-        self.stats_button.triggered.connect(self._on_show_reading_stats)
-        toolbar.addAction(self.stats_button)
+        # Add fallback methods if they don't exist
+        if not hasattr(self, '_on_save'):
+            setattr(self, '_on_save', lambda: logger.warning("Save method not implemented"))
             
+        if not hasattr(self, '_on_print'):
+            setattr(self, '_on_print', lambda: logger.warning("Print method not implemented"))
+            
+        if not hasattr(self, '_on_highlight'):
+            setattr(self, '_on_highlight', lambda: logger.warning("Highlight method not implemented"))
+            
+        if not hasattr(self, '_on_extract'):
+            setattr(self, '_on_extract', lambda: logger.warning("Extract method not implemented"))
+            
+        if not hasattr(self, '_on_add_to_queue'):
+            setattr(self, '_on_add_to_queue', lambda: logger.warning("Add to queue method not implemented"))
+            
+        if not hasattr(self, '_on_zoom_in'):
+            setattr(self, '_on_zoom_in', lambda: logger.warning("Zoom in method not implemented"))
+            
+        if not hasattr(self, '_on_zoom_out'):
+            setattr(self, '_on_zoom_out', lambda: logger.warning("Zoom out method not implemented"))
+            
+        if not hasattr(self, '_on_zoom_reset'):
+            setattr(self, '_on_zoom_reset', lambda: logger.warning("Zoom reset method not implemented"))
+        
+        # First, make sure all the actions exist before trying to add them
+        if not hasattr(self, 'save_action'):
+            self.save_action = QAction(QIcon(":/icons/save.png"), "Save", self)
+            self.save_action.setToolTip("Save document")
+            self.save_action.triggered.connect(self._on_save)
+            
+        if not hasattr(self, 'print_action'):
+            self.print_action = QAction(QIcon(":/icons/print.png"), "Print", self)
+            self.print_action.setToolTip("Print document")
+            self.print_action.triggered.connect(self._on_print)
+            
+        if not hasattr(self, 'highlight_action'):
+            self.highlight_action = QAction(QIcon(":/icons/highlight.png"), "Highlight", self)
+            self.highlight_action.setToolTip("Highlight selected text")
+            self.highlight_action.triggered.connect(self._on_highlight)
+            
+        if not hasattr(self, 'extract_action'):
+            self.extract_action = QAction(QIcon(":/icons/extract.png"), "Extract", self)
+            self.extract_action.setToolTip("Extract selected text")
+            self.extract_action.triggered.connect(self._on_extract)
+            
+        if not hasattr(self, 'add_to_queue_action'):
+            self.add_to_queue_action = QAction(QIcon(":/icons/queue.png"), "Add to Queue", self)
+            self.add_to_queue_action.setToolTip("Add to reading queue")
+            self.add_to_queue_action.triggered.connect(self._on_add_to_queue)
+            
+        if not hasattr(self, 'zoom_in_action'):
+            self.zoom_in_action = QAction(QIcon(":/icons/zoom_in.png"), "Zoom In", self)
+            self.zoom_in_action.setToolTip("Zoom in")
+            self.zoom_in_action.triggered.connect(self._on_zoom_in)
+            
+        if not hasattr(self, 'zoom_out_action'):
+            self.zoom_out_action = QAction(QIcon(":/icons/zoom_out.png"), "Zoom Out", self)
+            self.zoom_out_action.setToolTip("Zoom out")
+            self.zoom_out_action.triggered.connect(self._on_zoom_out)
+            
+        if not hasattr(self, 'zoom_reset_action'):
+            self.zoom_reset_action = QAction(QIcon(":/icons/zoom_reset.png"), "Reset Zoom", self)
+            self.zoom_reset_action.setToolTip("Reset zoom")
+            self.zoom_reset_action.triggered.connect(lambda: self._on_zoom_reset())
+        
+        # Add actions to toolbar
+        toolbar.addAction(self.save_action)
+        toolbar.addAction(self.print_action)
+        toolbar.addSeparator()
+        
+        toolbar.addAction(self.highlight_action)
+        toolbar.addAction(self.extract_action)
+        toolbar.addSeparator()
+        
+        toolbar.addAction(self.add_to_queue_action)
+        
+        # Create read later button action if it doesn't exist
+        if not hasattr(self, 'read_later_button'):
+            self.read_later_button = QAction(QIcon(":/icons/read_later.png"), "Read Later", self)
+            self.read_later_button.setToolTip("Add to reading queue for later review")
+            if not hasattr(self, '_on_add_read_later'):
+                setattr(self, '_on_add_read_later', self._on_add_to_queue)  # Use add_to_queue as fallback
+            self.read_later_button.triggered.connect(self._on_add_read_later)
+        
+        toolbar.addAction(self.read_later_button)
+        
+        toolbar.addSeparator()
+        
+        toolbar.addAction(self.zoom_in_action)
+        toolbar.addAction(self.zoom_out_action)
+        toolbar.addAction(self.zoom_reset_action)
+        
         return toolbar
+
+    def _on_add_read_later(self):
+        """Add the current document to the reading queue for later reading."""
+        try:
+            # Check if document exists
+            if not self.document_id:
+                QMessageBox.warning(self, "Error", "No document is currently open.")
+                return
+                
+            # Get the document from database
+            document = self.db_session.query(Document).get(self.document_id)
+            if not document:
+                QMessageBox.warning(self, "Error", "Document not found in database.")
+                return
+                
+            # Schedule the document for later reading
+            # Default to 3 days from now if not already scheduled
+            if not document.next_reading_date:
+                document.next_reading_date = datetime.now() + timedelta(days=3)
+            
+            # Set priority if not already set
+            if not document.priority or document.priority < 50:
+                document.priority = 50
+                
+            # Save changes
+            self.db_session.add(document)
+            self.db_session.commit()
+            
+            # Show confirmation
+            QMessageBox.information(
+                self, "Added to Queue", 
+                f"Document '{document.title}' has been added to the reading queue."
+            )
+            
+            # Emit signal to update queue
+            if hasattr(self, 'documentQueued'):
+                self.documentQueued.emit(self.document_id)
+                
+        except Exception as e:
+            logger.exception(f"Error adding document to reading queue: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred while adding to reading queue: {str(e)}"
+            )
+            # Rollback in case of error
+            self.db_session.rollback()
+
+    def _on_add_to_queue(self):
+        """Add the current document to the reading queue."""
+        try:
+            # Check if document exists
+            if not self.document_id:
+                QMessageBox.warning(self, "Error", "No document is currently open.")
+                return
+                
+            # Get the document from database
+            document = self.db_session.query(Document).get(self.document_id)
+            if not document:
+                QMessageBox.warning(self, "Error", "Document not found in database.")
+                return
+                
+            # Set priority if not already set
+            if not document.priority:
+                document.priority = 50  # Default priority
+                
+            # Save changes
+            self.db_session.add(document)
+            self.db_session.commit()
+            
+            # Show confirmation
+            QMessageBox.information(
+                self, "Added to Queue", 
+                f"Document '{document.title}' has been added to the reading queue."
+            )
+            
+            # Emit signal to update queue
+            if hasattr(self, 'documentQueued'):
+                self.documentQueued.emit(self.document_id)
+                
+        except Exception as e:
+            logger.exception(f"Error adding document to queue: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred while adding to queue: {str(e)}"
+            )
+            # Rollback in case of error
+            self.db_session.rollback()
 
     def _on_previous(self):
         """Navigate to the previous document."""
@@ -2716,6 +2539,18 @@ class DocumentView(QWidget):
                 # For text edit, use zoom out method
                 self.content_edit.zoomOut(2)
 
+    def _on_zoom_reset(self):
+        """Reset zoom level to default."""
+        if hasattr(self, 'content_edit'):
+            if isinstance(self.content_edit, QWebEngineView):
+                # For web view, set zoom factor to 1.0 (default)
+                self.content_edit.setZoomFactor(1.0)
+            elif hasattr(self.content_edit, 'setFont'):
+                # For text edit, reset to default font size
+                font = self.content_edit.font()
+                font.setPointSize(10)  # Default size
+                self.content_edit.setFont(font)
+                
     def _on_add_to_incremental_reading(self):
         """Add the current document to the incremental reading queue."""
         try:

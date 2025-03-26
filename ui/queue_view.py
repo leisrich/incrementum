@@ -3,6 +3,7 @@
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
+import os
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -29,7 +30,16 @@ class QueueView(QWidget):
     documentSelected = pyqtSignal(int)  # document_id
     
     def __init__(self, db_session, settings_manager=None):
+        """Initialize with database session and settings.
+        
+        Args:
+            db_session: SQLAlchemy database session
+            settings_manager: Settings manager instance
+        """
         super().__init__()
+        
+        # Set object name to allow this widget to be found by MainWindow
+        self.setObjectName("queue_view")
         
         self.db_session = db_session
         self.settings_manager = settings_manager or SettingsManager()
@@ -119,11 +129,155 @@ class QueueView(QWidget):
             # Apply to panels
             self._apply_panel_theme(theme_name, colors)
             
+            # Apply general synchronized styling
+            self._sync_with_application_palette()
+            
             # Save the selected theme
-            if hasattr(self, 'settings_manager'):
-                self.settings_manager.set_setting('ui', 'theme', theme_name)
+            if hasattr(self, 'settings_manager') and self.settings_manager:
+                # Check if we need to update the settings manager
+                current_theme = self.settings_manager.get_setting('ui', 'theme', 'Default')
+                if current_theme != theme_name.lower() or theme_name == "Custom":
+                    logger.debug(f"Saving theme selection: {theme_name}")
+                    self.settings_manager.set_setting('ui', 'theme', theme_name.lower())
+                    
+                    # If this is the Custom theme, check if we need to set custom_theme flag
+                    if theme_name == "Custom" and not self.settings_manager.get_setting('ui', 'custom_theme', False):
+                        self.settings_manager.set_setting('ui', 'custom_theme', True)
+                    elif theme_name != "Custom" and self.settings_manager.get_setting('ui', 'custom_theme', False):
+                        self.settings_manager.set_setting('ui', 'custom_theme', False)
+                    
         except Exception as e:
             logger.exception(f"Error applying theme: {e}")
+        
+    def _get_theme_colors(self, theme_name):
+        """Get color scheme for the selected theme."""
+        colors = {
+            'background': None,
+            'foreground': None,
+            'border': None,
+            'header_background': None,
+            'header_foreground': None,
+            'item_background': None,
+            'selection_background': None,
+            'selection_foreground': None,
+            'alternate_background': None,
+        }
+        
+        # Check if we have a theme_manager in settings_manager
+        theme_from_manager = None
+        if hasattr(self, 'settings_manager') and hasattr(self.settings_manager, 'theme_manager'):
+            try:
+                # Try to get theme from the theme manager
+                theme_from_manager = self.settings_manager.theme_manager.get_theme(theme_name.lower())
+            except Exception as e:
+                logger.debug(f"Could not get theme from theme_manager: {e}")
+        
+        # If we got a theme from the theme manager, use it
+        if theme_from_manager:
+            try:
+                colors['background'] = theme_from_manager.get('background', "#FFFFFF")
+                colors['foreground'] = theme_from_manager.get('foreground', "#000000")
+                colors['border'] = theme_from_manager.get('border', "#CCCCCC")
+                colors['header_background'] = theme_from_manager.get('header_background', "#E5E5E5")
+                colors['header_foreground'] = theme_from_manager.get('header_foreground', "#000000")
+                colors['selection_background'] = theme_from_manager.get('selection_background', "#CCE8FF")
+                colors['selection_foreground'] = theme_from_manager.get('selection_foreground', "#000000")
+                colors['alternate_background'] = theme_from_manager.get('alternate_background', "#F0F0F0")
+                colors['item_background'] = theme_from_manager.get('item_background', colors['background'])
+                return colors
+            except Exception as e:
+                logger.warning(f"Error processing theme from theme_manager: {e}")
+        
+        # Default theme uses system colors
+        if theme_name == "Default":
+            # Get system palette
+            palette = QApplication.palette()
+            colors['background'] = palette.color(QPalette.ColorRole.Base).name()
+            colors['foreground'] = palette.color(QPalette.ColorRole.Text).name()
+            colors['border'] = palette.color(QPalette.ColorRole.Mid).name()
+            colors['header_background'] = palette.color(QPalette.ColorRole.Button).name()
+            colors['header_foreground'] = palette.color(QPalette.ColorRole.ButtonText).name()
+            colors['selection_background'] = palette.color(QPalette.ColorRole.Highlight).name()
+            colors['selection_foreground'] = palette.color(QPalette.ColorRole.HighlightedText).name()
+            colors['alternate_background'] = palette.color(QPalette.ColorRole.AlternateBase).name()
+            colors['item_background'] = colors['background']
+            
+        # Dark theme
+        elif theme_name == "Dark":
+            colors['background'] = "#2D2D30"
+            colors['foreground'] = "#E6E6E6"
+            colors['border'] = "#3F3F46"
+            colors['header_background'] = "#252526"
+            colors['header_foreground'] = "#E6E6E6"
+            colors['item_background'] = "#2D2D30"
+            colors['selection_background'] = "#007ACC"
+            colors['selection_foreground'] = "#FFFFFF"
+            colors['alternate_background'] = "#252526"
+            
+        # Light theme
+        elif theme_name == "Light":
+            colors['background'] = "#F5F5F5"
+            colors['foreground'] = "#1E1E1E"
+            colors['border'] = "#CCCCCC"
+            colors['header_background'] = "#E5E5E5"
+            colors['header_foreground'] = "#1E1E1E"
+            colors['item_background'] = "#FFFFFF"
+            colors['selection_background'] = "#CCE8FF"
+            colors['selection_foreground'] = "#1E1E1E"
+            colors['alternate_background'] = "#EAEAEA"
+            
+        # SuperMemo theme
+        elif theme_name == "SuperMemo":
+            colors['background'] = "#EEF5FD"
+            colors['foreground'] = "#000000"
+            colors['border'] = "#94BADE"
+            colors['header_background'] = "#D6E9FF"
+            colors['header_foreground'] = "#000000"
+            colors['item_background'] = "#EEF5FD"
+            colors['selection_background'] = "#FFD700"  # Gold for selection
+            colors['selection_foreground'] = "#000000"
+            colors['alternate_background'] = "#E5EFF9"
+            
+        # Custom theme (from settings)
+        elif theme_name == "Custom":
+            # Try to get colors from theme_file if it exists
+            if hasattr(self, 'settings_manager'):
+                theme_file = self.settings_manager.get_setting('ui', 'theme_file', '')
+                
+                if theme_file and os.path.exists(theme_file):
+                    try:
+                        # Try to load the theme from the file
+                        with open(theme_file, 'r') as f:
+                            import json
+                            theme_data = json.load(f)
+                            
+                        # Get colors from theme data
+                        colors['background'] = theme_data.get('background', "#FFFFFF")
+                        colors['foreground'] = theme_data.get('foreground', "#000000")
+                        colors['border'] = theme_data.get('border', "#CCCCCC")
+                        colors['header_background'] = theme_data.get('header_background', "#E5E5E5")
+                        colors['header_foreground'] = theme_data.get('header_foreground', "#000000")
+                        colors['selection_background'] = theme_data.get('selection_background', "#CCE8FF")
+                        colors['selection_foreground'] = theme_data.get('selection_foreground', "#000000")
+                        colors['alternate_background'] = theme_data.get('alternate_background', "#F0F0F0")
+                        colors['item_background'] = theme_data.get('item_background', colors['background'])
+                        return colors
+                        
+                    except Exception as e:
+                        logger.warning(f"Error loading custom theme from file: {e}")
+                        
+                # Fall back to individual settings if theme file didn't work
+                colors['background'] = self.settings_manager.get_setting('ui', 'custom_theme_background', "#FFFFFF")
+                colors['foreground'] = self.settings_manager.get_setting('ui', 'custom_theme_foreground', "#000000")
+                colors['border'] = self.settings_manager.get_setting('ui', 'custom_theme_border', "#CCCCCC")
+                colors['header_background'] = self.settings_manager.get_setting('ui', 'custom_theme_header_background', "#E5E5E5")
+                colors['header_foreground'] = self.settings_manager.get_setting('ui', 'custom_theme_header_foreground', "#000000")
+                colors['selection_background'] = self.settings_manager.get_setting('ui', 'custom_theme_selection_background', "#CCE8FF")
+                colors['selection_foreground'] = self.settings_manager.get_setting('ui', 'custom_theme_selection_foreground', "#000000")
+                colors['alternate_background'] = self.settings_manager.get_setting('ui', 'custom_theme_alternate_background', "#F0F0F0")
+                colors['item_background'] = self.settings_manager.get_setting('ui', 'custom_theme_item_background', colors['background'])
+            
+        return colors
 
     def _apply_tree_theme(self, theme_name, colors):
         """Apply theme to the knowledge tree."""
@@ -886,6 +1040,8 @@ class QueueView(QWidget):
                 # If dock exists and is hidden, show it
                 if self.tree_dock.isHidden():
                     self.tree_dock.show()
+                    # Ensure it has reasonable size
+                    self.tree_dock.resize(300, self.tree_dock.height())
                 return
                 
             # Create a new dock widget
@@ -894,9 +1050,15 @@ class QueueView(QWidget):
             self.tree_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | 
                                           Qt.DockWidgetArea.RightDockWidgetArea)
             
+            # Set minimum width to prevent it from becoming too small
+            self.tree_panel.setMinimumWidth(250)
+            
             # Remove tree panel from splitter and add to dock
             self.main_splitter.replaceWidget(0, QWidget())  # Replace with empty widget
             self.tree_dock.setWidget(self.tree_panel)
+            
+            # Set a reasonable size for the dock
+            self.tree_dock.setMinimumWidth(300)
             
             # Add dock widget to main window
             main_window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.tree_dock)
@@ -915,6 +1077,10 @@ class QueueView(QWidget):
             # Save settings
             if hasattr(self, 'settings_manager'):
                 self.settings_manager.set_setting('queue_view', 'tree_panel_docked', True)
+                
+            # Resize the dock to a reasonable width (at least 25% of main window width)
+            width = main_window.width()
+            self.tree_dock.resize(max(300, int(width * 0.25)), self.tree_dock.height())
             
         except Exception as e:
             logger.exception(f"Error making tree panel dockable: {e}")
@@ -924,8 +1090,25 @@ class QueueView(QWidget):
         """Show the tree dock if it exists."""
         try:
             if hasattr(self, 'tree_dock') and self.tree_dock:
+                # Get the main window
+                main_window = self.parent()
+                while main_window and not isinstance(main_window, QMainWindow):
+                    main_window = main_window.parent()
+                    
+                # Show the dock
                 self.tree_dock.show()
                 self.tree_dock.raise_()
+                
+                # Resize to a reasonable width if it appears too small
+                if self.tree_dock.width() < 200:
+                    width = main_window.width() if main_window else 800
+                    self.tree_dock.resize(max(300, int(width * 0.25)), self.tree_dock.height())
+                    
+                # Update action state in main window if it exists
+                if main_window:
+                    action = main_window.findChild(QAction, "action_toggle_knowledge_tree")
+                    if action and isinstance(action, QAction):
+                        action.setChecked(True)
             else:
                 # Fallback to showing the regular tree panel
                 self._toggle_tree_panel()
@@ -936,6 +1119,16 @@ class QueueView(QWidget):
         """Handle dock widget visibility changes."""
         try:
             self.show_tree_btn.setVisible(not visible)
+            
+            # Update action state in main window
+            main_window = self.parent()
+            while main_window and not isinstance(main_window, QMainWindow):
+                main_window = main_window.parent()
+            
+            if main_window:
+                action = main_window.findChild(QAction, "action_toggle_knowledge_tree")
+                if action and isinstance(action, QAction):
+                    action.setChecked(visible)
             
             # Save settings
             if hasattr(self, 'settings_manager'):
@@ -2255,83 +2448,297 @@ class QueueView(QWidget):
                 child_path = f"{path}/{child.text(0)}" if path else child.text(0)
                 self._restore_expanded_state(child, child_path, expanded_items)
 
-    def _get_theme_colors(self, theme_name):
-        """Get color scheme for the selected theme."""
-        colors = {
-            'background': None,
-            'foreground': None,
-            'border': None,
-            'header_background': None,
-            'header_foreground': None,
-            'item_background': None,
-            'selection_background': None,
-            'selection_foreground': None,
-            'alternate_background': None,
-        }
+    def _on_queue_search(self):
+        """Handle search in the queue table."""
+        query = self.queue_search_box.text().lower()
+        if not query:
+            # If query is empty, just reload the data
+            self._load_queue_data()
+            return
+            
+        # Show only rows that match the query
+        for row in range(self.queue_table.rowCount()):
+            title = self.queue_table.item(row, 0).text().lower()
+            category = self.queue_table.item(row, 3).text().lower()
+            
+            # Match if query is in title or category
+            matches = query in title or query in category
+            self.queue_table.setRowHidden(row, not matches)
+
+    def _on_sort_changed(self):
+        """Handle changes to the sort order."""
+        # Reload queue data with new sort settings
+        self._load_queue_data()
+
+    def _clear_queue_filters(self):
+        """Clear all filters and reload the queue."""
+        self.queue_search_box.clear()
+        self.show_favorites_only.setChecked(False)
+        self.sort_combo.setCurrentIndex(0)  # Back to Priority
+        self.sort_asc_button.setChecked(False)  # Back to descending
+        self._load_queue_data()
+
+    def _select_category_by_name(self, category_name):
+        """Select a category in the tree by name."""
+        try:
+            # Iterate through all top-level items
+            for i in range(self.knowledge_tree.topLevelItemCount()):
+                item = self.knowledge_tree.topLevelItem(i)
+                if item.text(0) == category_name:
+                    self.knowledge_tree.setCurrentItem(item)
+                    return True
+                    
+            # If not found at top level, search all items
+            found = self._find_item_by_text(self.knowledge_tree.invisibleRootItem(), category_name)
+            if found:
+                self.knowledge_tree.setCurrentItem(found)
+                # Ensure parent items are expanded
+                parent = found.parent()
+                while parent and parent != self.knowledge_tree.invisibleRootItem():
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+                return True
+                
+            return False
+        except Exception as e:
+            logger.exception(f"Error selecting category: {e}")
+            return False
+
+    def _find_item_by_text(self, parent_item, text):
+        """Find a tree item by its text value."""
+        # Search direct children
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            if child.text(0) == text:
+                return child
+                
+            # Recursively search grandchildren
+            found = self._find_item_by_text(child, text)
+            if found:
+                return found
+                
+        return None
+
+    def update_settings(self):
+        """Update the UI based on changed settings.
         
-        # Default theme uses system colors
-        if theme_name == "Default":
-            # Get system palette
-            palette = QApplication.palette()
-            colors['background'] = palette.color(QPalette.ColorRole.Base).name()
-            colors['foreground'] = palette.color(QPalette.ColorRole.Text).name()
-            colors['border'] = palette.color(QPalette.ColorRole.Mid).name()
-            colors['header_background'] = palette.color(QPalette.ColorRole.Button).name()
-            colors['header_foreground'] = palette.color(QPalette.ColorRole.ButtonText).name()
-            colors['selection_background'] = palette.color(QPalette.ColorRole.Highlight).name()
-            colors['selection_foreground'] = palette.color(QPalette.ColorRole.HighlightedText).name()
-            colors['alternate_background'] = palette.color(QPalette.ColorRole.AlternateBase).name()
+        This method is called when settings are changed elsewhere in the application,
+        such as when a theme is changed through the settings dialog.
+        """
+        try:
+            logger.debug("Updating QueueView settings")
             
-        # Dark theme
-        elif theme_name == "Dark":
-            colors['background'] = "#2D2D30"
-            colors['foreground'] = "#E6E6E6"
-            colors['border'] = "#3F3F46"
-            colors['header_background'] = "#252526"
-            colors['header_foreground'] = "#E6E6E6"
-            colors['item_background'] = "#2D2D30"
-            colors['selection_background'] = "#007ACC"
-            colors['selection_foreground'] = "#FFFFFF"
-            colors['alternate_background'] = "#252526"
+            if hasattr(self, 'settings_manager') and self.settings_manager:
+                # Get current theme setting
+                theme = self.settings_manager.get_setting('ui', 'theme', 'Default')
+                is_custom = self.settings_manager.get_setting('ui', 'custom_theme', False)
+                
+                logger.debug(f"Applying updated theme: {theme} (custom: {is_custom})")
+                
+                # For custom themes, ensure "Custom" is selected in combo box
+                if is_custom:
+                    theme = "Custom"
+                
+                # Find theme in combo box
+                index = self.theme_combo.findText(theme)
+                if index >= 0:
+                    # Update the combo box to match the current theme
+                    self.theme_combo.setCurrentIndex(index)
+                else:
+                    # If theme not found, update the first item (Default)
+                    self.theme_combo.setCurrentIndex(0)
+                    # And apply the theme directly
+                    self._apply_theme(0)
+                    
+                # Refresh the queue display with any new settings
+                self._load_queue_data()
+                    
+                # Restore any saved state
+                self.restoreState()
+                    
+                # Apply all styling to ensure complete theme integration
+                self._sync_with_application_palette()
+        except Exception as e:
+            logger.exception(f"Error updating settings in queue view: {e}")
             
-        # Light theme
-        elif theme_name == "Light":
-            colors['background'] = "#F5F5F5"
-            colors['foreground'] = "#1E1E1E"
-            colors['border'] = "#CCCCCC"
-            colors['header_background'] = "#E5E5E5"
-            colors['header_foreground'] = "#1E1E1E"
-            colors['item_background'] = "#FFFFFF"
-            colors['selection_background'] = "#CCE8FF"
-            colors['selection_foreground'] = "#1E1E1E"
-            colors['alternate_background'] = "#EAEAEA"
+        # Return True to indicate the update was processed
+        return True
+
+    def _sync_with_application_palette(self):
+        """Synchronize the styling with the main application palette.
+        
+        This ensures that the queue view components match the overall application theme.
+        """
+        try:
+            # Get the application palette
+            app_palette = QApplication.palette()
             
-        # SuperMemo theme
-        elif theme_name == "SuperMemo":
-            colors['background'] = "#EEF5FD"
-            colors['foreground'] = "#000000"
-            colors['border'] = "#94BADE"
-            colors['header_background'] = "#D6E9FF"
-            colors['header_foreground'] = "#000000"
-            colors['item_background'] = "#EEF5FD"
-            colors['selection_background'] = "#FFD700"  # Gold for selection
-            colors['selection_foreground'] = "#000000"
-            colors['alternate_background'] = "#E5EFF9"
+            # Apply palette colors to all child widgets
+            for widget in self.findChildren(QWidget):
+                widget.setPalette(app_palette)
             
-        # Custom theme (from settings)
-        elif theme_name == "Custom":
-            # Try to get custom colors from settings
-            if hasattr(self, 'settings_manager'):
-                colors['background'] = self.settings_manager.get_setting('ui', 'custom_theme_background', "#FFFFFF")
-                colors['foreground'] = self.settings_manager.get_setting('ui', 'custom_theme_foreground', "#000000")
-                colors['border'] = self.settings_manager.get_setting('ui', 'custom_theme_border', "#CCCCCC")
-                colors['header_background'] = self.settings_manager.get_setting('ui', 'custom_theme_header_background', "#E5E5E5")
-                colors['header_foreground'] = self.settings_manager.get_setting('ui', 'custom_theme_header_foreground', "#000000")
-                colors['selection_background'] = self.settings_manager.get_setting('ui', 'custom_theme_selection_background', "#CCE8FF")
-                colors['selection_foreground'] = self.settings_manager.get_setting('ui', 'custom_theme_selection_foreground', "#000000")
-                colors['alternate_background'] = self.settings_manager.get_setting('ui', 'custom_theme_alternate_background', "#F0F0F0")
+            # Apply stylesheet for consistent look
+            if hasattr(self, 'settings_manager') and self.settings_manager:
+                theme = self.settings_manager.get_setting('ui', 'theme', 'Default').lower()
+                is_custom = self.settings_manager.get_setting('ui', 'custom_theme', False)
+                
+                # Get base colors from the current theme
+                colors = self._get_theme_colors("Custom" if is_custom else theme.capitalize())
+                
+                # Create a stylesheet to apply consistent styling
+                style = f"""
+                    QTreeWidget, QTableWidget {{
+                        background-color: {colors['background']};
+                        color: {colors['foreground']};
+                        border: 1px solid {colors['border']};
+                        selection-background-color: {colors['selection_background']};
+                        selection-color: {colors['selection_foreground']};
+                        alternate-background-color: {colors['alternate_background']};
+                    }}
+                    
+                    QTreeWidget::item, QTableWidget::item {{
+                        padding: 2px;
+                    }}
+                    
+                    QHeaderView::section {{
+                        background-color: {colors['header_background']};
+                        color: {colors['header_foreground']};
+                        padding: 4px;
+                        border: 1px solid {colors['border']};
+                    }}
+                    
+                    QTabWidget::pane {{
+                        border: 1px solid {colors['border']};
+                    }}
+                    
+                    QTabBar::tab {{
+                        background-color: {colors['header_background']};
+                        color: {colors['header_foreground']};
+                        padding: 4px 10px;
+                        border: 1px solid {colors['border']};
+                        border-bottom: none;
+                        border-top-left-radius: 4px;
+                        border-top-right-radius: 4px;
+                        margin-right: 2px;
+                    }}
+                    
+                    QTabBar::tab:selected {{
+                        background-color: {colors['background']};
+                        border-bottom: 1px solid {colors['background']};
+                    }}
+                    
+                    QSplitter::handle {{
+                        background-color: {colors['border']};
+                    }}
+                    
+                    QGroupBox {{
+                        border: 1px solid {colors['border']};
+                        border-radius: 3px;
+                        margin-top: 0.5em;
+                        padding-top: 0.5em;
+                    }}
+                    
+                    QGroupBox::title {{
+                        subcontrol-origin: margin;
+                        subcontrol-position: top center;
+                        padding: 0 3px;
+                    }}
+                """
+                
+                # Apply the stylesheet
+                self.setStyleSheet(style)
+                
+                # Apply specific styling for SuperMemo-like theme if needed
+                if theme == "supermemo":
+                    self._apply_supermemo_styling()
+        except Exception as e:
+            logger.exception(f"Error synchronizing with application palette: {e}")
+
+    def _apply_supermemo_styling(self):
+        """Apply SuperMemo-specific styling to the queue view."""
+        try:
+            # SuperMemo typically uses a blue gradient background and gold highlights
+            supermemo_style = """
+                QTreeWidget, QTableWidget {
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EEF5FD, stop:1 #D6E9FF);
+                    alternate-background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E5EFF9, stop:1 #C6DFFF);
+                }
+                
+                QTreeWidget::item:selected, QTableWidget::item:selected {
+                    background-color: #FFD700;
+                    color: #000000;
+                }
+                
+                QTreeWidget::branch:has-children {
+                    border-image: none;
+                    image: url(":/icons/branch-closed.png");
+                }
+                
+                QTreeWidget::branch:has-children:open {
+                    image: url(":/icons/branch-open.png");
+                }
+                
+                QHeaderView::section {
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #D6E9FF, stop:1 #94BADE);
+                    border: 1px solid #7BA7CE;
+                }
+                
+                QTabBar::tab:selected {
+                    background-color: #FFD700;
+                    color: #000000;
+                }
+            """
             
-        return colors
+            # Extend the current stylesheet
+            current_style = self.styleSheet()
+            self.setStyleSheet(current_style + supermemo_style)
+            
+            # Set specific colors for knowledge tree items
+            for i in range(self.knowledge_tree.topLevelItemCount()):
+                self._style_tree_item_supermemo(self.knowledge_tree.topLevelItem(i))
+                
+        except Exception as e:
+            logger.exception(f"Error applying SuperMemo styling: {e}")
+
+    def _style_tree_item_supermemo(self, item):
+        """Apply SuperMemo styling to a tree item recursively."""
+        if not item:
+            return
+            
+        # Get document count
+        count_str = item.text(1)
+        try:
+            count = int(count_str) if count_str else 0
+        except ValueError:
+            count = 0
+            
+        # Style based on document count
+        if count > 50:
+            item.setForeground(0, QBrush(QColor("#8B0000")))  # Dark red for very active
+            item.setFont(0, self._get_supermemo_font(True, 12))
+        elif count > 20:
+            item.setForeground(0, QBrush(QColor("#A52A2A")))  # Brown-red for active
+            item.setFont(0, self._get_supermemo_font(True, 11))
+        elif count > 10:
+            item.setForeground(0, QBrush(QColor("#000080")))  # Navy for moderately active
+            item.setFont(0, self._get_supermemo_font(True, 10))
+        elif count > 0:
+            item.setForeground(0, QBrush(QColor("#006400")))  # Dark green for some content
+            item.setFont(0, self._get_supermemo_font(False, 10))
+        else:
+            item.setForeground(0, QBrush(QColor("#696969")))  # Gray for no content
+            item.setFont(0, self._get_supermemo_font(False, 9))
+            
+        # Process children recursively
+        for i in range(item.childCount()):
+            self._style_tree_item_supermemo(item.child(i))
+
+    def _get_supermemo_font(self, bold=False, size=10):
+        """Get a font styled for SuperMemo theme."""
+        font = QFont("Arial")
+        font.setPointSize(size)
+        font.setBold(bold)
+        return font
 
     def set_current_document(self, document_id):
         """Set the current document in the queue view.
@@ -2369,7 +2776,7 @@ class QueueView(QWidget):
                     
         except Exception as e:
             logger.exception(f"Error setting current document: {e}")
-            
+
     def _add_document_to_queue(self, document, temporary=False):
         """Add a document to the queue table.
         
@@ -2463,74 +2870,3 @@ class QueueView(QWidget):
                 
         except Exception as e:
             logger.exception(f"Error adding document to queue: {e}")
-
-    def _on_queue_search(self):
-        """Handle search in the queue table."""
-        query = self.queue_search_box.text().lower()
-        if not query:
-            # If query is empty, just reload the data
-            self._load_queue_data()
-            return
-            
-        # Show only rows that match the query
-        for row in range(self.queue_table.rowCount()):
-            title = self.queue_table.item(row, 0).text().lower()
-            category = self.queue_table.item(row, 3).text().lower()
-            
-            # Match if query is in title or category
-            matches = query in title or query in category
-            self.queue_table.setRowHidden(row, not matches)
-
-    def _on_sort_changed(self):
-        """Handle changes to the sort order."""
-        # Reload queue data with new sort settings
-        self._load_queue_data()
-
-    def _clear_queue_filters(self):
-        """Clear all filters and reload the queue."""
-        self.queue_search_box.clear()
-        self.show_favorites_only.setChecked(False)
-        self.sort_combo.setCurrentIndex(0)  # Back to Priority
-        self.sort_asc_button.setChecked(False)  # Back to descending
-        self._load_queue_data()
-
-    def _select_category_by_name(self, category_name):
-        """Select a category in the tree by name."""
-        try:
-            # Iterate through all top-level items
-            for i in range(self.knowledge_tree.topLevelItemCount()):
-                item = self.knowledge_tree.topLevelItem(i)
-                if item.text(0) == category_name:
-                    self.knowledge_tree.setCurrentItem(item)
-                    return True
-                    
-            # If not found at top level, search all items
-            found = self._find_item_by_text(self.knowledge_tree.invisibleRootItem(), category_name)
-            if found:
-                self.knowledge_tree.setCurrentItem(found)
-                # Ensure parent items are expanded
-                parent = found.parent()
-                while parent and parent != self.knowledge_tree.invisibleRootItem():
-                    parent.setExpanded(True)
-                    parent = parent.parent()
-                return True
-                
-            return False
-        except Exception as e:
-            logger.exception(f"Error selecting category: {e}")
-            return False
-
-    def _find_item_by_text(self, parent_item, text):
-        """Find a tree item by its text value."""
-        # Search direct children
-        for i in range(parent_item.childCount()):
-            child = parent_item.child(i)
-            if child.text(0) == text:
-                return child
-                
-            # Recursively search grandchildren
-            found = self._find_item_by_text(child, text)
-            if found:
-                return found
-                
-        return None
