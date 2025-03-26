@@ -322,3 +322,22 @@ Visit the Incrementum GitHub repository for:
 
 Remember that incremental learning is a process - start small, focus on quality extracts, and maintain a consistent review schedule for best results.
 
+## Documentation
+
+### User Guides
+- [Workflow Guide](WORKFLOW.md) - How to use Incrementum for incremental reading and learning
+- [Import Options](IMPORT_OPTIONS.md) - Different ways to import content
+- [YouTube Integration](YOUTUBE_README.md) - How to use YouTube features
+- [YouTube Transcripts](YOUTUBE_TRANSCRIPTS.md) - Working with YouTube video transcripts
+- [RSS Feed Management](user_guide/rss_feed_management.md) - Managing RSS feeds and automatic content import
+- [Custom Themes](custom_themes.md) - Creating and using custom themes
+- [Audio Files](user_guide/audio_files.md) - Working with audio files
+
+### Developer Guides
+- [Installation Guide](INSTALL.md) - How to install Incrementum
+- [Build Instructions](BUILD.md) - How to build Incrementum
+- [Packaging](PACKAGING.md) - How to package Incrementum for distribution
+- [FSRS Algorithm](FSRS_README.md) - Technical details about the spaced repetition algorithm
+- [JavaScript Libraries](JAVASCRIPT_LIBRARIES.md) - Information about the JavaScript libraries used
+- [RSS Implementation](developer/rss_implementation.md) - Technical details about the RSS feed functionality
+
