@@ -47,3 +47,5 @@ data/
 arxiv/
 incrementum_*
 run.sh
+incrementum.db
+bin/setup.sh
