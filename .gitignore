@@ -49,3 +49,5 @@ incrementum_*
 run.sh
 incrementum.db
 bin/setup.sh
+check_pyqt.py
+theme_preview.sh

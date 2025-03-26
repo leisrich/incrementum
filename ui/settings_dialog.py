@@ -149,18 +149,45 @@ class SettingsDialog(QDialog):
         # Theme selector
         self.theme_combo = QComboBox()
         
-        # Add built-in themes and get available custom themes
+        # Add built-in themes
         self.theme_combo.addItem("Light", "light")
         self.theme_combo.addItem("Dark", "dark")
         self.theme_combo.addItem("System", "system")
         
-        # Load available custom themes
+        # Add predefined themes
+        predefined_themes = [
+            ("Incrementum", "incrementum"),  # Our branded theme
+            ("Nord", "nord"),
+            ("Solarized Light", "solarized_light"),
+            ("Solarized Dark", "solarized_dark"),
+            ("Dracula", "dracula"),
+            ("Cyberpunk", "cyberpunk"),
+            ("Material Light", "material_light"),
+            ("Material Dark", "material_dark"),
+            ("Monokai", "monokai"),
+            ("GitHub Light", "github_light"),
+            ("GitHub Dark", "github_dark"),
+            ("Pastel", "pastel")
+        ]
+        
+        self.theme_combo.insertSeparator(self.theme_combo.count())
+        
+        for display_name, theme_name in predefined_themes:
+            self.theme_combo.addItem(display_name, theme_name)
+        
+        # Add custom themes
         custom_themes = self.theme_manager.get_available_themes()
-        if custom_themes:
+        custom_theme_list = [t for t in custom_themes if t not in ["light", "dark", "system", "nord", 
+                                                             "solarized_light", "solarized_dark", 
+                                                             "dracula", "cyberpunk", "material_light", 
+                                                             "material_dark", "monokai", "github_light", 
+                                                             "github_dark", "pastel", "incrementum"]]
+        
+        if custom_theme_list:
             self.theme_combo.insertSeparator(self.theme_combo.count())
-            for theme_name in custom_themes:
-                if theme_name not in ["light", "dark", "system"]:
-                    self.theme_combo.addItem(f"Custom: {theme_name}", theme_name)
+            for theme_name in custom_theme_list:
+                display_name = theme_name.replace('_', ' ').title()
+                self.theme_combo.addItem(f"Custom: {display_name}", theme_name)
         
         # Set current theme
         current_theme = self.settings_manager.get_setting("ui", "theme", "light")

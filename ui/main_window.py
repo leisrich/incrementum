@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QProgressDialog
 )
 from PyQt6.QtCore import Qt, QSize, QModelIndex, pyqtSignal, pyqtSlot, QTimer, QPoint, QThread, QByteArray, QUrl
-from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QAction
+from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QAction, QActionGroup
 
 from core.knowledge_base.models import init_database, Document, Category, Extract, LearningItem, Tag, YouTubePlaylistVideo
 from core.document_processor.processor import DocumentProcessor
@@ -224,13 +224,8 @@ class MainWindow(QMainWindow):
         self.settings_manager = SettingsManager()
         
         # Initialize models
-        # self.extract_model = ExtractModel(self.db_session) # Not implemented yet
         self.document_model = DocumentModel(self.db_session)
         self.category_model = CategoryModel(self.db_session)
-        # self.queue_model = QueueModel(self.db_session) # Not implemented yet
-        # self.learning_item_model = LearningItemModel(self.db_session) # Not implemented yet
-        # self.document_tag_model = DocumentTagModel(self.db_session) # Not implemented yet
-        # self.tag_model = TagModel(self.db_session) # Not implemented yet
         
         # Initialize managers
         self.extract_processor = ExtractProcessor(self.db_session)
@@ -247,39 +242,48 @@ class MainWindow(QMainWindow):
         # Set window properties
         self.setMinimumSize(1200, 800)
         
-        # Create UI components
+        # Create UI components in proper order
         self._create_actions()
-        self._create_menu_bar()
+        
+        # CRITICAL: Create the menu bar with basic structure first
+        menu_bar = QMenuBar(self)
+        self.setMenuBar(menu_bar)
+        
+        # Create menu references that will be needed by other methods
+        self.file_menu = menu_bar.addMenu("&File")
+        self.edit_menu = menu_bar.addMenu("&Edit")
+        self.view_menu = menu_bar.addMenu("&View")
+        self.learning_menu = menu_bar.addMenu("&Learning")
+        self.tools_menu = menu_bar.addMenu("&Tools")
+        self.help_menu = menu_bar.addMenu("&Help")
+        
+        # Now that menus exist, we can create the toolbar
         self._create_tool_bar()
         
-        # Initialize recent files menu
-        self._update_recent_files_menu()
-        
+        # Create other UI elements
         self._create_status_bar()
         self._create_central_widget()
         self._create_docks()
+        
+        # Now that view_menu exists, set up dock options
         self._setup_dock_options()
         
-        # Initialize UI state
+        # Populate menus with actions
+        self._create_menus()
+        
+        # Initialize recent files menu - now handled in _create_menus()
+        # self.recent_files_menu = QMenu("Recent Files", self)
+        # self.file_menu.addMenu(self.recent_files_menu)
+        self._update_recent_files_menu()
+        
+        # Rest of initialization
         self._load_recent_documents()
         self._update_status()
-        
-        # Restore saved layout if available
         self._restore_saved_layout()
-        
-        # Restore session (open tabs) if available
         self._restore_session()
-        
-        # Set up auto-save timer
         self._setup_auto_save()
-        
-        # Apply settings
         self._apply_settings()
-        
-        # Show startup statistics if configured
         self._check_startup_statistics()
-        
-        # Start RSS feed updater if enabled
         self._start_rss_updater()
         
         # Initialization is complete
@@ -290,7 +294,7 @@ class MainWindow(QMainWindow):
         
         # Connect exit action
         self.action_exit.triggered.connect(self.close)
-    
+
     def _set_application_icon(self):
         """Set application icon based on platform."""
         import platform
@@ -701,6 +705,12 @@ class MainWindow(QMainWindow):
         self.action_tab_docks = QAction("Tab PDF Viewers", self)
         self.action_tab_docks.triggered.connect(self._on_tab_docks)
 
+        # Add toolbar toggle action
+        self.action_toggle_toolbar = QAction("Toolbar", self)
+        self.action_toggle_toolbar.setCheckable(True)
+        self.action_toggle_toolbar.setChecked(True)
+        self.action_toggle_toolbar.triggered.connect(self._on_toggle_toolbar)
+        
         # Import actions
         self.action_import_file = QAction("Import File", self)
         self.action_import_file.setStatusTip("Import a document from a file")
@@ -750,6 +760,10 @@ class MainWindow(QMainWindow):
         self.action_youtube_playlists = QAction(QIcon.fromTheme("video-display"), "YouTube Playlists", self)
         self.action_youtube_playlists.setStatusTip("Manage YouTube playlists")
         self.action_youtube_playlists.triggered.connect(self.open_youtube_playlists)
+        
+        # Add Switch action for the toolbar
+        self.action_switch = QAction("Switch", self)
+        self.action_switch.setStatusTip("Switch between documents")
         
     def _start_rss_updater(self):
         """Start the RSS feed update timer if enabled."""
@@ -871,97 +885,244 @@ class MainWindow(QMainWindow):
             
    
     def _create_menu_bar(self):
-        """Create application menu bar and menus."""
-        menu_bar = self.menuBar()
+        """Create the application menu bar."""
+        # ... existing code ...
         
-        # File menu
-        file_menu = menu_bar.addMenu("&File")
-        file_menu.addAction(self.action_import_file)
-        file_menu.addAction(self.action_import_url)
-        file_menu.addAction(self.action_import_arxiv)
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_save)
-        file_menu.addAction(self.action_save_as)
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_export_pdf)
-        file_menu.addAction(self.action_import_knowledge)
-        file_menu.addAction(self.action_export_knowledge)
-        file_menu.addAction(self.action_export_all_data)
-        file_menu.addSeparator()
+        # View Menu
+        self.view_menu = self.menuBar().addMenu("&View")
         
-        # Add Recent Files menu
-        file_menu.addMenu(self.recent_files_menu)
-        self._update_recent_files_menu()
-        file_menu.addSeparator()
+        # Add theme submenu
+        self.theme_menu = self.view_menu.addMenu("Themes")
+        self._setup_theme_menu()
         
-        file_menu.addAction(self.action_exit)
+        # We'll add panels menu later in the complete menu bar setup
         
-        # Edit menu
-        edit_menu = menu_bar.addMenu("&Edit")
-        edit_menu.addAction(self.action_new_extract)
-        edit_menu.addAction(self.action_new_learning_item)
-        edit_menu.addSeparator()
-        edit_menu.addAction(self.action_manage_tags)
-        
-        # View menu
-        self.view_menu = menu_bar.addMenu("&View")
-        
-        # Panel toggles
-        panels_menu = self.view_menu.addMenu("Panels")
-        panels_menu.addAction(self.action_toggle_category_panel)
-        panels_menu.addAction(self.action_toggle_search_panel)
-        panels_menu.addAction(self.action_toggle_stats_panel)
-        panels_menu.addAction(self.action_toggle_queue_panel)  # Add queue panel toggle
-        panels_menu.addAction(self.action_toggle_knowledge_tree)  # Add knowledge tree toggle
-        
-        # Add dock arrangement actions
-        self.view_menu.addSeparator()
-        self.view_menu.addAction(self.action_tile_docks)
-        self.view_menu.addAction(self.action_cascade_docks)
-        self.view_menu.addAction(self.action_tab_docks)
-        
-        # Learning menu
-        learning_menu = menu_bar.addMenu("&Learning")
-        learning_menu.addAction(self.action_start_review)
-        learning_menu.addSeparator()
-        learning_menu.addAction(self.action_browse_extracts)
-        learning_menu.addAction(self.action_browse_learning_items)
-        
-        # Tools menu
-        self.tools_menu = menu_bar.addMenu("&Tools")
-        self.tools_menu.addAction(self.action_start_review)
-        self.tools_menu.addAction(self.action_view_queue)
-        self.tools_menu.addAction(self.action_prev_document)
-        self.tools_menu.addAction(self.action_read_next)
-        self.tools_menu.addSeparator()
-        self.tools_menu.addAction(self.action_search)
-        self.tools_menu.addAction(self.action_view_network)
-        self.tools_menu.addSeparator()
-        self.tools_menu.addAction(self.action_backup_restore)
-        self.tools_menu.addAction(self.action_settings)
-        self.tools_menu.addAction(self.action_statistics)
-        self.tools_menu.addAction(self.action_summarize_document)
-        
-        # RSS and YouTube
-        self.tools_menu.addSeparator()
-        self.tools_menu.addAction(self.action_rss_feeds)
-        self.tools_menu.addAction(self.action_youtube_playlists)  # Add YouTube Playlists action
-        
-        # Other tools
-        self.tools_menu.addAction(self.action_tag_manager)
-        self.tools_menu.addAction(self.action_batch_processor)
-        self.tools_menu.addAction(self.action_review_manager)
-        self.tools_menu.addAction(self.action_backup)
-        
-        # Help menu
-        help_menu = menu_bar.addMenu("&Help")
-        help_action = help_menu.addAction("Documentation")
-        help_action.triggered.connect(self._on_show_documentation)
-        layout_help_action = help_menu.addAction("Interface Layout")
-        layout_help_action.triggered.connect(self._on_layout_help)
-        about_action = help_menu.addAction("About")
-        about_action.triggered.connect(self._on_about)
+        # ... rest of existing code ...
     
+    def _setup_theme_menu(self):
+        """Set up the theme selection menu with all available themes."""
+        if not hasattr(self, 'theme_manager'):
+            self.theme_manager = ThemeManager(self.settings_manager)
+            
+        # Clear existing actions
+        self.theme_menu.clear()
+        
+        # Get all available themes
+        themes = self.theme_manager.get_available_themes()
+        
+        # Create a theme action group for radio button behavior
+        self.theme_action_group = QActionGroup(self)
+        self.theme_action_group.setExclusive(True)
+        
+        # Add built-in themes first
+        self._add_theme_action("Light", "light")
+        self._add_theme_action("Dark", "dark")
+        self._add_theme_action("System", "system")
+        
+        # Add separator
+        self.theme_menu.addSeparator()
+        
+        # Add predefined themes
+        predefined_themes = [
+            ("Incrementum", "incrementum"),  # Our branded theme
+            ("Nord", "nord"),
+            ("Solarized Light", "solarized_light"),
+            ("Solarized Dark", "solarized_dark"),
+            ("Dracula", "dracula"),
+            ("Cyberpunk", "cyberpunk"),
+            ("Material Light", "material_light"),
+            ("Material Dark", "material_dark"),
+            ("Monokai", "monokai"),
+            ("GitHub Light", "github_light"),
+            ("GitHub Dark", "github_dark"),
+            ("Pastel", "pastel")
+        ]
+        
+        for display_name, theme_name in predefined_themes:
+            self._add_theme_action(display_name, theme_name)
+        
+        # Add separator
+        self.theme_menu.addSeparator()
+        
+        # Add actions for custom themes
+        custom_themes = [t for t in themes if t not in ["light", "dark", "system", "nord", 
+                                                      "solarized_light", "solarized_dark", 
+                                                      "dracula", "cyberpunk", "material_light", 
+                                                      "material_dark", "monokai", "github_light", 
+                                                      "github_dark", "pastel", "incrementum"]]
+        
+        if custom_themes:
+            for theme_name in custom_themes:
+                # Make the display name more readable
+                display_name = theme_name.replace('_', ' ').title()
+                self._add_theme_action(f"Custom: {display_name}", theme_name)
+            
+            self.theme_menu.addSeparator()
+        
+        # Add option to create/import custom themes
+        create_theme_action = QAction("Create New Theme...", self)
+        create_theme_action.triggered.connect(self._on_create_theme)
+        self.theme_menu.addAction(create_theme_action)
+        
+        import_theme_action = QAction("Import Theme...", self)
+        import_theme_action.triggered.connect(self._on_import_theme)
+        self.theme_menu.addAction(import_theme_action)
+        
+        # Update checked state based on current theme
+        self._update_theme_menu()
+    
+    def _add_theme_action(self, display_name, theme_name):
+        """Add a theme action to the theme menu.
+        
+        Args:
+            display_name (str): Display name for the action
+            theme_name (str): Name of the theme to apply
+        """
+        action = QAction(display_name, self)
+        action.setCheckable(True)
+        action.setData(theme_name)
+        action.triggered.connect(lambda: self._on_theme_selected(theme_name))
+        self.theme_action_group.addAction(action)
+        self.theme_menu.addAction(action)
+        
+    def _update_theme_menu(self):
+        """Update the checked state of theme menu actions based on current theme."""
+        if not hasattr(self, 'theme_menu'):
+            return
+            
+        current_theme = self.settings_manager.get_setting("ui", "theme", "light")
+        
+        # Find and check the correct action
+        for action in self.theme_action_group.actions():
+            theme_name = action.data()
+            action.setChecked(theme_name == current_theme)
+    
+    @pyqtSlot(str)
+    def _on_theme_selected(self, theme_name):
+        """Handle theme selection from menu.
+        
+        Args:
+            theme_name (str): Name of the selected theme
+        """
+        # Update settings
+        self.settings_manager.set_setting("ui", "theme", theme_name)
+        self.settings_manager.set_setting("ui", "custom_theme", False)  # Not using custom path
+        
+        # Apply the theme
+        app = QApplication.instance()
+        if app and hasattr(self, 'theme_manager'):
+            self.theme_manager.apply_theme(app, theme_name)
+            
+            # Show a brief notification
+            self.statusBar().showMessage(f"Theme changed to {theme_name}", 3000)
+    
+    @pyqtSlot()
+    def _on_create_theme(self):
+        """Create a new custom theme."""
+        if not hasattr(self, 'theme_manager'):
+            self.theme_manager = ThemeManager(self.settings_manager)
+            
+        # Ask for file name and location
+        file_dialog = QFileDialog(self)
+        file_dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        file_dialog.setNameFilter("Theme Files (*.json)")
+        file_dialog.setDefaultSuffix("json")
+        
+        if file_dialog.exec():
+            file_path = file_dialog.selectedFiles()[0]
+            if file_path:
+                # Create the theme template
+                success = self.theme_manager.create_theme_template(file_path)
+                
+                if success:
+                    # Ask if the user wants to apply the theme
+                    reply = QMessageBox.question(
+                        self, "Theme Created", 
+                        f"Theme template created at {file_path}. Do you want to apply this theme now?\n\n"
+                        "Note: You may want to edit the theme file first to customize colors.",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No
+                    )
+                    
+                    if reply == QMessageBox.StandardButton.Yes:
+                        # Get the theme name from file
+                        theme_name = os.path.basename(file_path).split('.')[0]
+                        
+                        # Update settings
+                        self.settings_manager.set_setting("ui", "theme", theme_name)
+                        self.settings_manager.set_setting("ui", "custom_theme", True)
+                        self.settings_manager.set_setting("ui", "theme_file", file_path)
+                        
+                        # Apply the theme
+                        app = QApplication.instance()
+                        if app:
+                            self.theme_manager.apply_theme(app)
+                    
+                    # Update theme menu
+                    self._setup_theme_menu()
+                else:
+                    QMessageBox.warning(
+                        self, "Error", 
+                        f"Failed to create theme template at {file_path}."
+                    )
+    
+    @pyqtSlot()
+    def _on_import_theme(self):
+        """Import a custom theme from a file."""
+        # Ask for theme file
+        file_dialog = QFileDialog(self)
+        file_dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+        file_dialog.setNameFilter("Theme Files (*.json *.qss)")
+        
+        if file_dialog.exec():
+            file_path = file_dialog.selectedFiles()[0]
+            if file_path:
+                # Get the theme name from file
+                theme_name = os.path.basename(file_path).split('.')[0]
+                
+                # Copy to theme directory
+                if not hasattr(self, 'theme_manager'):
+                    self.theme_manager = ThemeManager(self.settings_manager)
+                    
+                theme_dir = self.theme_manager._get_theme_directory()
+                theme_dir.mkdir(parents=True, exist_ok=True)
+                
+                if file_path.endswith('.json'):
+                    dest_path = theme_dir / f"{theme_name}.json"
+                else:
+                    dest_path = theme_dir / f"{theme_name}.qss"
+                
+                try:
+                    import shutil
+                    shutil.copy2(file_path, dest_path)
+                    
+                    # Ask if the user wants to apply the theme
+                    reply = QMessageBox.question(
+                        self, "Theme Imported", 
+                        f"Theme imported successfully. Do you want to apply this theme now?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes
+                    )
+                    
+                    if reply == QMessageBox.StandardButton.Yes:
+                        # Update settings
+                        self.settings_manager.set_setting("ui", "theme", theme_name)
+                        self.settings_manager.set_setting("ui", "custom_theme", False)
+                        
+                        # Apply the theme
+                        app = QApplication.instance()
+                        if app:
+                            self.theme_manager.apply_theme(app, theme_name)
+                    
+                    # Update theme menu
+                    self._setup_theme_menu()
+                    
+                except Exception as e:
+                    QMessageBox.warning(
+                        self, "Import Error", 
+                        f"Failed to import theme: {str(e)}"
+                    )
+
     def _create_tool_bar(self):
         """Create and setup the toolbar."""
         self.tool_bar = QToolBar("Main Toolbar", self)
@@ -970,7 +1131,28 @@ class MainWindow(QMainWindow):
         self.tool_bar.setIconSize(QSize(32, 32))
         self.addToolBar(self.tool_bar)
         
+        # Set visibility based on settings
+        toolbar_visible = self.settings_manager.get_setting("ui", "toolbar_visible", True)
+        self.tool_bar.setVisible(toolbar_visible)
+        
         # Add actions to toolbar with icons
+        
+        # File actions
+        file_section = QToolButton()
+        file_section.setText("File")
+        file_section.setIcon(QIcon.fromTheme("document-open", 
+                                       self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogStart)))
+        file_section.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        file_section.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        
+        file_menu = QMenu(file_section)
+        file_menu.addAction(self.action_import_file)
+        file_menu.addAction(self.action_import_url)
+        file_menu.addAction(self.action_import_arxiv)
+        file_menu.addAction(self.action_web_browser)
+        
+        file_section.setMenu(file_menu)
+        self.tool_bar.addWidget(file_section)
         
         # Import document action
         self.action_import_file.setIcon(QIcon.fromTheme("document-open", 
@@ -1023,6 +1205,12 @@ class MainWindow(QMainWindow):
         self.action_save.setIcon(QIcon.fromTheme("document-save", 
                                 self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)))
         self.tool_bar.addAction(self.action_save)
+        
+        # Save As action
+        self.action_save_as.setIcon(QIcon.fromTheme("document-save-as", 
+                                   self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)))
+        self.tool_bar.addAction(self.action_save_as)
+        
         self.tool_bar.addSeparator()
         
         # Bookmark action
@@ -1046,13 +1234,29 @@ class MainWindow(QMainWindow):
         self.action_prev_document.setIcon(QIcon.fromTheme("go-previous", 
                                         self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft)))
         self.tool_bar.addAction(self.action_prev_document)
+        
+        # Add YouTube playlists action
+        self.action_youtube_playlists.setIcon(QIcon.fromTheme("video-display",
+                                             self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)))
+        self.tool_bar.addAction(self.action_youtube_playlists)
+        
+        # Add RSS feeds action
+        self.action_rss_feeds.setIcon(QIcon.fromTheme("application-rss+xml",
+                                     self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)))
+        self.tool_bar.addAction(self.action_rss_feeds)
+        
         self.tool_bar.addSeparator()
         
         # Search action
         self.action_search.setIcon(QIcon.fromTheme("edit-find", 
                                  self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)))
         self.tool_bar.addAction(self.action_search)
-    
+        
+        # Settings action
+        self.action_settings.setIcon(QIcon.fromTheme("preferences-system",
+                                   self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)))
+        self.tool_bar.addAction(self.action_settings)
+   
     def _on_show_detailed_queue(self):
         """Display a dialog with a detailed view of the reading queue."""
         from ui.detailed_queue_view import DetailedQueueView
@@ -1587,7 +1791,14 @@ class MainWindow(QMainWindow):
         # Apply the theme
         app = QApplication.instance()
         if app:
-            self.theme_manager.apply_theme(app)
+            # Apply theme and update UI
+            current_theme = self.settings_manager.get_setting("ui", "theme", "light")
+            self.theme_manager.apply_theme(app, current_theme)
+            
+            # Update theme menu actions if they exist
+            if hasattr(self, 'theme_menu'):
+                self._update_theme_menu()
+                
             logging.getLogger(__name__).info(f"Applied theme settings, current theme: {self.theme_manager.current_theme}")
     
     def _check_startup_statistics(self):
@@ -3021,53 +3232,61 @@ class MainWindow(QMainWindow):
 
     def _create_menus(self):
         """Create and return menu bar with menus."""
-        menubar = QMenuBar()
-
-        # File menu
-        file_menu = menubar.addMenu("&File")
+        # Use existing menubar instead of creating a new one
+        # menubar = QMenuBar()  <- This is the problem!
         
+        # Clear existing menus first to avoid duplicates
+        self.file_menu.clear()
+        self.edit_menu.clear()
+        self.view_menu.clear()
+        self.learning_menu.clear()
+        self.tools_menu.clear()
+        self.help_menu.clear()
+        
+        # Recreate theme menu
+        self.theme_menu = self.view_menu.addMenu("Themes")
+        self._setup_theme_menu()
+        
+        # File menu
         # Add arxiv import action
         self.action_import_arxiv = QAction("Import from Arxiv...", self)
         self.action_import_arxiv.triggered.connect(self._on_import_arxiv)
-        file_menu.addAction(self.action_import_arxiv)
+        self.file_menu.addAction(self.action_import_arxiv)
         
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_import_knowledge)
-        file_menu.addAction(self.action_export_knowledge)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.action_import_knowledge)
+        self.file_menu.addAction(self.action_export_knowledge)
         
         # Add export all data action
         self.action_export_all_data = QAction("Export All Data...", self)
         self.action_export_all_data.triggered.connect(self._on_export_all_data)
-        file_menu.addAction(self.action_export_all_data)
+        self.file_menu.addAction(self.action_export_all_data)
         
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_save)
-        file_menu.addSeparator()
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.action_save)
+        self.file_menu.addSeparator()
         
         # Recent documents submenu
         self.recent_menu = QMenu("Recent Documents", self)
-        file_menu.addMenu(self.recent_menu)
+        self.file_menu.addMenu(self.recent_menu)
         
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_exit)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.action_exit)
         
         # Edit menu
-        edit_menu = menubar.addMenu("&Edit")
-        edit_menu.addAction(self.action_new_extract)
-        edit_menu.addAction(self.action_new_learning_item)
-        edit_menu.addSeparator()
-        edit_menu.addAction(self.action_manage_tags)
+        self.edit_menu.addAction(self.action_new_extract)
+        self.edit_menu.addAction(self.action_new_learning_item)
+        self.edit_menu.addSeparator()
+        self.edit_menu.addAction(self.action_manage_tags)
         
-        # View menu
-        self.view_menu = menubar.addMenu("&View")
-        
-        # Panel toggles
+        # View menu - Panel toggles
         panels_menu = self.view_menu.addMenu("Panels")
+        panels_menu.addAction(self.action_toggle_toolbar)  # Add toolbar toggle
         panels_menu.addAction(self.action_toggle_category_panel)
         panels_menu.addAction(self.action_toggle_search_panel)
         panels_menu.addAction(self.action_toggle_stats_panel)
-        panels_menu.addAction(self.action_toggle_queue_panel)  # Add queue panel toggle
-        panels_menu.addAction(self.action_toggle_knowledge_tree)  # Add knowledge tree toggle
+        panels_menu.addAction(self.action_toggle_queue_panel)
+        panels_menu.addAction(self.action_toggle_knowledge_tree)
         
         # Add dock arrangement actions
         self.view_menu.addSeparator()
@@ -3076,14 +3295,12 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.action_tab_docks)
         
         # Learning menu
-        learning_menu = menubar.addMenu("&Learning")
-        learning_menu.addAction(self.action_start_review)
-        learning_menu.addSeparator()
-        learning_menu.addAction(self.action_browse_extracts)
-        learning_menu.addAction(self.action_browse_learning_items)
+        self.learning_menu.addAction(self.action_start_review)
+        self.learning_menu.addSeparator()
+        self.learning_menu.addAction(self.action_browse_extracts)
+        self.learning_menu.addAction(self.action_browse_learning_items)
         
         # Tools menu
-        self.tools_menu = menubar.addMenu("&Tools")
         self.tools_menu.addAction(self.action_start_review)
         self.tools_menu.addAction(self.action_view_queue)
         self.tools_menu.addAction(self.action_prev_document)
@@ -3109,13 +3326,17 @@ class MainWindow(QMainWindow):
         self.tools_menu.addAction(self.action_backup)
         
         # Help menu
-        help_menu = menubar.addMenu("&Help")
-        help_action = help_menu.addAction("Documentation")
+        help_action = QAction("Documentation", self)
         help_action.triggered.connect(self._on_show_documentation)
-        layout_help_action = help_menu.addAction("Interface Layout")
+        self.help_menu.addAction(help_action)
+        
+        layout_help_action = QAction("Interface Layout", self)
         layout_help_action.triggered.connect(self._on_layout_help)
-        about_action = help_menu.addAction("About")
+        self.help_menu.addAction(layout_help_action)
+        
+        about_action = QAction("About", self)
         about_action.triggered.connect(self._on_about)
+        self.help_menu.addAction(about_action)
 
     @pyqtSlot()
     def _on_show_documentation(self):
@@ -3466,10 +3687,17 @@ class MainWindow(QMainWindow):
                 # Direct print method
                 current_widget.print_(printer)
                 success = True
-            elif hasattr(current_widget, 'document') and hasattr(current_widget.document(), 'print'):
-                # QTextEdit and similar widgets
-                current_widget.document().print(printer)
-                success = True
+            elif hasattr(current_widget, 'document'):
+                # Check if document is a method or a property
+                doc = current_widget.document
+                if callable(doc):
+                    # It's a method, call it to get the document
+                    doc = doc()
+                
+                # Check if the document has a print method
+                if hasattr(doc, 'print') and callable(doc.print):
+                    doc.print(printer)
+                    success = True
             elif hasattr(current_widget, 'page') and hasattr(current_widget.page(), 'print'):
                 # QWebEngineView
                 def handle_print_finished(print_success):
@@ -3680,3 +3908,20 @@ class MainWindow(QMainWindow):
                 "Error",
                 f"Failed to create document: {str(e)}"
             )
+
+    @pyqtSlot(bool)
+    def _on_toggle_toolbar(self, checked):
+        """Toggle the visibility of the toolbar.
+        
+        Args:
+            checked (bool): Whether the toolbar should be visible
+        """
+        if hasattr(self, 'tool_bar'):
+            self.tool_bar.setVisible(checked)
+            
+            # Update settings
+            self.settings_manager.set_setting("ui", "toolbar_visible", checked)
+            
+            # Show a brief notification
+            visibility = "visible" if checked else "hidden"
+            self.statusBar().showMessage(f"Toolbar is now {visibility}", 3000)
