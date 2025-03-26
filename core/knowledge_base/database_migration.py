@@ -106,6 +106,10 @@ def migrate_database():
             logger.info("Adding position column to documents table")
             cursor.execute("ALTER TABLE documents ADD COLUMN position INTEGER")
         
+        if 'is_favorite' not in column_names:
+            logger.info("Adding is_favorite column to documents table")
+            cursor.execute("ALTER TABLE documents ADD COLUMN is_favorite BOOLEAN DEFAULT 0")
+        
         # Check if highlights table exists
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='highlights'")
         table_exists = cursor.fetchone() is not None

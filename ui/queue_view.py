@@ -1949,10 +1949,22 @@ class QueueView(QWidget):
                 # Add the column to the Document model
                 Document.is_favorite = Column(Boolean, default=False)
                 
-                # Create the column in the database if it doesn't exist
-                from sqlalchemy import text
-                self.db_session.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN DEFAULT FALSE"))
-                self.db_session.commit()
+                # Check if the column already exists in the database
+                try:
+                    # First check if the column already exists
+                    from sqlalchemy import text
+                    result = self.db_session.execute(text("PRAGMA table_info(documents)"))
+                    columns = result.fetchall()
+                    column_names = [column[1] for column in columns]
+                    
+                    if 'is_favorite' not in column_names:
+                        # Column doesn't exist - add it
+                        self.db_session.execute(text("ALTER TABLE documents ADD COLUMN is_favorite BOOLEAN DEFAULT 0"))
+                        self.db_session.commit()
+                except Exception as e:
+                    logger.error(f"Error checking/adding is_favorite column: {e}")
+                    self.db_session.rollback()
+                    raise
                 
             # Update the favorite status
             document.is_favorite = is_favorite

@@ -153,7 +153,11 @@ class AudioPlayerWidget(QWidget):
         self.playback_rate = 1.0
         
         # Check if QtMultimedia is available
-        if not QT_MULTIMEDIA_AVAILABLE:
+        self.QT_MULTIMEDIA_AVAILABLE = False
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+            self.QT_MULTIMEDIA_AVAILABLE = True
+        except ImportError:
             logger.error("QtMultimedia is not available - audio player will be limited")
             # Create a UI with limited functionality
             self._create_limited_ui()
@@ -366,6 +370,13 @@ class AudioPlayerWidget(QWidget):
             self.current_position = target_position
             self.last_save_position = target_position
         
+        # Check if QtMultimedia is available and player was created
+        if not hasattr(self, 'player'):
+            # Update UI with document info for limited player
+            self.title_label.setText(document.title)
+            self.author_label.setText(document.author if document.author else "")
+            return
+            
         # Set the media source
         self.player.setSource(QUrl.fromLocalFile(document.file_path))
         
@@ -590,12 +601,13 @@ def setup_audio_player(parent, document, db_session, target_position=0):
     """
     try:
         # Check if QtMultimedia is available
-        if not QT_MULTIMEDIA_AVAILABLE:
-            error_label = QLabel(f"Audio playback is not available. The PyQt6-Multimedia module is missing or incompatible.")
-            error_label.setStyleSheet("color: red; padding: 10px;")
-            error_label.setWordWrap(True)
-            return error_label
-        
+        QT_MULTIMEDIA_AVAILABLE = True
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+        except ImportError:
+            QT_MULTIMEDIA_AVAILABLE = False
+            logger.warning("PyQt6-Multimedia is not available - audio playback will be limited")
+
         # Create audio player widget
         player = AudioPlayerWidget(parent)
         

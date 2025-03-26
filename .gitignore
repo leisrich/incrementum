@@ -46,3 +46,4 @@ htmlcov/
 data/
 arxiv/
 incrementum_*
+run.sh
