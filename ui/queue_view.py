@@ -9,10 +9,11 @@ from PyQt6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QComboBox, QFormLayout, QSpinBox, QSplitter,
     QMessageBox, QMenu, QCheckBox, QTabWidget, QTreeWidget, QTreeWidgetItem,
-    QApplication, QStyle, QSizePolicy, QDockWidget, QMainWindow, QLineEdit, QTextBrowser
+    QApplication, QStyle, QSizePolicy, QDockWidget, QMainWindow, QLineEdit, QTextBrowser,
+    QInputDialog, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex
-from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut, QPalette
+from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut, QPalette, QFont
 
 from core.knowledge_base.models import Document, Category, Extract, IncrementalReading
 from core.spaced_repetition import FSRSAlgorithm
@@ -987,38 +988,42 @@ class QueueView(QWidget):
         
         tree_title = QLabel("Knowledge Tree")
         tree_title.setStyleSheet("font-weight: bold;")
-        tree_header_layout.addWidget(tree_title)
+        tree_header_layout.addWidget(tree_title, 1)  # Give title more space
+        
+        # Create button toolbar with tooltips and icons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(2)  # Tighter spacing for buttons
         
         # Add folder button
-        add_folder_btn = QPushButton()
-        add_folder_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder))
-        add_folder_btn.setToolTip("Add new category")
-        add_folder_btn.setMaximumWidth(30)
-        add_folder_btn.clicked.connect(self.add_folder_to_tree)
-        tree_header_layout.addWidget(add_folder_btn)
+        self.add_folder_btn = QPushButton()
+        self.add_folder_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder))
+        self.add_folder_btn.setToolTip("Add new category")
+        self.add_folder_btn.setMaximumWidth(30)
+        self.add_folder_btn.clicked.connect(self.add_folder_to_tree)
+        button_layout.addWidget(self.add_folder_btn)
         
         # Delete folder button
-        del_folder_btn = QPushButton()
-        del_folder_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogDiscardButton))
-        del_folder_btn.setToolTip("Delete selected category")
-        del_folder_btn.setMaximumWidth(30)
-        del_folder_btn.clicked.connect(self.delete_folder_from_tree)
-        tree_header_layout.addWidget(del_folder_btn)
+        self.del_folder_btn = QPushButton()
+        self.del_folder_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogDiscardButton))
+        self.del_folder_btn.setToolTip("Delete selected category")
+        self.del_folder_btn.setMaximumWidth(30)
+        self.del_folder_btn.clicked.connect(self.delete_folder_from_tree)
+        button_layout.addWidget(self.del_folder_btn)
         
         # Expand/Collapse buttons
-        expand_all_btn = QPushButton()
-        expand_all_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
-        expand_all_btn.setToolTip("Expand all categories")
-        expand_all_btn.setMaximumWidth(30)
-        expand_all_btn.clicked.connect(self._expand_all_categories)
-        tree_header_layout.addWidget(expand_all_btn)
+        self.expand_all_btn = QPushButton()
+        self.expand_all_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+        self.expand_all_btn.setToolTip("Expand all categories")
+        self.expand_all_btn.setMaximumWidth(30)
+        self.expand_all_btn.clicked.connect(self._expand_all_categories)
+        button_layout.addWidget(self.expand_all_btn)
         
-        collapse_all_btn = QPushButton()
-        collapse_all_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
-        collapse_all_btn.setToolTip("Collapse all categories")
-        collapse_all_btn.setMaximumWidth(30)
-        collapse_all_btn.clicked.connect(self._collapse_all_categories)
-        tree_header_layout.addWidget(collapse_all_btn)
+        self.collapse_all_btn = QPushButton()
+        self.collapse_all_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+        self.collapse_all_btn.setToolTip("Collapse all categories")
+        self.collapse_all_btn.setMaximumWidth(30)
+        self.collapse_all_btn.clicked.connect(self._collapse_all_categories)
+        button_layout.addWidget(self.collapse_all_btn)
         
         # Hide/Show tree panel button
         self.toggle_tree_btn = QPushButton()
@@ -1026,7 +1031,10 @@ class QueueView(QWidget):
         self.toggle_tree_btn.setToolTip("Hide knowledge tree")
         self.toggle_tree_btn.setMaximumWidth(30)
         self.toggle_tree_btn.clicked.connect(self._toggle_tree_panel)
-        tree_header_layout.addWidget(self.toggle_tree_btn)
+        button_layout.addWidget(self.toggle_tree_btn)
+        
+        # Add buttons to header layout
+        tree_header_layout.addLayout(button_layout)
         
         # Theme selector
         self.theme_combo = QComboBox()
@@ -1488,27 +1496,43 @@ class QueueView(QWidget):
     def add_folder_to_tree(self):
         """Add a new top-level category."""
         try:
-            from PyQt6.QtWidgets import QInputDialog
-            
             # Ask for category name
             category_name, ok = QInputDialog.getText(
                 self, "New Category", "Enter category name:"
             )
             
-            if ok and category_name:
-                # Create new category in database
-                new_category = Category(name=category_name)
-                self.db_session.add(new_category)
-                self.db_session.commit()
+            if not ok or not category_name.strip():
+                return
                 
-                # Refresh knowledge tree
-                self._load_knowledge_tree()
-                
-                # Show success message
-                QMessageBox.information(
-                    self, "Success", 
-                    f"Category '{category_name}' created successfully."
+            # Check for duplicate names at the top level
+            existing = self.db_session.query(Category).filter(
+                Category.name == category_name,
+                Category.parent_id == None
+            ).first()
+            
+            if existing:
+                QMessageBox.warning(
+                    self, "Duplicate Name", 
+                    f"A category named '{category_name}' already exists at the top level."
                 )
+                return
+                
+            # Create new category in database
+            new_category = Category(name=category_name)
+            self.db_session.add(new_category)
+            self.db_session.commit()
+            
+            # Refresh knowledge tree
+            self._load_knowledge_tree()
+            
+            # Select the new category
+            self._select_category_by_name(category_name)
+            
+            # Show success message
+            QMessageBox.information(
+                self, "Success", 
+                f"Category '{category_name}' created successfully."
+            )
         except Exception as e:
             logger.exception(f"Error creating category: {e}")
             QMessageBox.warning(
@@ -1526,19 +1550,30 @@ class QueueView(QWidget):
             if not item:
                 QMessageBox.warning(self, "No Selection", "Please select a category to delete.")
                 return
-            
+                
             # Get category ID
             category_id = item.data(0, Qt.ItemDataRole.UserRole)
             if category_id is None:
                 QMessageBox.warning(self, "Cannot Delete", "The 'All Categories' item cannot be deleted.")
                 return
-            
+                
             # Get the category from the database
             category = self.db_session.query(Category).get(category_id)
             if not category:
                 QMessageBox.warning(self, "Error", "Category not found in database.")
                 return
+                
+            # Ask for confirmation
+            reply = QMessageBox.question(
+                self, "Confirm Deletion",
+                f"Are you sure you want to delete the category '{category.name}'?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
             
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+                
             # Check for subcategories
             subcategories = self.db_session.query(Category).filter(Category.parent_id == category_id).count()
             if subcategories > 0:
@@ -1547,12 +1582,11 @@ class QueueView(QWidget):
                     "This category has subcategories. Please delete or move the subcategories first."
                 )
                 return
-            
+                
             # Check for documents
             documents = self.db_session.query(Document).filter(Document.category_id == category_id).count()
             if documents > 0:
                 # Ask what to do with documents
-                from PyQt6.QtWidgets import QMessageBox
                 reply = QMessageBox.question(
                     self, "Documents Found",
                     f"This category contains {documents} documents. What would you like to do?",
@@ -1568,8 +1602,22 @@ class QueueView(QWidget):
                         doc.category_id = None
                         self.db_session.add(doc)
                 elif reply == QMessageBox.StandardButton.Discard:
+                    # Ask for additional confirmation before deleting documents
+                    confirm_delete = QMessageBox.warning(
+                        self, "Confirm Document Deletion",
+                        f"Are you sure you want to DELETE {documents} documents? This cannot be undone.",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No
+                    )
+                    
+                    if confirm_delete != QMessageBox.StandardButton.Yes:
+                        return
+                        
                     # Delete all documents in this category
                     self.db_session.query(Document).filter(Document.category_id == category_id).delete()
+            
+            # Store the category name for the success message
+            category_name = category.name
             
             # Delete the category
             self.db_session.delete(category)
@@ -1582,14 +1630,17 @@ class QueueView(QWidget):
             self._populate_categories()
             
             # Show success message
-            QMessageBox.information(self, "Success", f"Category '{category.name}' deleted successfully.")
-            
+            QMessageBox.information(self, "Success", f"Category '{category_name}' deleted successfully.")
+                
         except Exception as e:
             logger.exception(f"Error deleting category: {e}")
-            QMessageBox.warning(
-                self, "Error", 
-                f"Error deleting category: {str(e)}"
-            )
+            try:
+                QMessageBox.warning(
+                    self, "Error", 
+                    f"Error deleting category: {str(e)}"
+                )
+            except:
+                logger.critical("Could not show error message dialog")
             # Rollback in case of error
             self.db_session.rollback()
 
@@ -2442,3 +2493,44 @@ class QueueView(QWidget):
         self.sort_combo.setCurrentIndex(0)  # Back to Priority
         self.sort_asc_button.setChecked(False)  # Back to descending
         self._load_queue_data()
+
+    def _select_category_by_name(self, category_name):
+        """Select a category in the tree by name."""
+        try:
+            # Iterate through all top-level items
+            for i in range(self.knowledge_tree.topLevelItemCount()):
+                item = self.knowledge_tree.topLevelItem(i)
+                if item.text(0) == category_name:
+                    self.knowledge_tree.setCurrentItem(item)
+                    return True
+                    
+            # If not found at top level, search all items
+            found = self._find_item_by_text(self.knowledge_tree.invisibleRootItem(), category_name)
+            if found:
+                self.knowledge_tree.setCurrentItem(found)
+                # Ensure parent items are expanded
+                parent = found.parent()
+                while parent and parent != self.knowledge_tree.invisibleRootItem():
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+                return True
+                
+            return False
+        except Exception as e:
+            logger.exception(f"Error selecting category: {e}")
+            return False
+
+    def _find_item_by_text(self, parent_item, text):
+        """Find a tree item by its text value."""
+        # Search direct children
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            if child.text(0) == text:
+                return child
+                
+            # Recursively search grandchildren
+            found = self._find_item_by_text(child, text)
+            if found:
+                return found
+                
+        return None
