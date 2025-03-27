@@ -256,6 +256,8 @@ Learn these shortcuts to speed up your workflow:
 - **Ctrl+Tab**: Switch between tabs
 - **Ctrl+S**: Save current item
 - **Ctrl+1-6**: Rate items during review (0-5)
+- **Ctrl+N**: Next item in Queue
+- **Ctrl+P**: Previous item in Queue
 
 ## Troubleshooting
 
