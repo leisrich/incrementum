@@ -54,6 +54,7 @@ from .learning_item_editor import LearningItemEditor
 from .models.document_model import DocumentModel
 from .models.category_model import CategoryModel
 from .web_browser_view import WebBrowserView
+from .sync_view import SyncView
 from core.utils.shortcuts import ShortcutManager
 from .arxiv_dialog import ArxivDialog
 from core.document_processor.summarizer import SummarizeDialog
@@ -765,6 +766,10 @@ class MainWindow(QMainWindow):
         self.action_switch = QAction("Switch", self)
         self.action_switch.setStatusTip("Switch between documents")
         
+        # Add Sync with Cloud action
+        self.action_sync_with_cloud = QAction("Sync with Cloud", self)
+        self.action_sync_with_cloud.triggered.connect(self._on_sync_with_cloud)
+        
     def _start_rss_updater(self):
         """Start the RSS feed update timer if enabled."""
         try:
@@ -1244,6 +1249,13 @@ class MainWindow(QMainWindow):
         self.action_rss_feeds.setIcon(QIcon.fromTheme("application-rss+xml",
                                      self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)))
         self.tool_bar.addAction(self.action_rss_feeds)
+        
+        self.tool_bar.addSeparator()
+        
+        # Add Sync with Cloud action
+        self.action_sync_with_cloud.setIcon(QIcon.fromTheme("emblem-synchronizing",
+                                           self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)))
+        self.tool_bar.addAction(self.action_sync_with_cloud)
         
         self.tool_bar.addSeparator()
         
@@ -3925,3 +3937,27 @@ class MainWindow(QMainWindow):
                 self, "Error", 
                 f"Failed to create extract: {str(e)}"
             )
+
+    @pyqtSlot()
+    def _on_sync_with_cloud(self):
+        """Open the sync view to synchronize with cloud services."""
+        try:
+            from ui.sync_view import SyncView
+            
+            # Create and show the sync view
+            sync_view = SyncView(self.db_session)
+            
+            # Add to a new tab
+            tab_index = self.content_tabs.addTab(sync_view, "Cloud Sync")
+            self.content_tabs.setCurrentIndex(tab_index)
+            
+            # Update status bar
+            self.statusBar().showMessage("Cloud sync opened", 3000)
+            
+        except Exception as e:
+            logger.exception(f"Error opening sync view: {e}")
+            QMessageBox.critical(
+                self, "Error",
+                f"Error opening sync view: {str(e)}"
+            )
+

@@ -54,6 +54,20 @@ class Tag(Base):
     documents = relationship("Document", secondary=document_tag_association, back_populates="tags")
     extracts = relationship("Extract", secondary=extract_tag_association, back_populates="tags")
 
+class Bookmark(Base):
+    """Bookmark for a document."""
+    __tablename__ = 'bookmarks'
+
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=False)
+    title = Column(String(255), nullable=False)
+    url = Column(String(1024), nullable=False)
+    created_date = Column(DateTime, default=datetime.utcnow)
+    last_accessed = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    document = relationship("Document", back_populates="bookmarks")
+
+
 class Document(Base):
     """Document imported into the system."""
     __tablename__ = 'documents'
@@ -83,6 +97,7 @@ class Document(Base):
     category = relationship("Category", back_populates="documents")
     extracts = relationship("Extract", back_populates="document", cascade="all, delete-orphan")
     tags = relationship("Tag", secondary=document_tag_association, back_populates="documents")
+    bookmarks = relationship("Bookmark", back_populates="document", cascade="all, delete-orphan")
 
 class Extract(Base):
     """Knowledge extract from a document."""

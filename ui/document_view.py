@@ -19,15 +19,18 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QScrollArea, QSplitter, QTextEdit,
     QToolBar, QMenu, QMessageBox, QApplication, QDialog,
-    QSizePolicy, QTabWidget, QApplication, QStyle, QComboBox
+    QSizePolicy, QTabWidget, QApplication, QStyle, QComboBox,
+    QProgressDialog, QSlider, QCheckBox
 )
 
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QSize, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QUrl, QObject, QTimer, QSize, QEvent, QThread
 from PyQt6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QIcon, QAction
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtWebEngineCore import QWebEngineSettings
     from PyQt6.QtWebChannel import QWebChannel
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PyQt6.QtMultimediaWidgets import QVideoWidget
     HAS_WEBENGINE = True
 except ImportError:
     HAS_WEBENGINE = False
@@ -40,6 +43,7 @@ from .load_epub_helper import setup_epub_webview
 from .load_youtube_helper import setup_youtube_webview, extract_video_id_from_document
 from .youtube_transcript_view import YouTubeTranscriptView
 from core.spaced_repetition.incremental_reading import IncrementalReadingManager
+from core.document_processor.handlers.youtube_handler import YouTubeHandler, HAS_YTDLP
 
 logger = logging.getLogger(__name__)
 
@@ -3514,60 +3518,67 @@ class DocumentView(QWidget):
             
             logger.debug(f"Using video ID: {video_id}")
             
-            # Create a QWebEngineView for embedding YouTube
-            from PyQt6.QtWebEngineWidgets import QWebEngineView
-            from PyQt6.QtCore import QUrl
-            web_view = QWebEngineView()
-            web_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            # Create main container widget
+            main_container = QWidget()
+            main_layout = QVBoxLayout(main_container)
+            main_layout.setContentsMargins(0, 0, 0, 0)
             
-            # Get position as integer with fallback to 0
-            target_position = 0
-            if hasattr(self.document, 'position') and self.document.position is not None:
-                try:
-                    target_position = int(self.document.position)
-                except (ValueError, TypeError):
-                    pass
+            # Create controls widget
+            control_widget = QWidget()
+            control_layout = QHBoxLayout(control_widget)
+            control_layout.setContentsMargins(5, 5, 5, 5)
             
-            # Direct embedding approach that avoids JS errors
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="utf-8">
-                <style>
-                    body, html {{ margin: 0; padding: 0; height: 100%; }}
-                    .video-container {{ width: 100%; height: 100%; }}
-                    iframe {{ width: 100%; height: 100%; border: none; }}
-                </style>
-            </head>
-            <body>
-                <div class="video-container">
-                    <iframe 
-                        src="https://www.youtube.com/embed/{video_id}?autoplay=1&start={target_position}"
-                        frameborder="0" 
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-                        allowfullscreen>
-                    </iframe>
-                </div>
-            </body>
-            </html>
-            """
+            # Create download button
+            from core.document_processor.handlers.youtube_handler import YouTubeHandler, HAS_YTDLP
+            self.youtube_handler = YouTubeHandler()
             
-            # Use a proper base URL
-            base_url = QUrl("https://www.youtube.com/")
-            web_view.setHtml(html_content, base_url)
+            # Check if video is already downloaded
+            video_path = os.path.join(self.youtube_handler.videos_dir, f"{video_id}.mp4")
+            is_downloaded = os.path.exists(video_path)
             
-            # Add to layout
-            self.content_layout.addWidget(web_view)
+            # Create use local/streaming toggle
+            self.use_local_video = QCheckBox("Use downloaded video")
+            self.use_local_video.setChecked(is_downloaded)
+            self.use_local_video.setEnabled(is_downloaded or HAS_YTDLP)
+            self.use_local_video.toggled.connect(lambda checked: self._toggle_video_source(checked, video_id))
+            control_layout.addWidget(self.use_local_video)
             
-            # Store references
-            self.web_view = web_view
-            self.content_edit = web_view
+            # Create download button
+            self.download_button = QPushButton("Download Video")
+            self.download_button.setEnabled(HAS_YTDLP and not is_downloaded)
+            self.download_button.clicked.connect(lambda: self._download_youtube_video(video_id))
+            control_layout.addWidget(self.download_button)
             
-            # Make web_view focusable to receive keyboard events
-            web_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            web_view.installEventFilter(self)
+            # Add quality selector
+            quality_label = QLabel("Quality:")
+            control_layout.addWidget(quality_label)
             
+            self.quality_selector = QComboBox()
+            self.quality_selector.addItems(["best", "1080p", "720p", "480p", "360p"])
+            self.quality_selector.setEnabled(HAS_YTDLP and not is_downloaded)
+            control_layout.addWidget(self.quality_selector)
+            
+            # Add spacer
+            control_layout.addStretch()
+            
+            # Add controls to main layout
+            main_layout.addWidget(control_widget)
+            
+            # Create video container
+            self.video_container = QWidget()
+            self.video_layout = QVBoxLayout(self.video_container)
+            self.video_layout.setContentsMargins(0, 0, 0, 0)
+            main_layout.addWidget(self.video_container)
+            
+            # Add main container to content layout
+            self.content_layout.addWidget(main_container)
+            
+            # Load appropriate video source
+            if is_downloaded and self.use_local_video.isChecked():
+                self._load_local_video(video_path, video_id)
+            else:
+                self._load_streaming_video(video_id)
+                
             # Look for transcript and add transcript view if available
             transcript_file = None
             
@@ -3607,7 +3618,7 @@ class DocumentView(QWidget):
                     transcript_view.extractCreated.connect(self.extractCreated.emit)
                     
                     # Add to layout below the video
-                    self.content_layout.addWidget(transcript_view)
+                    main_layout.addWidget(transcript_view)
                     
                     # Store reference
                     self.transcript_view = transcript_view
@@ -3628,7 +3639,955 @@ class DocumentView(QWidget):
             error_widget.setStyleSheet("color: red; padding: 20px;")
             self.content_layout.addWidget(error_widget)
             return False
-       
+    
+    def _download_youtube_video(self, video_id):
+        """Download YouTube video using yt-dlp."""
+        try:
+            # Get selected quality
+            quality = self.quality_selector.currentText()
+            
+            # Disable button during download
+            self.download_button.setEnabled(False)
+            self.download_button.setText("Downloading...")
+            
+            # Create progress dialog
+            progress = QProgressDialog("Downloading video...", "Cancel", 0, 0, self)
+            progress.setWindowTitle("Download Progress")
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.show()
+            
+            # Use QThread to avoid freezing UI
+            class DownloadThread(QThread):
+                downloadFinished = pyqtSignal(bool, str)
+                
+                def __init__(self, handler, video_id, quality):
+                    super().__init__()
+                    self.handler = handler
+                    self.video_id = video_id
+                    self.quality = quality
+                
+                def run(self):
+                    success, file_path, _ = self.handler.download_video(self.video_id, self.quality)
+                    self.downloadFinished.emit(success, file_path)
+            
+            # Create and start download thread
+            self.download_thread = DownloadThread(self.youtube_handler, video_id, quality)
+            self.download_thread.downloadFinished.connect(
+                lambda success, path: self._handle_download_complete(success, path, video_id, progress)
+            )
+            self.download_thread.start()
+            
+        except Exception as e:
+            logger.exception(f"Error downloading video: {e}")
+            self.download_button.setEnabled(True)
+            self.download_button.setText("Download Video")
+            QMessageBox.warning(self, "Download Error", f"Failed to download video: {str(e)}")
+    
+    def _handle_download_complete(self, success, file_path, video_id, progress_dialog):
+        """Handle completion of video download."""
+        # Close progress dialog
+        progress_dialog.close()
+        
+        # Update UI
+        self.download_button.setText("Download Video")
+        
+        if success:
+            # Enable local video option
+            self.use_local_video.setEnabled(True)
+            self.use_local_video.setChecked(True)
+            
+            # Disable download button
+            self.download_button.setEnabled(False)
+            self.quality_selector.setEnabled(False)
+            
+            # Load the local video
+            self._load_local_video(file_path, video_id)
+            
+            QMessageBox.information(self, "Download Complete", 
+                "Video downloaded successfully. Using local video for accurate tracking.")
+        else:
+            # Re-enable download button
+            self.download_button.setEnabled(True)
+            
+            QMessageBox.warning(self, "Download Failed", 
+                "Failed to download video. Using streaming video instead.")
+    
+    def _toggle_video_source(self, use_local, video_id):
+        """Toggle between local and streaming video sources."""
+        try:
+            # Clear the video container
+            for i in reversed(range(self.video_layout.count())): 
+                widget = self.video_layout.itemAt(i).widget()
+                if widget:
+                    widget.deleteLater()
+            
+            if use_local:
+                # Use local video
+                video_path = os.path.join(self.youtube_handler.videos_dir, f"{video_id}.mp4")
+                if os.path.exists(video_path):
+                    self._load_local_video(video_path, video_id)
+                else:
+                    # If file doesn't exist, fall back to streaming
+                    self.use_local_video.setChecked(False)
+                    self._load_streaming_video(video_id)
+            else:
+                # Use streaming video
+                self._load_streaming_video(video_id)
+                
+        except Exception as e:
+            logger.exception(f"Error toggling video source: {e}")
+    
+    def _load_local_video(self, video_path, video_id):
+        """Load a local video file."""
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+            from PyQt6.QtMultimediaWidgets import QVideoWidget
+            from PyQt6.QtCore import QUrl
+            
+            # Get position from document
+            target_position = 0
+            if hasattr(self.document, 'position') and self.document.position is not None:
+                try:
+                    # Convert position from seconds to milliseconds for QMediaPlayer
+                    target_position = float(self.document.position) * 1000
+                    logger.debug(f"Restoring position at {self.document.position} seconds ({target_position} ms)")
+                except (ValueError, TypeError):
+                    pass
+            
+            # Create video widget
+            self.video_widget = QVideoWidget()
+            self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Create media player
+            self.media_player = QMediaPlayer()
+            self.media_player.setSource(QUrl.fromLocalFile(video_path))
+            self.media_player.setVideoOutput(self.video_widget)
+            
+            # Create audio output
+            self.audio_output = QAudioOutput()
+            self.media_player.setAudioOutput(self.audio_output)
+            
+            # Create controls
+            controls = QWidget()
+            controls_layout = QHBoxLayout(controls)
+            
+            # Play/Pause button
+            self.play_button = QPushButton("Play")
+            self.play_button.clicked.connect(self._toggle_playback)
+            controls_layout.addWidget(self.play_button)
+            
+            # Position slider
+            self.position_slider = QSlider(Qt.Orientation.Horizontal)
+            self.position_slider.setRange(0, self.media_player.duration())
+            self.position_slider.sliderMoved.connect(self.media_player.setPosition)
+            controls_layout.addWidget(self.position_slider)
+            
+            # Time display
+            self.time_label = QLabel("0:00 / 0:00")
+            controls_layout.addWidget(self.time_label)
+            
+            # Connect signals
+            self.media_player.positionChanged.connect(self._update_position)
+            self.media_player.durationChanged.connect(self._update_duration)
+            self.media_player.playbackStateChanged.connect(self._update_play_button)
+            
+            # Add to layout
+            self.video_layout.addWidget(self.video_widget)
+            self.video_layout.addWidget(controls)
+            
+            # Start playing to initialize media player
+            self.media_player.play()
+            
+            # Wait for the video to start loading before setting position
+            # Use a single-shot timer to wait briefly for the player to initialize
+            restore_pos_timer = QTimer(self)
+            restore_pos_timer.setSingleShot(True)
+            restore_pos_timer.timeout.connect(lambda: self._restore_video_position(target_position))
+            restore_pos_timer.start(500)  # 500ms delay to let the player initialize
+            
+            # Store references
+            self.content_edit = self.video_widget
+            
+            # Set up auto-save timer for position
+            if not hasattr(self, 'position_timer'):
+                self.position_timer = QTimer(self)
+                self.position_timer.setInterval(30000)  # Every 30 seconds instead of 5 seconds
+                self.position_timer.timeout.connect(self._save_video_position)
+                self.position_timer.start()
+                
+            logger.info(f"Loaded local video: {video_path}")
+            
+        except Exception as e:
+            logger.exception(f"Error loading local video: {e}")
+            # Fall back to streaming video
+            self._load_streaming_video(video_id)
+            
+    def _restore_video_position(self, position_ms):
+        """Restore video position after the player has initialized."""
+        if hasattr(self, 'media_player') and self.media_player:
+            try:
+                # Only seek if the media player is ready and the position is valid
+                if position_ms > 0:
+                    logger.debug(f"Setting media player position to {position_ms} ms")
+                    self.media_player.setPosition(int(position_ms))
+            except Exception as e:
+                logger.exception(f"Error restoring video position: {e}")
+    
+    def _load_streaming_video(self, video_id):
+        """Load streaming YouTube video."""
+        try:
+            # Get position as integer with fallback to 0
+            target_position = 0
+            if hasattr(self.document, 'position') and self.document.position is not None:
+                try:
+                    target_position = int(self.document.position)
+                except (ValueError, TypeError):
+                    pass
+            
+            # Create a QWebEngineView for embedding YouTube
+            from PyQt6.QtWebEngineWidgets import QWebEngineView
+            from PyQt6.QtCore import QUrl
+            web_view = QWebEngineView()
+            web_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Direct embedding approach that avoids JS errors
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body, html {{ margin: 0; padding: 0; height: 100%; }}
+                    .video-container {{ width: 100%; height: 100%; }}
+                    iframe {{ width: 100%; height: 100%; border: none; }}
+                </style>
+            </head>
+            <body>
+                <div class="video-container">
+                    <iframe 
+                        src="https://www.youtube.com/embed/{video_id}?autoplay=1&start={target_position}"
+                        frameborder="0" 
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                        allowfullscreen>
+                    </iframe>
+                </div>
+            </body>
+            </html>
+            """
+            
+            # Use a proper base URL
+            base_url = QUrl("https://www.youtube.com/")
+            web_view.setHtml(html_content, base_url)
+            
+            # Add to layout
+            self.video_layout.addWidget(web_view)
+            
+            # Store references
+            self.web_view = web_view
+            self.content_edit = web_view
+            
+            # Make web_view focusable to receive keyboard events
+            web_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            web_view.installEventFilter(self)
+            
+            logger.info(f"Loaded streaming YouTube video: {video_id}")
+            
+        except Exception as e:
+            logger.exception(f"Error loading streaming video: {e}")
+            error_widget = QLabel(f"Error loading YouTube video: {str(e)}")
+            error_widget.setWordWrap(True)
+            error_widget.setStyleSheet("color: red; padding: 20px;")
+            self.video_layout.addWidget(error_widget)
+            
+    def _save_video_position(self):
+        """Save current video position to document."""
+        if not hasattr(self, 'media_player') or not hasattr(self, 'document'):
+            return
+            
+        try:
+            # Get position in seconds
+            position_ms = self.media_player.position()
+            position_sec = position_ms / 1000.0
+            
+            # Save to document without showing notification
+            if position_sec > 0:
+                # Log the position we're saving for debugging
+                logger.debug(f"Saving video position: {position_sec:.2f} seconds ({position_ms} ms)")
+                self._save_position_to_document(position_sec, show_notification=False)
+        except Exception as e:
+            logger.exception(f"Error saving video position: {e}")
+            
+    def _update_position(self, position):
+        """Update position slider and save document position."""
+        if not hasattr(self, 'position_slider') or not hasattr(self, 'time_label'):
+            return
+            
+        # Update slider
+        self.position_slider.setValue(position)
+        
+        # Update time label
+        duration = self.media_player.duration() or 0
+        self._update_time_label(position, duration)
+    
+    def _update_duration(self, duration):
+        """Update slider range when media duration changes."""
+        if not hasattr(self, 'position_slider') or not hasattr(self, 'time_label'):
+            return
+            
+        self.position_slider.setRange(0, duration)
+        
+        # Update time label
+        position = self.media_player.position() or 0
+        self._update_time_label(position, duration)
+    
+    def _update_time_label(self, position, duration):
+        """Update time display label."""
+        def format_time(ms):
+            s = ms // 1000
+            m = s // 60
+            s %= 60
+            return f"{m}:{s:02d}"
+        
+        self.time_label.setText(f"{format_time(position)} / {format_time(duration)}")
+    
+    def _update_play_button(self):
+        """Update play button text based on playback state."""
+        if not hasattr(self, 'play_button') or not hasattr(self, 'media_player'):
+            return
+            
+        # Get current playback state
+        state = self.media_player.playbackState()
+        
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.play_button.setText("Pause")
+            
+            # Resume position timer if not active
+            if hasattr(self, 'position_timer') and not self.position_timer.isActive():
+                self.position_timer.start()
+                
+        else:
+            self.play_button.setText("Play")
+            
+            # If paused or stopped, save position immediately
+            if state == QMediaPlayer.PlaybackState.PausedState or state == QMediaPlayer.PlaybackState.StoppedState:
+                # Save position when paused (but without notification)
+                self._save_video_position()
+                
+                # Stop position timer while paused to avoid unnecessary updates
+                if hasattr(self, 'position_timer') and self.position_timer.isActive():
+                    self.position_timer.stop()
+    
+    def _toggle_playback(self):
+        """Toggle between play and pause for local video."""
+        if not hasattr(self, 'media_player'):
+            return
+            
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.media_player.pause()
+        else:
+            self.media_player.play()
+    
+    def _on_add_to_incremental_reading(self):
+        """Add the current document to the incremental reading queue."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            # Use the IR manager to add document to queue
+            ir_manager = IncrementalReadingManager(self.db_session)
+            ir_manager.add_document_to_queue(self.document_id)
+            
+            QMessageBox.information(
+                self, "Incremental Reading", 
+                "Document added to incremental reading queue."
+            )
+                
+        except Exception as e:
+            logger.exception(f"Error adding to incremental reading: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+    
+    def _on_highlight(self):
+        """Highlight the selected text in the document."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            # Get the selected highlight color
+            color_name = self.highlight_color_combo.currentData()
+            
+            # Get selected text
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, use JavaScript to get selected text and apply highlight
+                script = f"""
+                (function() {{
+                    var selection = window.getSelection();
+                    var text = selection.toString();
+                    if (text && text.trim().length > 0) {{
+                        // Apply highlight
+                        if (typeof highlightExtractedText === 'function') {{
+                            // Create highlight span
+                            var sel = window.getSelection();
+                            if (sel.rangeCount > 0) {{
+                                var range = sel.getRangeAt(0);
+                                
+                                // Create highlight span
+                                var highlightSpan = document.createElement('span');
+                                highlightSpan.className = 'incrementum-highlight';
+                                
+                                // Set color based on selection
+                                switch('{color_name}') {{
+                                    case 'yellow':
+                                        highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                                        break;
+                                    case 'green':
+                                        highlightSpan.style.backgroundColor = 'rgba(0, 255, 0, 0.3)';
+                                        break;
+                                    case 'blue':
+                                        highlightSpan.style.backgroundColor = 'rgba(0, 191, 255, 0.3)';
+                                        break;
+                                    case 'pink':
+                                        highlightSpan.style.backgroundColor = 'rgba(255, 105, 180, 0.3)';
+                                        break;
+                                    case 'orange':
+                                        highlightSpan.style.backgroundColor = 'rgba(255, 165, 0, 0.3)';
+                                        break;
+                                    default:
+                                        highlightSpan.style.backgroundColor = 'rgba(255, 255, 0, 0.3)';
+                                }}
+                                
+                                highlightSpan.style.borderRadius = '2px';
+                                
+                                try {{
+                                    // Apply highlight
+                                    range.surroundContents(highlightSpan);
+                                    
+                                    // Clear selection
+                                    sel.removeAllRanges();
+                                }} catch (e) {{
+                                    console.error('Error highlighting text:', e);
+                                }}
+                            }}
+                        }}
+                        return text;
+                    }}
+                    return '';
+                }})();
+                """
+                self.web_view.page().runJavaScript(
+                    script,
+                    lambda result: self._process_highlight_text(result, color_name)
+                )
+                return
+            elif hasattr(self, 'text_edit') and self.text_edit:
+                # For text edit, get selection and apply highlight
+                cursor = self.text_edit.textCursor()
+                selected_text = cursor.selectedText()
+                if selected_text:
+                    # Apply highlighting to the selection
+                    format = QTextCharFormat()
+                    
+                    # Set color based on selection
+                    if color_name == 'yellow':
+                        format.setBackground(QColor(255, 255, 0, 100))
+                    elif color_name == 'green':
+                        format.setBackground(QColor(0, 255, 0, 100))
+                    elif color_name == 'blue':
+                        format.setBackground(QColor(0, 191, 255, 100))
+                    elif color_name == 'pink':
+                        format.setBackground(QColor(255, 105, 180, 100))
+                    elif color_name == 'orange':
+                        format.setBackground(QColor(255, 165, 0, 100))
+                    else:
+                        format.setBackground(QColor(255, 255, 0, 100))
+                        
+                    cursor.mergeCharFormat(format)
+                    self.text_edit.setTextCursor(cursor)
+                    self._process_highlight_text(selected_text, color_name)
+                else:
+                    QMessageBox.warning(
+                        self, "Highlight", 
+                        "Please select some text to highlight."
+                    )
+                    
+        except Exception as e:
+            logger.exception(f"Error creating highlight: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+    
+    def _process_highlight_text(self, selected_text, color_name='yellow'):
+        """Process text after highlighting from web view or text edit."""
+        try:
+            if not selected_text or len(selected_text.strip()) < 5:
+                QMessageBox.warning(
+                    self, "Highlight", 
+                    "Please select more text to highlight (at least 5 characters)."
+                )
+                return
+                
+            # Create web highlight record
+            from core.knowledge_base.models import WebHighlight
+            
+            highlight = WebHighlight(
+                document_id=self.document_id,
+                content=selected_text,
+                created_date=datetime.utcnow(),
+                color=color_name
+            )
+            
+            # Save highlight
+            self.db_session.add(highlight)
+            self.db_session.commit()
+            
+            QMessageBox.information(
+                self, "Highlight", 
+                f"Text highlighted successfully with {color_name} color."
+            )
+                
+        except Exception as e:
+            logger.exception(f"Error creating highlight: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+
+    def _on_mark_reading_progress(self):
+        """Mark the reading progress for the current document."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded")
+                return
+                
+            document = self.db_session.query(Document).get(self.document_id)
+            if not document:
+                logger.warning(f"Document not found: {self.document_id}")
+                return
+            
+            # Get current position
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, get scroll position using JavaScript
+                self.web_view.page().runJavaScript(
+                    "window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;",
+                    lambda result: self._save_position_to_document(result)
+                )
+                return  # We'll continue in the callback
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'verticalScrollBar'):
+                # For text edit or other scrollable widgets
+                scrollbar = self.content_edit.verticalScrollBar()
+                position = scrollbar.value()
+                self._save_position_to_document(position)
+            else:
+                QMessageBox.warning(
+                    self, "Reading Progress", 
+                    "Unable to determine reading position for this document type."
+                )
+                
+        except Exception as e:
+            logger.exception(f"Error marking reading progress: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred: {str(e)}"
+            )
+    
+    def _save_position_to_document(self, position, show_notification=True):
+        """Save position to document.
+        
+        Args:
+            position: Position to save (float)
+            show_notification: Whether to show a notification (default: True)
+        """
+        try:
+            document = self.db_session.query(Document).get(self.document_id)
+            if document:
+                # Update document position directly
+                document.position = position
+                document.last_accessed = datetime.utcnow()
+                self.db_session.commit()
+                
+                if show_notification:
+                    self._show_notification("Reading position saved. You can continue from this point next time.")
+                
+                logger.debug(f"Saved position {position} for document {self.document_id}")
+            else:
+                logger.warning(f"Document not found: {self.document_id}")
+                if show_notification:
+                    self._show_notification("Document not found. Unable to save position.")
+        except Exception as e:
+            logger.exception(f"Error saving position: {e}")
+            if show_notification:
+                self._show_notification(f"Error saving position: {str(e)}")
+                
+    def _show_notification(self, message, duration=3000):
+        """Show a temporary notification message.
+        
+        Args:
+            message: Message to display
+            duration: Display duration in milliseconds
+        """
+        # Check if notification already exists
+        if hasattr(self, 'notification_label') and self.notification_label:
+            # Update existing notification instead of creating a new one
+            self.notification_label.setText(message)
+            
+            # Restart timer
+            if hasattr(self, 'notification_timer') and self.notification_timer:
+                self.notification_timer.stop()
+                self.notification_timer.start(duration)
+                
+            return
+            
+        # Create notification label
+        self.notification_label = QLabel(message)
+        self.notification_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.notification_label.setStyleSheet("""
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+        """)
+        
+        # Add to layout over the main content
+        if hasattr(self, 'video_layout') and self.video_layout:
+            self.video_layout.addWidget(self.notification_label)
+        elif hasattr(self, 'content_layout') and self.content_layout:
+            self.content_layout.addWidget(self.notification_label)
+        
+        # Timer to hide notification
+        self.notification_timer = QTimer()
+        self.notification_timer.setSingleShot(True)
+        self.notification_timer.timeout.connect(self._hide_notification)
+        self.notification_timer.start(duration)
+        
+    def _hide_notification(self):
+        """Hide and destroy the notification label."""
+        if hasattr(self, 'notification_label') and self.notification_label:
+            self.notification_label.deleteLater()
+            self.notification_label = None
+
+    def _on_extract_selected(self, extract_id):
+        """Handle when an extract is selected in the extract view.
+        
+        Args:
+            extract_id (int): ID of the selected extract
+        """
+        try:
+            # Get the extract from the database
+            extract = self.db_session.query(Extract).get(extract_id)
+            
+            if not extract:
+                logger.warning(f"Extract not found: {extract_id}")
+                return
+                
+            # Highlight the extract text in the document if possible
+            if hasattr(self, 'web_view') and self.web_view:
+                # For web view, find and highlight the text
+                script = f"""
+                (function() {{
+                    const text = {json.dumps(extract.content)};
+                    if (!text) return false;
+                    
+                    const selection = window.getSelection();
+                    const range = document.createRange();
+                    const allTextNodes = [];
+                    
+                    // Get all text nodes
+                    function getTextNodes(node) {{
+                        if (node.nodeType === 3) {{
+                            allTextNodes.push(node);
+                        }} else {{
+                            for (let i = 0; i < node.childNodes.length; i++) {{
+                                getTextNodes(node.childNodes[i]);
+                            }}
+                        }}
+                    }}
+                    
+                    getTextNodes(document.body);
+                    
+                    // Find the text in the document
+                    for (let i = 0; i < allTextNodes.length; i++) {{
+                        const nodeText = allTextNodes[i].textContent;
+                        const index = nodeText.indexOf(text);
+                        if (index >= 0) {{
+                            // Found the text
+                            range.setStart(allTextNodes[i], index);
+                            range.setEnd(allTextNodes[i], index + text.length);
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                            
+                            // Scroll to the text
+                            const rect = range.getBoundingClientRect();
+                            window.scrollTo({{
+                                top: window.scrollY + rect.top - 100,
+                                behavior: 'smooth'
+                            }});
+                            
+                            return true;
+                        }}
+                    }}
+                    
+                    return false;
+                }})();
+                """
+                self.web_view.page().runJavaScript(script)
+            elif hasattr(self, 'content_edit') and isinstance(self.content_edit, QTextEdit):
+                # For text edit, find and highlight the text
+                cursor = self.content_edit.textCursor()
+                cursor.setPosition(0)
+                self.content_edit.setTextCursor(cursor)
+                
+                if self.content_edit.find(extract.content):
+                    # Text found, it's now selected
+                    # Ensure visible
+                    self.content_edit.ensureCursorVisible()
+                else:
+                    logger.warning(f"Could not find extract text in document: {extract.content[:50]}...")
+            
+            logger.debug(f"Selected extract: {extract_id}")
+            
+        except Exception as e:
+            logger.exception(f"Error selecting extract: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"An error occurred while selecting the extract: {str(e)}"
+            )
+
+    def _restore_highlights(self):
+        """Restore highlights for the current document."""
+        if not hasattr(self, 'document_id') or not self.document_id:
+            return
+
+        try:
+            # For PDFs, highlighting is handled by the PDFViewWidget
+            if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWidget) and 'pdf' in str(type(self.content_edit)).lower():
+                # PDFViewWidget has its own highlight loading
+                return
+                
+            # For web content
+            if hasattr(self, 'web_view') and self.web_view:
+                # Get highlights from database
+                highlights = self.db_session.query(WebHighlight).filter(WebHighlight.document_id == self.document_id).all()
+                
+                if not highlights:
+                    logger.debug(f"No highlights found for document {self.document_id}")
+                    return
+                    
+                logger.info(f"Restoring {len(highlights)} highlights for document {self.document_id}")
+                
+                # Build JavaScript to apply highlights
+                script = """
+                function applyHighlights() {
+                    if (typeof registerHighlightFunctions !== 'function') {
+                        console.error('Highlighting functions not available');
+                        return;
+                    }
+                    
+                    registerHighlightFunctions();
+                    
+                    const highlights = %s;
+                    highlights.forEach(h => {
+                        highlightText(h.text, h.color || 'yellow');
+                    });
+                }
+                
+                // Run when document is fully loaded
+                if (document.readyState === 'complete') {
+                    applyHighlights();
+                } else {
+                    window.addEventListener('load', applyHighlights);
+                }
+                """ % json.dumps([{"text": h.content, "color": h.color} for h in highlights])
+                
+                # Apply highlights
+                self.web_view.page().runJavaScript(script)
+                
+            # For text content in QTextEdit
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'textCursor'):
+                cursor = self.content_edit.textCursor()
+                
+                # Get highlights from database (using Highlight model for non-web documents)
+                highlights = self.db_session.query(WebHighlight).filter(WebHighlight.document_id == self.document_id).all()
+                
+                if not highlights:
+                    logger.debug(f"No highlights found for document {self.document_id}")
+                    return
+                    
+                logger.info(f"Restoring {len(highlights)} highlights for document {self.document_id}")
+                
+                # Prepare text format for highlighting
+                text_format = QTextCharFormat()
+                
+                doc = self.content_edit.document()
+                
+                for highlight in highlights:
+                    try:
+                        # Set color based on highlight color field
+                        if highlight.color == 'yellow':
+                            text_format.setBackground(QColor(255, 255, 0, 80))  # Yellow with transparency
+                        elif highlight.color == 'green':
+                            text_format.setBackground(QColor(0, 255, 0, 80))    # Green with transparency
+                        elif highlight.color == 'blue':
+                            text_format.setBackground(QColor(0, 255, 255, 80))  # Blue with transparency
+                        elif highlight.color == 'pink':
+                            text_format.setBackground(QColor(255, 192, 203, 80)) # Pink with transparency
+                        elif highlight.color == 'orange':
+                            text_format.setBackground(QColor(255, 165, 0, 80))   # Orange with transparency
+                        else:
+                            text_format.setBackground(QColor(255, 255, 0, 80))  # Default yellow
+                            
+                        # Find and highlight all occurrences of the text
+                        text_to_highlight = highlight.content
+                        
+                        # Start from the beginning
+                        cursor.setPosition(0)
+                        
+                        # Find and highlight all occurrences
+                        while cursor.position() < doc.characterCount():
+                            cursor = doc.find(text_to_highlight, cursor.position())
+                            if cursor.position() == -1:
+                                break
+                                
+                            cursor.mergeCharFormat(text_format)
+                            
+                    except Exception as e:
+                        logger.warning(f"Error applying highlight for '{highlight.content[:20]}...': {e}")
+                        
+        except Exception as e:
+            logger.exception(f"Error restoring highlights: {e}")
+    
+    def _highlight_with_color(self, color):
+        """Highlight selected text with specified color."""
+        try:
+            if not hasattr(self, 'document_id') or not self.document_id:
+                logger.warning("No document loaded, can't highlight")
+                return
+                
+            # For PDFs, we need to handle highlighting in the PDF view
+            if hasattr(self, 'content_edit') and isinstance(self.content_edit, QWidget) and 'pdf' in str(type(self.content_edit)).lower():
+                if hasattr(self.content_edit, '_on_highlight_with_color'):
+                    self.content_edit._on_highlight_with_color(color)
+                return
+                
+            # Get selected text
+            selected_text = ""
+            
+            # For web view
+            if hasattr(self, 'web_view') and self.web_view:
+                # Execute JavaScript to get selected text and apply highlight
+                script = f"""
+                (function() {{
+                    const selection = window.getSelection();
+                    if (!selection || selection.rangeCount === 0 || selection.toString().trim() === '') {{
+                        return {{'success': false, 'error': 'No text selected'}};
+                    }}
+                    
+                    const text = selection.toString();
+                    
+                    // Call highlight function if available
+                    if (typeof highlightText === 'function') {{
+                        highlightText(text, '{color}');
+                        return {{'success': true, 'text': text}};
+                    }} else {{
+                        return {{'success': false, 'error': 'Highlight function not available'}};
+                    }}
+                }})();
+                """
+                
+                self.web_view.page().runJavaScript(script, self._handle_highlight_result_web)
+                return
+                
+            # For text content
+            elif hasattr(self, 'content_edit') and hasattr(self.content_edit, 'textCursor'):
+                cursor = self.content_edit.textCursor()
+                if not cursor.hasSelection():
+                    logger.warning("No text selected for highlighting")
+                    return
+                    
+                selected_text = cursor.selectedText()
+                
+                # Create highlight format
+                highlight_format = QTextCharFormat()
+                
+                # Set color based on parameter
+                if color == 'yellow':
+                    highlight_format.setBackground(QColor(255, 255, 0, 80))  # Yellow with transparency
+                elif color == 'green':
+                    highlight_format.setBackground(QColor(0, 255, 0, 80))    # Green with transparency
+                elif color == 'blue':
+                    highlight_format.setBackground(QColor(0, 255, 255, 80))  # Blue with transparency
+                elif color == 'pink':
+                    highlight_format.setBackground(QColor(255, 192, 203, 80)) # Pink with transparency
+                elif color == 'orange':
+                    highlight_format.setBackground(QColor(255, 165, 0, 80))   # Orange with transparency
+                else:
+                    highlight_format.setBackground(QColor(255, 255, 0, 80))  # Default yellow
+                
+                # Apply highlight
+                cursor.mergeCharFormat(highlight_format)
+                
+                # Save highlight to database
+                self._process_highlight_text(selected_text, color)
+            
+        except Exception as e:
+            logger.exception(f"Error highlighting with color {color}: {e}")
+    
+    def _handle_highlight_result_web(self, result):
+        """Handle result from JavaScript highlight operation."""
+        try:
+            if isinstance(result, dict) and result.get('success'):
+                selected_text = result.get('text', '')
+                if selected_text:
+                    self._process_highlight_text(selected_text, result.get('color', 'yellow'))
+                    logger.info(f"Highlighted text: '{selected_text[:30]}...'")
+            else:
+                error = result.get('error', 'Unknown error') if isinstance(result, dict) else 'Invalid result'
+                logger.warning(f"Highlight failed: {error}")
+        except Exception as e:
+            logger.exception(f"Error processing highlight result: {e}")
+    
+    def _process_highlight_text(self, selected_text, color_name='yellow'):
+        """Process highlighted text and save to database."""
+        try:
+            if not selected_text or not hasattr(self, 'document_id') or not self.document_id:
+                return False
+                
+            if not color_name:
+                color_name = 'yellow'
+                
+            # Create new highlight
+            if hasattr(self, 'web_view') and self.web_view:
+                # Web highlights use WebHighlight model
+                highlight = WebHighlight(
+                    document_id=self.document_id,
+                    content=selected_text,
+                    color=color_name,
+                    created_date=datetime.utcnow()
+                )
+            else:
+                # Other documents use Highlight model
+                highlight = WebHighlight(
+                    document_id=self.document_id,
+                    content=selected_text,
+                    color=color_name,
+                    created_date=datetime.utcnow()
+                )
+                
+            # Add to database
+            self.db_session.add(highlight)
+            self.db_session.commit()
+            
+            logger.info(f"Created highlight {highlight.id} with color {color_name}")
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Error processing highlight: {e}")
+            return False
+
     def _open_playlist(self, playlist_id):
         """Open the playlist view for a given playlist ID."""
         try:
@@ -3949,4 +4908,129 @@ window.addEventListener('load', function() {
                 
         # Let default handler process the event
         return super().eventFilter(watched, event)
+
+    def closeEvent(self, event):
+        """Handle close event to properly clean up resources."""
+        try:
+            # Clean up any media resources
+            self._cleanup_media_resources()
+            
+            # Call the parent class implementation
+            super().closeEvent(event)
+        except Exception as e:
+            logger.exception(f"Error in closeEvent: {e}")
+            # Ensure the event is accepted even if there's an error
+            event.accept()
+    
+    def _cleanup_media_resources(self):
+        """Clean up media resources to prevent continued playback."""
+        try:
+            # Stop local video playback
+            if hasattr(self, 'media_player') and self.media_player:
+                self.media_player.stop()
+                
+            # Stop auto-save timer if running
+            if hasattr(self, 'position_timer') and self.position_timer and self.position_timer.isActive():
+                self.position_timer.stop()
+                
+            # Clean up web view to stop streaming video
+            if hasattr(self, 'web_view') and self.web_view:
+                # Execute JavaScript to pause/stop video in iframe
+                script = """
+                (function() {
+                    // Try to find and stop the video
+                    try {
+                        // Method 1: Try YouTube API if available
+                        if (typeof player !== 'undefined' && player) {
+                            player.stopVideo();
+                            player.destroy();
+                            return true;
+                        }
+                        
+                        // Method 2: Find iframe and remove src
+                        const iframes = document.getElementsByTagName('iframe');
+                        for (let i = 0; i < iframes.length; i++) {
+                            if (iframes[i].src.includes('youtube.com')) {
+                                // Store src for reference then clear it
+                                iframes[i].src = '';
+                                return true;
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error stopping video:', e);
+                    }
+                    
+                    return false;
+                })();
+                """
+                self.web_view.page().runJavaScript(script)
+                
+                # Set HTML to empty content to ensure video stops
+                self.web_view.setHtml("<html><body></body></html>")
+                
+                # Force close the web page
+                self.web_view.page().deleteLater()
+                self.web_view.deleteLater()
+                self.web_view = None
+                
+        except Exception as e:
+            logger.exception(f"Error cleaning up media resources: {e}")
+            
+    def hideEvent(self, event):
+        """Handle hide events (when tab is switched or widget is hidden)."""
+        try:
+            # When the view is hidden, stop playback to conserve resources
+            self._pause_media_playback()
+            
+            # Call the parent class implementation
+            super().hideEvent(event)
+        except Exception as e:
+            logger.exception(f"Error in hideEvent: {e}")
+            event.accept()
+            
+    def showEvent(self, event):
+        """Handle show events (when tab is selected)."""
+        try:
+            # Call the parent class implementation
+            super().showEvent(event)
+        except Exception as e:
+            logger.exception(f"Error in showEvent: {e}")
+            event.accept()
+            
+    def _pause_media_playback(self):
+        """Pause media playback but don't fully clean up resources."""
+        try:
+            # Pause local video playback
+            if hasattr(self, 'media_player') and self.media_player and self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.media_player.pause()
+                
+            # Pause streaming video
+            if hasattr(self, 'web_view') and self.web_view:
+                script = """
+                (function() {
+                    try {
+                        // Try YouTube API if available
+                        if (typeof player !== 'undefined' && player) {
+                            player.pauseVideo();
+                            return true;
+                        }
+                    } catch (e) {
+                        console.error('Error pausing video:', e);
+                    }
+                    
+                    return false;
+                })();
+                """
+                self.web_view.page().runJavaScript(script)
+        except Exception as e:
+            logger.exception(f"Error pausing media playback: {e}")
+                
+    def __del__(self):
+        """Destructor method to ensure cleanup."""
+        try:
+            self._cleanup_media_resources()
+        except Exception as e:
+            # Can't use logger here as it might be gone already
+            print(f"Error in DocumentView destructor: {e}")
+            pass
 

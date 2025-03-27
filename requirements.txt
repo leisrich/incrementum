@@ -48,6 +48,7 @@ transformers
 regex
 tqdm
 youtube-transcript-api
+yt-dlp        # For downloading YouTube videos
 humanize
 feedparser
 pip

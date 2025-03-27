@@ -13,6 +13,14 @@ from .base_handler import DocumentHandler
 
 logger = logging.getLogger(__name__)
 
+# Import yt-dlp for video downloading
+try:
+    import yt_dlp
+    HAS_YTDLP = True
+except ImportError:
+    logger.warning("yt-dlp is not installed. YouTube video downloading will be disabled.")
+    HAS_YTDLP = False
+
 class YouTubeHandler(DocumentHandler):
     """Handler for YouTube videos."""
     
@@ -34,6 +42,13 @@ class YouTubeHandler(DocumentHandler):
         
         # Add temp_dir attribute using tempfile module's temp directory
         self.temp_dir = self.base_data_dir
+        
+        # Directory for downloaded videos
+        self.videos_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            'data', 'youtube_downloaded_videos'
+        )
+        os.makedirs(self.videos_dir, exist_ok=True)
     
     def extract_metadata(self, file_path: str) -> Dict[str, Any]:
         """
@@ -706,4 +721,65 @@ class YouTubeHandler(DocumentHandler):
             
         except Exception as e:
             logger.exception(f"Error downloading playlist: {e}")
-            return None, {} 
+            return None, {}
+    
+    def download_video(self, video_id: str, quality: str = 'best') -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Download a YouTube video using yt-dlp.
+        
+        Args:
+            video_id: YouTube video ID
+            quality: Video quality ('best', '720p', '480p', etc.)
+            
+        Returns:
+            Tuple of (success, file_path, metadata)
+        """
+        if not HAS_YTDLP:
+            logger.error("Cannot download video: yt-dlp is not installed")
+            return False, "", {}
+            
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        output_path = os.path.join(self.videos_dir, f"{video_id}.mp4")
+        
+        # Check if video already exists
+        if os.path.exists(output_path):
+            logger.info(f"Video {video_id} already downloaded at {output_path}")
+            metadata = self._fetch_video_metadata(video_id)
+            metadata['downloaded'] = True
+            metadata['local_path'] = output_path
+            return True, output_path, metadata
+            
+        try:
+            # Set up yt-dlp options
+            ydl_opts = {
+                'format': f'bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best' if quality != 'best' else 'best[ext=mp4]/best',
+                'outtmpl': output_path,
+                'noplaylist': True,
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': True,
+                'noprogress': True,
+            }
+            
+            # Download the video
+            logger.info(f"Downloading YouTube video {video_id} to {output_path}")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+            
+            # Check if download was successful
+            if os.path.exists(output_path):
+                logger.info(f"Successfully downloaded video {video_id} to {output_path}")
+                
+                # Get metadata
+                metadata = self._fetch_video_metadata(video_id)
+                metadata['downloaded'] = True
+                metadata['local_path'] = output_path
+                
+                return True, output_path, metadata
+            else:
+                logger.error(f"Failed to download video {video_id}")
+                return False, "", {}
+                
+        except Exception as e:
+            logger.exception(f"Error downloading video {video_id}: {e}")
+            return False, "", {} 
