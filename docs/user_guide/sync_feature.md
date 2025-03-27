@@ -211,5 +211,3 @@ To make the most of the sync feature:
 5. **Only sync with trusted devices**: Only install Incrementum on devices you trust
 
 ---
-
-For more information, please see the [main documentation](../README.md) or join our community forum for support. 
