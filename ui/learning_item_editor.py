@@ -5,22 +5,26 @@ import os
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
-from PyQt6.QtWidgets import (
+from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QTextEdit, QComboBox, QSpinBox,
     QGroupBox, QFormLayout, QTabWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialog, QMessageBox,
     QRadioButton, QButtonGroup, QCheckBox, QDoubleSpinBox,
     QPlainTextEdit, QAbstractItemView, QLineEdit, QDialogButtonBox,
-    QInputDialog, QColorDialog, QApplication
+    QInputDialog, QColorDialog, QApplication, QShortcut
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QIcon, QColor, QFont, QPalette, QKeySequence, QShortcut
-# Import sip from PyQt6
-from PyQt6 import sip
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt5.QtGui import QIcon, QColor, QFont, QPalette, QKeySequence
+# Import sip from PyQt5 instead of standalone sip
+from PyQt5 import sip
 
 from core.knowledge_base.models import Extract, LearningItem, ReviewLog
 from core.content_extractor.nlp_extractor import NLPExtractor
+# Remove non-existent imports
+# from ui.dialog_manager import DialogManager
+# from core.models import LearningItemReview
+# from core.spaced_repetition import SpacedRepetition
 
 logger = logging.getLogger(__name__)
 
@@ -713,7 +717,7 @@ class LearningItemEditor(QDialog):
             masked_key = "****" + current_key[-4:] if current_key and len(current_key) > 4 else ""
             hint_text = f"Current: {masked_key}" if masked_key else "No API key set"
             
-            from PyQt6.QtWidgets import QInputDialog, QLineEdit
+            from PyQt5.QtWidgets import QInputDialog, QLineEdit
             
             api_key, ok = QInputDialog.getText(
                 self, f"Set {provider_name} API Key", 
@@ -1177,7 +1181,7 @@ class LearningItemEditor(QDialog):
             items.append(item)
         
         return items
-
+            
     def _on_question_changed(self):
         """Cache question content when it changes."""
         if not self._is_closing and hasattr(self, 'question_edit') and not sip.isdeleted(self.question_edit):
@@ -1559,7 +1563,7 @@ class LearningItemEditor(QDialog):
         
         # ========== Add keyboard shortcuts for formatting ==========
         # These will work when focus is in text editors
-        from PyQt6.QtGui import QShortcut, QKeySequence
+        from PyQt5.QtGui import QShortcut, QKeySequence
         
         # Bold shortcut (Ctrl+B)
         bold_shortcut = QShortcut(QKeySequence("Ctrl+B"), self)
@@ -1970,7 +1974,7 @@ class LearningItemEditor(QDialog):
         # Initial UI state
         self._on_type_changed()
         self._on_mode_changed()
-   
+        
     def _format_text(self, prefix, suffix):
         """Apply HTML formatting to selected text in the active editor."""
         try:
@@ -2132,7 +2136,7 @@ class LearningItemEditor(QDialog):
         if hasattr(self, 'auto_mode_combo') and hasattr(self, 'provider_container'):
             use_ai = self.auto_mode_combo.currentData() == "ai"
             self.provider_container.setVisible(use_ai)
-    
+            
     @pyqtSlot()
     def _on_show_history(self):
         """Show review history dialog."""

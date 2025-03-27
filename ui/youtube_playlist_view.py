@@ -113,6 +113,8 @@ class YouTubePlaylistView(QWidget):
         header_layout.addStretch()
         
         import_btn = QPushButton("Import Playlist")
+        import_btn.setIcon(QIcon.fromTheme("list-add"))
+        import_btn.setToolTip("Import a new YouTube playlist by URL")
         import_btn.clicked.connect(self._on_import_playlist)
         header_layout.addWidget(import_btn)
         
@@ -129,6 +131,8 @@ class YouTubePlaylistView(QWidget):
         self.playlist_list = QListWidget()
         self.playlist_list.setMinimumWidth(200)
         self.playlist_list.itemClicked.connect(self._on_playlist_selected)
+        self.playlist_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.playlist_list.customContextMenuRequested.connect(self._on_playlist_context_menu)
         left_layout.addWidget(self.playlist_list)
         
         splitter.addWidget(left_widget)
@@ -138,19 +142,22 @@ class YouTubePlaylistView(QWidget):
         right_layout = QVBoxLayout(right_widget)
         
         # Playlist info section
-        self.playlist_info = QLabel("Select a playlist")
+        self.playlist_info = QLabel("Select a playlist from the left or import a new one.")
         self.playlist_info.setWordWrap(True)
         self.playlist_info.setStyleSheet("padding: 10px; background-color: #f0f0f0; border-radius: 5px;")
         right_layout.addWidget(self.playlist_info)
         
         # Playlist actions toolbar
         actions_toolbar = QToolBar()
+        actions_toolbar.setIconSize(QSize(16, 16))
         
         self.play_all_action = QAction(QIcon.fromTheme("media-playback-start"), "Play All", self)
+        self.play_all_action.setToolTip("Play all videos starting from the first unwatched")
         self.play_all_action.triggered.connect(self._on_play_all)
         actions_toolbar.addAction(self.play_all_action)
         
         self.refresh_action = QAction(QIcon.fromTheme("view-refresh"), "Refresh", self)
+        self.refresh_action.setToolTip("Update playlist details and videos from YouTube")
         self.refresh_action.triggered.connect(self._on_refresh_playlist)
         actions_toolbar.addAction(self.refresh_action)
         
@@ -186,7 +193,7 @@ class YouTubePlaylistView(QWidget):
         splitter.addWidget(right_widget)
         
         # Set initial splitter sizes
-        splitter.setSizes([200, 600])
+        splitter.setSizes([250, 550])
         
         main_layout.addWidget(splitter)
         
@@ -201,7 +208,7 @@ class YouTubePlaylistView(QWidget):
             
             # Add to list widget
             for playlist in playlists:
-                item = QListWidgetItem(playlist.title)
+                item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, playlist.id)
                 
                 # Get actual video count from database
@@ -211,11 +218,14 @@ class YouTubePlaylistView(QWidget):
                 
                 # Update playlist title with video count
                 item.setText(f"{playlist.title} ({video_count} videos)")
+                item.setToolTip(f"Channel: {playlist.channel_title}\nClick to view videos.")
                 self.playlist_list.addItem(item)
                 
             # Show a message if no playlists
             if len(playlists) == 0:
-                self.playlist_info.setText("No playlists found. Click 'Import Playlist' to add one.")
+                self.playlist_info.setText("No playlists found. Click 'Import Playlist' above to add one.")
+                self.video_list.clear()
+                self.current_playlist = None
                 
             logger.info(f"Loaded {len(playlists)} playlists")
                 
@@ -386,6 +396,85 @@ class YouTubePlaylistView(QWidget):
             logger.exception(f"Error marking video as unwatched: {e}")
             QMessageBox.warning(self, "Error", f"Failed to mark video as unwatched: {str(e)}")
             
+    def _on_playlist_context_menu(self, position):
+        """Show context menu for playlist items."""
+        # Get item at position
+        item = self.playlist_list.itemAt(position)
+        
+        if not item:
+            return
+            
+        playlist_id = item.data(Qt.ItemDataRole.UserRole)
+        playlist_title = item.text().split(' (')[0]
+        
+        # Create context menu
+        menu = QMenu(self)
+        
+        # Add "Delete Playlist" action
+        delete_action = QAction(QIcon.fromTheme("edit-delete"), f"Delete Playlist '{playlist_title}'", self)
+        delete_action.triggered.connect(lambda: self._on_delete_playlist(playlist_id, item))
+        menu.addAction(delete_action)
+        
+        # Show menu
+        menu.exec(self.playlist_list.mapToGlobal(position))
+
+    def _on_delete_playlist(self, playlist_id, item):
+        """Handle deletion of a playlist."""
+        try:
+            # Query playlist from database
+            playlist = self.db_session.query(YouTubePlaylist).filter_by(id=playlist_id).first()
+            
+            if not playlist:
+                QMessageBox.warning(self, "Error", "Playlist not found in database.")
+                return
+
+            # Confirmation dialog
+            reply = QMessageBox.question(
+                self, 
+                "Confirm Delete", 
+                f"Are you sure you want to delete the playlist '{playlist.title}'?\n\n"
+                "This will remove the playlist and all its associated video records from Incrementum. "
+                "It will NOT delete the playlist from YouTube itself.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                logger.info(f"Deleting playlist ID: {playlist_id}, Title: {playlist.title}")
+                
+                # Delete associated videos first
+                self.db_session.query(YouTubePlaylistVideo).filter_by(playlist_id=playlist_id).delete()
+                
+                # Delete the playlist itself
+                self.db_session.delete(playlist)
+                
+                # Commit changes
+                self.db_session.commit()
+                
+                logger.info(f"Playlist {playlist_id} deleted successfully.")
+                
+                # Check if the deleted playlist was the currently selected one
+                was_current = (self.current_playlist and self.current_playlist.id == playlist_id)
+
+                # Remove item from the list widget immediately
+                self.playlist_list.takeItem(self.playlist_list.row(item))
+
+                # If the deleted playlist was the current one, clear the right panel
+                if was_current:
+                    self.current_playlist = None
+                    self.current_playlist_videos = []
+                    self.video_list.clear()
+                    self.playlist_info.setText("Select a playlist from the left or import a new one.")
+                    logger.info("Cleared right panel as current playlist was deleted.")
+
+                # Update status or show message if needed
+                # self.parent().statusBar().showMessage(f"Playlist '{playlist.title}' deleted.", 3000) # If you have access to status bar
+
+        except Exception as e:
+            self.db_session.rollback() # Rollback in case of error
+            logger.exception(f"Error deleting playlist ID {playlist_id}: {e}")
+            QMessageBox.critical(self, "Deletion Error", f"Failed to delete playlist: {str(e)}")
+
     def _on_import_playlist(self):
         """Handle playlist import button click."""
         from ui.dialogs.import_youtube_playlist_dialog import ImportYouTubePlaylistDialog
@@ -394,7 +483,11 @@ class YouTubePlaylistView(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             # Refresh playlist list
             self._load_playlists()
-            
+            # Optionally select the newly added playlist if the dialog returns its ID
+            new_playlist_id = dialog.get_imported_playlist_id()
+            if new_playlist_id:
+                self.select_playlist(new_playlist_id)
+
     def _on_play_all(self):
         """Play all videos in the playlist from the first unwatched video."""
         if not self.current_playlist or not self.current_playlist_videos:

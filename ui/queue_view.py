@@ -2,8 +2,10 @@
 
 import logging
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import os
+from functools import partial
+import random # Needed for the sorting logic explanation
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -11,10 +13,10 @@ from PyQt6.QtWidgets import (
     QGroupBox, QComboBox, QFormLayout, QSpinBox, QSplitter,
     QMessageBox, QMenu, QCheckBox, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QApplication, QStyle, QSizePolicy, QDockWidget, QMainWindow, QLineEdit, QTextBrowser,
-    QInputDialog, QFileDialog, QSlider
+    QInputDialog, QFileDialog, QSlider, QCalendarWidget
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex
-from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut, QPalette, QFont
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex, QMimeData, QDate, QTimer
+from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut, QPalette, QFont, QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QTextCharFormat
 
 from core.knowledge_base.models import Document, Category, Extract, IncrementalReading
 from core.spaced_repetition import FSRSAlgorithm
@@ -23,6 +25,50 @@ from core.utils.shortcuts import ShortcutManager
 from core.utils.category_helper import get_all_categories, populate_category_combo
 
 logger = logging.getLogger(__name__)
+
+# Define a MIME type for dragging documents
+DOCUMENT_MIME_TYPE = "application/x-incrementum-documentid"
+
+# Subclass QTableWidget to handle dragging document IDs
+class DraggableQueueTable(QTableWidget):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setDragEnabled(True)
+        self.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.setDragDropMode(QTableWidget.DragDropMode.DragOnly) # Only allow dragging from this table
+
+    def mimeTypes(self) -> List[str]:
+        # Declare the MIME type we'll use for dragging
+        return [DOCUMENT_MIME_TYPE]
+
+    def mimeData(self, items: List[QTableWidgetItem]) -> QMimeData:
+        # Create MIME data containing the document ID of the first selected item
+        mime_data = QMimeData()
+        if not items:
+            return mime_data
+
+        # Assuming the document ID is stored in the UserRole of the first column item
+        selected_row = self.row(items[0])
+        id_item = self.item(selected_row, 0)
+        if id_item:
+            doc_id = id_item.data(Qt.ItemDataRole.UserRole)
+            if doc_id is not None:
+                # Encode the document ID as bytes
+                mime_data.setData(DOCUMENT_MIME_TYPE, str(doc_id).encode())
+        return mime_data
+
+    def startDrag(self, supportedActions: Qt.DropAction):
+        # Initiate the drag operation
+        drag = QDrag(self)
+        mime_data = self.mimeData(self.selectedItems())
+        if not mime_data.data(DOCUMENT_MIME_TYPE):
+            return # Don't start drag if no valid data
+
+        drag.setMimeData(mime_data)
+        
+        # Execute the drag operation
+        drag.exec(supportedActions)
+
 
 class QueueView(QWidget):
     """Widget for managing the document reading queue."""
@@ -43,6 +89,10 @@ class QueueView(QWidget):
         
         self.db_session = db_session
         self.settings_manager = settings_manager or SettingsManager()
+        self.restored_expanded_ids = [] # Initialize list to hold restored expanded IDs
+        self._should_dock_on_show = False # Flag to defer docking from restoreState
+        self._dock_visible_on_show = True # Store desired dock visibility
+        self._initial_show_event = True # Flag to run restore docking only once
         
         # Initialize FSRS with algorithm settings from the settings manager
         fsrs_params = self._get_fsrs_params()
@@ -76,10 +126,10 @@ class QueueView(QWidget):
         # Load initial data
         self._load_queue_data()
         
-        # Load knowledge tree
+        # Load knowledge tree (before restoreState)
         self._load_knowledge_tree()
         
-        # Restore UI state from settings
+        # Restore UI state from settings (might try to dock too early)
         self.restoreState()
     
     def _get_fsrs_params(self) -> Dict[str, Any]:
@@ -1010,10 +1060,19 @@ class QueueView(QWidget):
             return 50  # Default middle priority on error
 
     def _toggle_tree_panel(self):
-        """Toggle the visibility of the knowledge tree panel."""
+        """Toggle the visibility of the knowledge tree panel within the splitter."""
+        # If the tree is currently docked, do nothing here. Dock visibility is handled separately.
+        if hasattr(self, 'tree_dock') and self.tree_dock and self.tree_dock.widget() == self.tree_panel:
+             logger.debug("Tree panel is docked, toggle ignored.")
+             # Optionally, we could show/hide the dock here, but let's keep it separate for now.
+             # self._show_tree_dock() # or self.tree_dock.hide()
+             return
+
         if self.tree_panel.isVisible():
             # Hide tree panel
             self.tree_panel.hide()
+            # Save current sizes before hiding
+            self._last_splitter_sizes = self.main_splitter.sizes()
             self.main_splitter.setSizes([0, self.main_splitter.width()])
             self.toggle_tree_btn.setToolTip("Show knowledge tree")
             self.toggle_tree_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ToolBarHorizontalExtensionButton))
@@ -1025,13 +1084,19 @@ class QueueView(QWidget):
         else:
             # Show tree panel
             self.tree_panel.show()
-            # Set reasonable split sizes (1:3 ratio)
+            # Restore previous sizes or set default
             width = self.main_splitter.width()
-            self.main_splitter.setSizes([int(width * 0.25), int(width * 0.75)])
-            self.toggle_tree_btn.setToolTip("Hide knowledge tree")
-            self.toggle_tree_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarShadeButton))
-            self.show_tree_btn.setVisible(False)
-            
+            restore_sizes = getattr(self, '_last_splitter_sizes', None)
+            if restore_sizes and len(restore_sizes) == 2 and sum(restore_sizes) > 50: # Basic sanity check
+                 self.main_splitter.setSizes(restore_sizes)
+            else:
+                 # Set reasonable split sizes (e.g., 1:3 ratio) if no previous state
+                self.main_splitter.setSizes([int(width * 0.25), int(width * 0.75)])
+                         
+                self.toggle_tree_btn.setToolTip("Hide knowledge tree")
+                self.toggle_tree_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarShadeButton)) # Use shade icon when visible
+                self.show_tree_btn.setVisible(False)
+                
             # Save state to settings
             if hasattr(self, 'settings_manager'):
                 self.settings_manager.set_setting('queue_view', 'tree_panel_visible', True)
@@ -1039,59 +1104,81 @@ class QueueView(QWidget):
     def _make_tree_dockable(self):
         """Convert the tree panel to a dockable widget."""
         try:
+            # Check if already docked
+            if hasattr(self, 'tree_dock') and self.tree_dock and self.tree_dock.widget() == self.tree_panel:
+                logger.debug("Tree panel is already docked.")
+                # Ensure it's visible if the button is clicked again
+                if self.tree_dock.isHidden():
+                    self._show_tree_dock()
+                return
+
             # Get the main window
             main_window = self.parent()
             while main_window and not isinstance(main_window, QMainWindow):
                 main_window = main_window.parent()
                 
             if not main_window:
+                logger.error("Could not find QMainWindow parent to dock the tree panel.")
                 QMessageBox.warning(self, "Cannot Dock", "Unable to find main window to dock the tree panel.")
                 return
                 
-            # Check if we already have a dock widget
-            if hasattr(self, 'tree_dock') and self.tree_dock:
-                # If dock exists and is hidden, show it
-                if self.tree_dock.isHidden():
-                    self.tree_dock.show()
-                    # Ensure it has reasonable size
-                    self.tree_dock.resize(300, self.tree_dock.height())
-                return
-                
-            # Create a new dock widget
-            self.tree_dock = QDockWidget("Knowledge Tree", main_window)
-            self.tree_dock.setObjectName("knowledge_tree_dock")
-            self.tree_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | 
-                                          Qt.DockWidgetArea.RightDockWidgetArea)
+            # Create a new dock widget if it doesn't exist or panel isn't in it
+            if not hasattr(self, 'tree_dock') or not self.tree_dock:
+                self.tree_dock = QDockWidget("Knowledge Tree", main_window)
+                self.tree_dock.setObjectName("knowledge_tree_dock")
+                    # Allow docking on left and right
+                self.tree_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | 
+                                              Qt.DockWidgetArea.RightDockWidgetArea)
+                # Connect close event only when creating
+                self.tree_dock.visibilityChanged.connect(self._on_dock_visibility_changed)
             
-            # Set minimum width to prevent it from becoming too small
+            # Ensure tree panel has a minimum width
             self.tree_panel.setMinimumWidth(250)
             
-            # Remove tree panel from splitter and add to dock
-            self.main_splitter.replaceWidget(0, QWidget())  # Replace with empty widget
+            # --- Move panel from splitter to dock ---
+            # 1. Get current splitter sizes to preserve queue panel size
+            current_sizes = self.main_splitter.sizes()
+            # 2. Temporarily replace the tree panel with an empty widget in the splitter
+            placeholder = QWidget()
+            placeholder.setMinimumWidth(0) # Allow it to collapse
+            self.main_splitter.insertWidget(0, placeholder) # Insert placeholder
+            self.tree_panel.setParent(None) # Remove tree_panel from splitter's layout
+            # 3. Set the tree panel as the dock widget's content
             self.tree_dock.setWidget(self.tree_panel)
+            # 4. Remove the placeholder widget (index 0)
+            placeholder.setParent(None)
+            # --- End Move ---
             
             # Set a reasonable size for the dock
             self.tree_dock.setMinimumWidth(300)
             
-            # Add dock widget to main window
-            main_window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.tree_dock)
+            # Add dock widget to main window - DEFAULT TO RIGHT SIDE
+            main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.tree_dock)
             
-            # Connect close event
-            self.tree_dock.visibilityChanged.connect(self._on_dock_visibility_changed)
-            
-            # Hide the splitter tree panel since it's now in the dock
-            self.tree_panel.setParent(self.tree_dock)
-            self.show_tree_btn.setVisible(True)
-            
-            # Update the show tree button purpose
-            self.show_tree_btn.clicked.disconnect()
+            # Ensure dock is visible
+            self.tree_dock.show()
+            self.tree_dock.raise_() # Bring to front
+
+            # Update button states: Hide the toggle button, show the 'show' button (which now shows the dock)
+            self.toggle_tree_btn.setVisible(False) # Hide the splitter toggle button
+            self.show_tree_btn.setVisible(False) # Also hide the show button initially when docked
+            self.show_tree_btn.setToolTip("Show Knowledge Tree Dock")
+            # Disconnect old slot if connected, then connect new one
+            try:
+                self.show_tree_btn.clicked.disconnect()
+            except TypeError: # No connection
+                pass
             self.show_tree_btn.clicked.connect(self._show_tree_dock)
+
+            # Update main window action state
+            self._update_main_window_action(True)
             
             # Save settings
             if hasattr(self, 'settings_manager'):
                 self.settings_manager.set_setting('queue_view', 'tree_panel_docked', True)
+                self.settings_manager.set_setting('queue_view', 'tree_dock_visible', True) # Dock is visible after creation
                 
-            # Resize the dock to a reasonable width (at least 25% of main window width)
+            # Resize the dock to a reasonable width
             width = main_window.width()
             self.tree_dock.resize(max(300, int(width * 0.25)), self.tree_dock.height())
             
@@ -1100,7 +1187,7 @@ class QueueView(QWidget):
             QMessageBox.warning(self, "Error", f"Could not make tree panel dockable: {str(e)}")
 
     def _show_tree_dock(self):
-        """Show the tree dock if it exists."""
+        """Show the tree dock if it exists and is hidden."""
         try:
             if hasattr(self, 'tree_dock') and self.tree_dock:
                 # Get the main window
@@ -1117,37 +1204,50 @@ class QueueView(QWidget):
                     width = main_window.width() if main_window else 800
                     self.tree_dock.resize(max(300, int(width * 0.25)), self.tree_dock.height())
                     
-                # Update action state in main window if it exists
-                if main_window:
-                    action = main_window.findChild(QAction, "action_toggle_knowledge_tree")
-                    if action and isinstance(action, QAction):
-                        action.setChecked(True)
+                # Update button visibility
+                self.show_tree_btn.setVisible(False) # Hide button once dock is shown
+                self.toggle_tree_btn.setVisible(False) # Ensure splitter toggle remains hidden
+
+                # Update action state in main window
+                self._update_main_window_action(True)
             else:
-                # Fallback to showing the regular tree panel
-                self._toggle_tree_panel()
+                # Fallback: If dock doesn't exist, maybe try to create it? Or just log error.
+                logger.warning("_show_tree_dock called but tree_dock does not exist.")
+                # self._make_tree_dockable() # Option: try to create it
         except Exception as e:
             logger.exception(f"Error showing tree dock: {e}")
 
     def _on_dock_visibility_changed(self, visible):
-        """Handle dock widget visibility changes."""
+        """Handle dock widget visibility changes (e.g., user closes dock)."""
         try:
+            # Show the 'show tree' button only when the dock becomes hidden
             self.show_tree_btn.setVisible(not visible)
+            # Ensure the splitter toggle button remains hidden if we are in docked mode
+            if hasattr(self, 'tree_dock') and self.tree_dock and self.tree_dock.widget() == self.tree_panel:
+                 self.toggle_tree_btn.setVisible(False)
             
             # Update action state in main window
-            main_window = self.parent()
-            while main_window and not isinstance(main_window, QMainWindow):
-                main_window = main_window.parent()
-            
-            if main_window:
-                action = main_window.findChild(QAction, "action_toggle_knowledge_tree")
-                if action and isinstance(action, QAction):
-                    action.setChecked(visible)
+            self._update_main_window_action(visible)
             
             # Save settings
             if hasattr(self, 'settings_manager'):
-                self.settings_manager.set_setting('queue_view', 'tree_dock_visible', visible)
+                 # Only save visibility if we know we are in a docked state
+                is_docked = self.settings_manager.get_setting('queue_view', 'tree_panel_docked', False)
+                if is_docked:
+                    self.settings_manager.set_setting('queue_view', 'tree_dock_visible', visible)
         except Exception as e:
             logger.exception(f"Error handling dock visibility change: {e}")
+
+    def _update_main_window_action(self, visible):
+        """Helper to update the toggle action in the main window if it exists."""
+        main_window = self.parent()
+        while main_window and not isinstance(main_window, QMainWindow):
+            main_window = main_window.parent()
+        
+        if main_window:
+            action = main_window.findChild(QAction, "action_toggle_knowledge_tree")
+            if action and isinstance(action, QAction):
+                action.setChecked(visible)
 
     def keyPressEvent(self, event):
         """Handle keyboard events for queue navigation and rating."""
@@ -1490,8 +1590,8 @@ class QueueView(QWidget):
         
         queue_layout.addLayout(filter_layout)
         
-        # Create queue table
-        self.queue_table = QTableWidget()
+        # Create queue table using the draggable subclass
+        self.queue_table = DraggableQueueTable() # Use the subclass
         self.queue_table.setObjectName("queue_table")
         self.queue_table.setColumnCount(5)
         self.queue_table.setHorizontalHeaderLabels(["Title", "Priority", "Due Date", "Category", "Reading Count"])
@@ -1558,13 +1658,22 @@ class QueueView(QWidget):
         calendar_tab.setObjectName("calendar_tab")
         calendar_layout = QVBoxLayout(calendar_tab)
         
-        # Placeholder for calendar view implementation
-        calendar_label = QLabel("Calendar view under development")
-        calendar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        calendar_layout.addWidget(calendar_label)
+        # Create Calendar Widget
+        self.calendar_widget = QCalendarWidget()
+        self.calendar_widget.setObjectName("calendar_widget")
+        self.calendar_widget.setGridVisible(True)
+        
+        # Connect signals
+        self.calendar_widget.currentPageChanged.connect(self._update_calendar_highlighting)
+        self.calendar_widget.clicked[QDate].connect(self._on_calendar_date_selected)
+        
+        calendar_layout.addWidget(self.calendar_widget)
         
         # Add to tabs
         self.queue_tabs.addTab(calendar_tab, "Calendar View")
+        
+        # Initial highlighting
+        self._update_calendar_highlighting()
 
     def _populate_categories(self):
         """Populate the categories dropdown."""
@@ -1913,15 +2022,21 @@ class QueueView(QWidget):
             
             # Get document ID
             document_id = self.queue_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if document_id is None: # Should not happen with valid rows, but check anyway
+                return
             
             # Get the document to check favorite status
             document = self.db_session.query(Document).get(document_id)
+            if not document:
+                 logger.warning(f"Document ID {document_id} not found for context menu.")
+                 return
+                 
             is_favorite = hasattr(document, 'is_favorite') and document.is_favorite
             
             # Create context menu
             context_menu = QMenu(self)
             
-            # Add actions
+            # --- Standard Actions ---
             open_action = QAction("Open Document", self)
             open_action.triggered.connect(lambda: self.documentSelected.emit(document_id))
             context_menu.addAction(open_action)
@@ -1935,16 +2050,43 @@ class QueueView(QWidget):
                 favorite_action.triggered.connect(lambda: self._toggle_favorite(document_id, True))
             context_menu.addAction(favorite_action)
             
-            # Add rating actions
+            # --- Set Category Submenu ---
+            context_menu.addSeparator()
+            category_menu = context_menu.addMenu("Set Category")
+
+            # Add "Uncategorized" option
+            uncategorized_action = QAction("Uncategorized", self)
+            # Use partial to capture arguments for the slot
+            uncategorized_action.triggered.connect(partial(self._set_document_category, document_id, None))
+            category_menu.addAction(uncategorized_action)
+            category_menu.addSeparator()
+
+            # Add existing categories recursively
+            def add_category_actions(menu, categories, parent_id=None, indent=""):
+                # Filter categories for the current parent_id
+                children = sorted([cat for cat in categories if cat.parent_id == parent_id], key=lambda c: c.name)
+                for category in children:
+                    action = QAction(indent + category.name, self)
+                    action.triggered.connect(partial(self._set_document_category, document_id, category.id))
+                    menu.addAction(action)
+                    # Recursively add subcategories
+                    add_category_actions(menu, categories, category.id, indent + "  ")
+
+            all_categories = self.db_session.query(Category).order_by(Category.name).all()
+            add_category_actions(category_menu, all_categories)
+
+
+            # --- Rating Actions ---
             context_menu.addSeparator()
             context_menu.addSection("Rate Document")
             
             for rating in range(1, 6):
                 rate_action = QAction(f"Rate {rating}/5", self)
-                rate_action.triggered.connect(lambda r=rating: self._rate_document(document_id, r))
+                # Use partial for rating as well
+                rate_action.triggered.connect(partial(self._rate_document, document_id, rating))
                 context_menu.addAction(rate_action)
             
-            # Add priority actions
+            # --- Priority Actions ---
             context_menu.addSeparator()
             context_menu.addSection("Set Priority")
             
@@ -1953,15 +2095,16 @@ class QueueView(QWidget):
                 "High (75)": 75,
                 "Medium (50)": 50,
                 "Low (25)": 25,
-                "Very Low (10)": 10
+                "Very Low (10)": 10,
+                "None (0)": 0
             }
             
             for name, value in priorities.items():
                 priority_action = QAction(name, self)
-                priority_action.triggered.connect(lambda v=value: self._set_document_priority(document_id, v))
+                priority_action.triggered.connect(partial(self._set_document_priority, document_id, value))
                 context_menu.addAction(priority_action)
             
-            # Add reschedule actions
+            # --- Reschedule Actions ---
             context_menu.addSeparator()
             context_menu.addSection("Reschedule")
             
@@ -1977,13 +2120,50 @@ class QueueView(QWidget):
             
             for name, days in reschedule_options.items():
                 reschedule_action = QAction(name, self)
-                reschedule_action.triggered.connect(lambda d=days: self._reschedule_document(document_id, d))
+                reschedule_action.triggered.connect(partial(self._reschedule_document, document_id, days))
                 context_menu.addAction(reschedule_action)
             
             # Show the menu
             context_menu.exec(self.queue_table.mapToGlobal(position))
         except Exception as e:
             logger.exception(f"Error showing queue context menu: {e}")
+        
+    def _set_document_category(self, document_id, category_id):
+        """Set the category for a given document."""
+        try:
+            document = self.db_session.query(Document).get(document_id)
+            if not document:
+                QMessageBox.warning(self, "Error", f"Document ID {document_id} not found.")
+                return
+
+            # Check if category is actually changing
+            if document.category_id == category_id:
+                 logger.debug(f"Document {document_id} already in category {category_id}. No change.")
+                 return # No need to do anything
+
+            document.category_id = category_id
+            self.db_session.commit()
+
+            category_name = "Uncategorized"
+            if category_id is not None:
+                category = self.db_session.query(Category).get(category_id)
+                if category:
+                    category_name = category.name
+
+            logger.info(f"Set category for document '{document.title}' (ID: {document_id}) to '{category_name}' (ID: {category_id})")
+
+            # Refresh UI
+            self._load_queue_data()
+            self._load_knowledge_tree()
+            self._populate_categories() # Also refresh the filter dropdown
+
+            # Optional: Confirmation message
+            # QMessageBox.information(self, "Category Set", f"Document moved to category '{category_name}'.")
+
+        except Exception as e:
+            logger.exception(f"Error setting document category: {e}")
+            self.db_session.rollback()
+            QMessageBox.warning(self, "Error", f"Could not set category: {str(e)}")
         
     def _toggle_favorite(self, document_id, is_favorite):
         """Toggle the favorite status of a document."""
@@ -2081,7 +2261,7 @@ class QueueView(QWidget):
 
     def saveState(self):
         """Save the widget state for session management."""
-        if hasattr(self, 'settings_manager'):
+        if hasattr(self, 'settings_manager') and self.settings_manager:
             # Save splitter sizes
             if hasattr(self, 'main_splitter'):
                 self.settings_manager.set_setting('queue_view', 'splitter_sizes', self.main_splitter.sizes())
@@ -2090,9 +2270,21 @@ class QueueView(QWidget):
             if hasattr(self, 'queue_tabs'):
                 self.settings_manager.set_setting('queue_view', 'active_tab', self.queue_tabs.currentIndex())
             
-            # Save tree panel visibility
+            # Save tree panel visibility and docked state
             if hasattr(self, 'tree_panel'):
-                self.settings_manager.set_setting('queue_view', 'tree_panel_visible', self.tree_panel.isVisible())
+                is_docked = hasattr(self, 'tree_dock') and self.tree_dock is not None
+                self.settings_manager.set_setting('queue_view', 'tree_panel_docked', is_docked)
+                if is_docked:
+                     self.settings_manager.set_setting('queue_view', 'tree_dock_visible', self.tree_dock.isVisible())
+                else:
+                    self.settings_manager.set_setting('queue_view', 'tree_panel_visible', self.tree_panel.isVisible())
+
+            # Save expanded tree items
+            if hasattr(self, 'knowledge_tree'):
+                expanded_ids = set()
+                self._save_expanded_state(self.knowledge_tree.invisibleRootItem(), expanded_ids)
+                # Convert set to list for JSON serialization
+                self.settings_manager.set_setting('queue_view', 'expanded_category_ids', list(expanded_ids))
             
             if self.settings_manager:
                 # Save randomness value
@@ -2100,23 +2292,66 @@ class QueueView(QWidget):
 
     def restoreState(self):
         """Restore the widget state from session management."""
-        if hasattr(self, 'settings_manager'):
-            # Restore splitter sizes
-            if hasattr(self, 'main_splitter'):
-                sizes = self.settings_manager.get_setting('queue_view', 'splitter_sizes', None)
-                if sizes:
-                    self.main_splitter.setSizes(sizes)
+        if hasattr(self, 'settings_manager') and self.settings_manager:
+            # Restore splitter sizes (only relevant if not docked)
+            sizes = self.settings_manager.get_setting('queue_view', 'splitter_sizes', None)
+            
+            # Restore tree panel visibility/docked state
+            is_docked = self.settings_manager.get_setting('queue_view', 'tree_panel_docked', False)
+            
+            if is_docked:
+                # --- Defer Docking ---
+                # Instead of calling _make_tree_dockable directly, set flags for showEvent
+                logger.debug("restoreState: Scheduling tree panel docking for showEvent.")
+                self._should_dock_on_show = True
+                self._dock_visible_on_show = self.settings_manager.get_setting('queue_view', 'tree_dock_visible', True)
+                # --- End Defer ---
+
+            else: # Not docked, restore splitter state immediately (safe)
+                 self._should_dock_on_show = False # Ensure docking flag is off
+                 if hasattr(self, 'main_splitter') and sizes and len(sizes) == 2:
+                     try:
+                         # Check if panel should be visible in splitter
+                         visible = self.settings_manager.get_setting('queue_view', 'tree_panel_visible', True)
+                         if visible:
+                             self.main_splitter.setSizes([int(s) for s in sizes])
+                             self.tree_panel.show()
+                             self.show_tree_btn.setVisible(False)
+                             self.toggle_tree_btn.setVisible(True)
+                             self.toggle_tree_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarShadeButton))
+                             self.toggle_tree_btn.setToolTip("Hide knowledge tree")
+                         else:
+                             self.main_splitter.setSizes([0, sum(int(s) for s in sizes)]) # Collapse tree panel
+                             self.tree_panel.hide()
+                             self.show_tree_btn.setVisible(True)
+                             self.toggle_tree_btn.setVisible(True) # Keep toggle visible but change icon/tooltip
+                             self.toggle_tree_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ToolBarHorizontalExtensionButton))
+                             self.toggle_tree_btn.setToolTip("Show knowledge tree")
+                         # Ensure show_tree_btn connects to toggle when not docked
+                         try:
+                             self.show_tree_btn.clicked.disconnect()
+                         except TypeError: pass
+                         self.show_tree_btn.clicked.connect(self._toggle_tree_panel)
+                         # Ensure toggle_tree_btn connects to toggle
+                         try:
+                             self.toggle_tree_btn.clicked.disconnect()
+                         except TypeError: pass
+                         self.toggle_tree_btn.clicked.connect(self._toggle_tree_panel)
+
+                     except Exception as e:
+                         logger.warning(f"Could not restore splitter sizes: {e}")
             
             # Restore active tab
             if hasattr(self, 'queue_tabs'):
                 active_tab = self.settings_manager.get_setting('queue_view', 'active_tab', 0)
-                self.queue_tabs.setCurrentIndex(active_tab)
+                if 0 <= active_tab < self.queue_tabs.count():
+                    self.queue_tabs.setCurrentIndex(active_tab)
             
-            # Restore tree panel visibility
-            if hasattr(self, 'tree_panel'):
-                visible = self.settings_manager.get_setting('queue_view', 'tree_panel_visible', True)
-                if not visible:
-                    self._toggle_tree_panel()
+            # Load expanded tree item IDs (will be used in _load_knowledge_tree)
+            self.restored_expanded_ids = self.settings_manager.get_setting('queue_view', 'expanded_category_ids', [])
+            # --- Reload tree *after* loading expanded IDs ---
+            if hasattr(self, 'knowledge_tree'):
+                 self._load_knowledge_tree() 
             
             if self.settings_manager:
                 # Restore randomness value
@@ -2125,6 +2360,10 @@ class QueueView(QWidget):
                 # Update queue manager
                 if hasattr(self.spaced_repetition, 'set_randomness'):
                     self.spaced_repetition.set_randomness(self.randomness_value)
+                
+                # Update slider position
+                if hasattr(self, 'randomness_slider'):
+                    self.randomness_slider.setValue(int(self.randomness_value * 100))
 
     def _rate_current_document(self, rating):
         """Rate the currently selected document."""
@@ -2207,24 +2446,124 @@ class QueueView(QWidget):
             self.db_session.rollback()
 
     def _setup_queue_drag_drop(self):
-        """Set up drag and drop for the queue table."""
+        """Set up drag and drop for the queue table and knowledge tree."""
         try:
-            # Set drag enabled for queue table
-            self.queue_table.setDragEnabled(True)
-            self.queue_table.setAcceptDrops(True)
-            self.queue_table.setDropIndicatorShown(True)
-            self.queue_table.setDragDropMode(QTableWidget.DragDropMode.DragDrop)
+            # Queue table drag is handled by DraggableQueueTable subclass
             
             # Accept drops for the knowledge tree
             self.knowledge_tree.setAcceptDrops(True)
             self.knowledge_tree.setDropIndicatorShown(True)
+            # Allow dragging within the tree later if needed, for now just accept drops
             self.knowledge_tree.setDragDropMode(QTreeWidget.DragDropMode.DropOnly)
+            
+            # Connect drag/drop event handlers for the tree
+            self.knowledge_tree.dragEnterEvent = self._tree_drag_enter_event
+            self.knowledge_tree.dragMoveEvent = self._tree_drag_move_event
+            self.knowledge_tree.dropEvent = self._tree_drop_event
             
         except Exception as e:
             logger.exception(f"Error setting up drag and drop: {e}")
 
-    def _load_queue_data(self):
-        """Load documents into the queue table based on current filter settings."""
+    # --- Drag and Drop Handlers for Knowledge Tree ---
+
+    def _tree_drag_enter_event(self, event: QDragEnterEvent):
+        """Handle drag enter event for the knowledge tree."""
+        # Check if the dragged data is a document ID
+        if event.mimeData().hasFormat(DOCUMENT_MIME_TYPE):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _tree_drag_move_event(self, event: QDragMoveEvent):
+        """Handle drag move event for the knowledge tree."""
+        # Check if the target item is a valid category
+        target_item = self.knowledge_tree.itemAt(event.position().toPoint())
+        if target_item:
+            category_id = target_item.data(0, Qt.ItemDataRole.UserRole)
+            # Allow dropping onto any category (including "All Categories" - which we'll treat as uncategorized)
+            # Or potentially disallow dropping onto document items if they exist
+            is_category = self._is_item_category(target_item) # Need helper function if documents are added
+            
+            # For now, assume all items are categories or the root
+            if is_category or category_id is None: 
+                event.acceptProposedAction()
+                return
+
+        event.ignore()
+
+    def _tree_drop_event(self, event: QDropEvent):
+        """Handle drop event for the knowledge tree."""
+        if not event.mimeData().hasFormat(DOCUMENT_MIME_TYPE):
+            event.ignore()
+            return
+
+        # Get the target item (category)
+        target_item = self.knowledge_tree.itemAt(event.position().toPoint())
+        if not target_item:
+            event.ignore()
+            return
+
+        # Get the category ID (None for "All Categories" -> uncategorized)
+        target_category_id = target_item.data(0, Qt.ItemDataRole.UserRole)
+        target_category_name = target_item.text(0)
+
+        # Get the document ID from MIME data
+        doc_id_qbytearray = event.mimeData().data(DOCUMENT_MIME_TYPE)
+        try:
+            # Convert QByteArray to Python bytes, then decode to string, then convert to int
+            doc_id_bytes = bytes(doc_id_qbytearray) 
+            doc_id_str = doc_id_bytes.decode('utf-8') # Assuming utf-8 encoding used in mimeData
+            doc_id = int(doc_id_str)
+        except (ValueError, TypeError, UnicodeDecodeError) as e:
+            logger.error(f"Could not decode dropped document ID: {e}")
+            event.ignore()
+            return
+
+        try:
+            # Get the document from the database
+            document = self.db_session.query(Document).get(doc_id)
+            if not document:
+                logger.warning(f"Dropped document ID {doc_id} not found in database.")
+                event.ignore()
+                return
+
+            # Check if the category is actually changing
+            if document.category_id == target_category_id:
+                logger.debug(f"Document {doc_id} already in category {target_category_id}. No change.")
+                event.acceptProposedAction() # Accept but do nothing
+                return
+
+            # Update the document's category ID
+            document.category_id = target_category_id
+            self.db_session.commit()
+            logger.info(f"Moved document '{document.title}' (ID: {doc_id}) to category '{target_category_name}' (ID: {target_category_id})")
+
+            # Refresh the UI
+            self._load_knowledge_tree() # Reload tree to update counts/structure
+            self._load_queue_data()     # Reload queue to reflect category change
+
+            event.acceptProposedAction()
+
+        except Exception as e:
+            logger.exception(f"Error processing drop event: {e}")
+            self.db_session.rollback()
+            QMessageBox.warning(self, "Drop Error", f"Could not move document: {str(e)}")
+            event.ignore()
+
+    # Helper to check if a tree item represents a category (useful when documents are added)
+    def _is_item_category(self, item: QTreeWidgetItem) -> bool:
+        """Check if the tree item represents a category."""
+        if not item:
+            return False
+        # For now, assume all items with UserRole data are categories
+        # This will need refinement if documents are added to the tree
+        # A better way might be to store item type in another role
+        return item.data(0, Qt.ItemDataRole.UserRole) is not None or item.text(0) == "All Categories"
+
+    # --- End Drag and Drop Handlers ---
+
+    def _load_queue_data(self, filter_date: Optional[date] = None): # Add optional date filter
+        """Load documents into the queue table based on current filter settings and randomness."""
         try:
             if not hasattr(self, 'queue_table'):
                 logger.warning("Queue table not available")
@@ -2239,89 +2578,86 @@ class QueueView(QWidget):
             category_id = self.category_combo.currentData(Qt.ItemDataRole.UserRole)
             show_favorites_only = hasattr(self, 'show_favorites_only') and self.show_favorites_only.isChecked()
             
-            # Get sort settings
-            if hasattr(self, 'sort_combo'):
-                sort_column = self.sort_combo.currentIndex()
-                sort_ascending = self.sort_asc_button.isChecked()
-            else:
-                # Default to priority, descending
-                sort_column = 0
-                sort_ascending = False
-            
-            # Base query for documents
+            # --- Get Filtered Documents (No Sorting Yet) ---
             query = self.db_session.query(Document)
             
             # Apply category filter if specified
             if category_id is not None:
-                # Get all subcategory IDs for this category
                 category_ids = [category_id]
                 self._get_subcategory_ids(category_id, category_ids)
-                
-                # Filter on this category and all subcategories
                 query = query.filter(Document.category_id.in_(category_ids))
             
             # Apply favorites filter if enabled
             if show_favorites_only:
-                query = query.filter(Document.is_favorite == True)
-            
-            # Calculate date range for filter
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            end_date = today + timedelta(days=days_ahead)
-            
-            # Apply date filters
+                # Ensure the column exists before filtering
+                if hasattr(Document, 'is_favorite'):
+                    query = query.filter(Document.is_favorite == True)
+                else:
+                     logger.warning("is_favorite attribute not found on Document model, cannot filter by favorites.")
+
+            # Apply Date Filter
+            if filter_date:
+                 start_dt = datetime.combine(filter_date, datetime.min.time())
+                 end_dt = datetime.combine(filter_date + timedelta(days=1), datetime.min.time())
+                 query = query.filter(Document.next_reading_date >= start_dt)\
+                              .filter(Document.next_reading_date < end_dt)
+            else:
+                today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date_range = today + timedelta(days=days_ahead)
             if include_new:
-                # Include both new documents and those due within the date range
                 query = query.filter(
                     (Document.next_reading_date == None) |
-                    (Document.next_reading_date <= end_date)
+                         (Document.next_reading_date < end_date_range)
                 )
             else:
-                # Only include documents due within the date range
-                query = query.filter(Document.next_reading_date <= end_date)
+                     query = query.filter(Document.next_reading_date != None)\
+                                  .filter(Document.next_reading_date < end_date_range)
+
+            # Fetch the filtered documents without database sorting
+            filtered_documents = query.all()
+            logger.debug(f"Fetched {len(filtered_documents)} documents based on filters.")
+
+            # --- Apply Randomness and Sorting via FSRSAlgorithm ---
+            if hasattr(self.spaced_repetition, 'sort_queue'):
+                logger.debug(f"Sorting queue with randomness factor: {self.randomness_value}")
+                documents_to_display = self.spaced_repetition.sort_queue(filtered_documents, self.randomness_value)
+            else:
+                # Fallback: If sort_queue doesn't exist, just use the filtered list
+                # and maybe apply the user's selected sort as before (less ideal)
+                logger.warning("FSRSAlgorithm does not have a 'sort_queue' method. Displaying filtered but potentially unsorted/randomized items.")
+                documents_to_display = filtered_documents
+                # Optionally re-add the simple sorting here as a fallback
+                # sort_column = self.sort_combo.currentIndex()
+                # sort_ascending = self.sort_asc_button.isChecked()
+                # ... (apply simple sort based on sort_column/sort_ascending)
+
+            logger.debug(f"Displaying {len(documents_to_display)} documents after sorting/randomization.")
+
+            # --- Populate Table ---
+            self.queue_table.setRowCount(len(documents_to_display))
             
-            # Apply sorting
-            if sort_column == 0:  # Priority
-                query = query.order_by(Document.priority.asc() if sort_ascending else Document.priority.desc())
-            elif sort_column == 1:  # Due Date
-                query = query.order_by(Document.next_reading_date.asc() if sort_ascending else Document.next_reading_date.desc())
-            elif sort_column == 2:  # Category - need to join with Category
-                if sort_ascending:
-                    query = query.join(Category, Document.category_id == Category.id, isouter=True).order_by(Category.name.asc())
-                else:
-                    query = query.join(Category, Document.category_id == Category.id, isouter=True).order_by(Category.name.desc())
-            elif sort_column == 3:  # Reading Count
-                query = query.order_by(Document.reading_count.asc() if sort_ascending else Document.reading_count.desc())
-            elif sort_column == 4:  # Title
-                query = query.order_by(Document.title.asc() if sort_ascending else Document.title.desc())
-            
-            # Get the documents
-            documents = query.all()
-            
-            # Add to table
-            self.queue_table.setRowCount(len(documents))
-            
-            # Statistics counters
-            total_count = len(documents)
+            # Statistics counters (calculate based on the final list)
+            total_count = len(documents_to_display)
             due_today_count = 0
             due_week_count = 0
             overdue_count = 0
             new_count = 0
+            today_date = datetime.now().date() # Use date object for comparison
             
-            # Load documents
-            for row, document in enumerate(documents):
+            for row, document in enumerate(documents_to_display):
                 # Create title item
                 title_item = QTableWidgetItem(document.title)
                 title_item.setData(Qt.ItemDataRole.UserRole, document.id)
                 
                 # Set background color based on priority and favorite status
-                if hasattr(document, 'is_favorite') and document.is_favorite:
-                    title_item.setBackground(QBrush(QColor(255, 255, 200)))  # Light yellow for favorites
-                    # Add a star to indicate favorite
+                is_fav = hasattr(document, 'is_favorite') and document.is_favorite
+                if is_fav:
+                    title_item.setBackground(QBrush(QColor(255, 255, 200)))
                     title_item.setText("★ " + document.title)
                 elif document.priority >= 75:
-                    title_item.setBackground(QBrush(QColor(255, 200, 200)))  # Light red for high priority
+                    title_item.setBackground(QBrush(QColor(255, 200, 200)))
                 elif document.priority >= 50:
-                    title_item.setBackground(QBrush(QColor(255, 235, 156)))  # Light orange for medium priority
+                    title_item.setBackground(QBrush(QColor(255, 235, 156)))
                     
                 self.queue_table.setItem(row, 0, title_item)
                 
@@ -2329,27 +2665,26 @@ class QueueView(QWidget):
                 priority_item = QTableWidgetItem(str(document.priority))
                 self.queue_table.setItem(row, 1, priority_item)
                 
-                # Add due date
+                # Add due date and update stats
                 if document.next_reading_date:
-                    due_date = document.next_reading_date.strftime("%Y-%m-%d")
-                    due_item = QTableWidgetItem(due_date)
+                    doc_due_date = document.next_reading_date.date() # Get date part
+                    due_date_str = doc_due_date.strftime("%Y-%m-%d")
+                    due_item = QTableWidgetItem(due_date_str)
                     
-                    # Calculate days until due
-                    days_until_due = (document.next_reading_date - today).days
-                    
-                    # Set color based on due date
-                    if days_until_due < 0:
-                        # Overdue
-                        due_item.setForeground(QBrush(QColor(255, 0, 0)))
+                    # Set color based on due date and count stats
+                    if doc_due_date < today_date:
+                        due_item.setForeground(QBrush(QColor(255, 0, 0))) # Overdue
                         overdue_count += 1
-                    elif days_until_due == 0:
-                        # Due today
-                        due_item.setForeground(QBrush(QColor(255, 128, 0)))
+                        due_week_count += 1 # Overdue is also due within the week
+                        due_today_count +=1 # Overdue is also due today or earlier
+                    elif doc_due_date == today_date:
+                        due_item.setForeground(QBrush(QColor(255, 128, 0))) # Due today
                         due_today_count += 1
-                    elif days_until_due < 7:
-                        # Due this week
-                        due_item.setForeground(QBrush(QColor(0, 128, 0)))
                         due_week_count += 1
+                    elif (doc_due_date - today_date).days < 7:
+                        due_item.setForeground(QBrush(QColor(0, 128, 0))) # Due this week
+                        due_week_count += 1
+                    # else: default color for due later
                 else:
                     # New document
                     due_item = QTableWidgetItem("New")
@@ -2361,6 +2696,7 @@ class QueueView(QWidget):
                 # Add category
                 category_name = "Uncategorized"
                 if document.category_id is not None:
+                    # Optimization: Cache category names if performance is an issue
                     category = self.db_session.query(Category).get(document.category_id)
                     if category:
                         category_name = category.name
@@ -2373,12 +2709,15 @@ class QueueView(QWidget):
                 count_item = QTableWidgetItem(str(reading_count))
                 self.queue_table.setItem(row, 4, count_item)
             
-            # Update statistics
+            # Update statistics labels
             self.total_label.setText(str(total_count))
             self.due_today_label.setText(str(due_today_count))
-            self.due_week_label.setText(str(due_week_count))
+            self.due_week_label.setText(str(due_week_count)) # Note: This now includes overdue/today
             self.overdue_label.setText(str(overdue_count))
             self.new_label.setText(str(new_count))
+                
+            # Update Calendar Highlighting
+            self._update_calendar_highlighting()
                 
         except Exception as e:
             logger.exception(f"Error loading queue data: {e}")
@@ -2401,9 +2740,9 @@ class QueueView(QWidget):
             show_empty = self.show_empty_check.isChecked()
             sort_alphabetically = self.sort_alpha_check.isChecked()
             
-            # Remember expanded items if possible
-            expanded_items = set()
-            self._save_expanded_state(self.knowledge_tree.invisibleRootItem(), "", expanded_items)
+            # --- Persistence: No need to save here, state is saved in saveState ---
+            # expanded_items = set()
+            # self._save_expanded_state(self.knowledge_tree.invisibleRootItem(), "", expanded_items)
             
             # Clear existing items
             self.knowledge_tree.clear()
@@ -2447,15 +2786,22 @@ class QueueView(QWidget):
                 # Recursively add subcategories
                 self._add_subcategories(cat_item, category.id, show_empty, sort_alphabetically)
                 
-                # Check if this item was previously expanded
-                if category.name in expanded_items:
-                    cat_item.setExpanded(True)
+                # --- Persistence: Check is done during restore phase ---
+                # if category.name in expanded_items:
+                #     cat_item.setExpanded(True)
             
-            # Keep "All Categories" expanded
+            # Keep "All Categories" expanded by default
             all_item.setExpanded(True)
             
-            # Restore expanded state where possible
-            self._restore_expanded_state(self.knowledge_tree.invisibleRootItem(), "", expanded_items)
+            # Restore expanded state using the IDs loaded in restoreState
+            if hasattr(self, 'restored_expanded_ids') and self.restored_expanded_ids:
+                 logger.debug(f"Restoring expanded state for IDs: {self.restored_expanded_ids}")
+                 self._restore_expanded_state(self.knowledge_tree.invisibleRootItem(), set(self.restored_expanded_ids))
+            else:
+                 logger.debug("No restored expanded IDs found or list is empty.")
+
+            # Apply theme after loading
+            self._apply_tree_theme(self.theme_combo.currentText(), self._get_theme_colors(self.theme_combo.currentText()))
             
         except Exception as e:
             logger.exception(f"Error loading knowledge tree: {e}")
@@ -2491,40 +2837,37 @@ class QueueView(QWidget):
 
         return item
 
-    def _save_expanded_state(self, item, path, expanded_items):
-        """Recursively save the expanded state of tree items."""
+    def _save_expanded_state(self, item, expanded_ids_set):
+        """Recursively save the expanded state of tree items using category IDs."""
         if not item:
             return
         
-        # If this is not the invisible root and is expanded, add to set
-        if item is not self.knowledge_tree.invisibleRootItem() and item.isExpanded():
-            # Use the text as identifier
-            expanded_items.add(item.text(0))
+        # If this is not the invisible root, is expanded, and has a category ID, add ID to set
+        category_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if item is not self.knowledge_tree.invisibleRootItem() and item.isExpanded() and category_id is not None:
+            expanded_ids_set.add(category_id)
         
         # Process all children
         for i in range(item.childCount()):
             child = item.child(i)
             if child:
-                # Get the child path
-                child_path = f"{path}/{child.text(0)}" if path else child.text(0)
-                self._save_expanded_state(child, child_path, expanded_items)
+                self._save_expanded_state(child, expanded_ids_set)
 
-    def _restore_expanded_state(self, item, path, expanded_items):
-        """Recursively restore the expanded state of tree items."""
-        if not item:
+    def _restore_expanded_state(self, item, expanded_ids_set):
+        """Recursively restore the expanded state of tree items using category IDs."""
+        if not item or not expanded_ids_set:
             return
         
-        # If this is not the invisible root and is in expanded set, expand it
-        if item is not self.knowledge_tree.invisibleRootItem() and item.text(0) in expanded_items:
+        # If this is not the invisible root and its category ID is in the set, expand it
+        category_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if item is not self.knowledge_tree.invisibleRootItem() and category_id is not None and category_id in expanded_ids_set:
             item.setExpanded(True)
         
         # Process all children
         for i in range(item.childCount()):
             child = item.child(i)
             if child:
-                # Get the child path
-                child_path = f"{path}/{child.text(0)}" if path else child.text(0)
-                self._restore_expanded_state(child, child_path, expanded_items)
+                self._restore_expanded_state(child, expanded_ids_set)
 
     def _on_queue_search(self):
         """Handle search in the queue table."""
@@ -2922,20 +3265,143 @@ class QueueView(QWidget):
             logger.exception(f"Error adding document to queue: {e}")
 
     def _on_randomness_changed(self, value):
-        """Handle changes to the randomness slider."""
-        # Convert to float between 0.0 and 1.0
+        """Update the randomness value when the slider changes."""
+        # Update internal value
         self.randomness_value = value / 100.0
         
-        # Update label
-        self.randomness_value_label.setText(f"{value}%")
+        # Update the label (not a SpinBox)
+        if hasattr(self, 'randomness_value_label'):
+            self.randomness_value_label.setText(f"{value}%")
         
-        # Update queue manager
-        if hasattr(self.spaced_repetition, 'set_randomness'):
-            self.spaced_repetition.set_randomness(self.randomness_value)
-        
-        # Save to settings
-        if self.settings_manager:
+        # Save the randomness value to settings
+        if hasattr(self, 'settings_manager') and self.settings_manager:
             self.settings_manager.set_setting("queue", "randomness_factor", self.randomness_value)
         
-        # Refresh the queue to reflect the new randomness setting
-        self._load_queue_data()
+        # Don't reload the queue data immediately - it causes freezing
+        # Instead, use a timer to debounce the changes
+        # This will only reload once the user stops moving the slider
+        if hasattr(self, '_randomness_timer'):
+            self._randomness_timer.stop()
+        else:
+            self._randomness_timer = QTimer()
+            self._randomness_timer.setSingleShot(True)
+            self._randomness_timer.timeout.connect(self._load_queue_data)
+        
+        # Wait 300ms after slider stops moving before reloading
+        self._randomness_timer.start(300)
+        
+        logger.debug(f"Randomness value updated to: {self.randomness_value}")
+
+    def showEvent(self, event):
+        """Override showEvent to handle deferred docking after widget is integrated."""
+        super().showEvent(event) # Call base implementation first
+        
+        # Run docking logic only on the first show event after initialization
+        if self._initial_show_event and self._should_dock_on_show:
+            logger.debug("showEvent: Applying deferred docking state.")
+            self._make_tree_dockable() # Now it should have a valid parent chain
+            if hasattr(self, 'tree_dock') and self.tree_dock:
+                if self._dock_visible_on_show:
+                    self.tree_dock.show()
+                    self.show_tree_btn.setVisible(False)
+                    self.toggle_tree_btn.setVisible(False)
+                else:
+                    self.tree_dock.hide()
+                    self.show_tree_btn.setVisible(True)
+                    self.toggle_tree_btn.setVisible(False)
+                    # Ensure connection is correct
+                    try:
+                        self.show_tree_btn.clicked.disconnect()
+                    except TypeError: pass
+                    self.show_tree_btn.clicked.connect(self._show_tree_dock)
+            
+            self._should_dock_on_show = False # Prevent re-running docking logic on subsequent shows
+        
+        self._initial_show_event = False # Mark initial show event as processed
+
+    def _update_calendar_highlighting(self):
+        """Fetch due dates for the current calendar month and highlight them."""
+        if not hasattr(self, 'calendar_widget'):
+            return
+            
+        try:
+            # Get the year and month currently displayed by the calendar
+            current_date = self.calendar_widget.selectedDate() # Use selectedDate as reference
+            year = current_date.year()
+            month = current_date.month()
+            
+            # Define the date range (e.g., current month +/- buffer)
+            start_date = datetime(year, month, 1) - timedelta(days=7)
+            # Calculate end date (first day of next month + buffer)
+            next_month = month + 1
+            next_year = year
+            if next_month > 12:
+                next_month = 1
+                next_year += 1
+            end_date = datetime(next_year, next_month, 1) + timedelta(days=7)
+
+            # Query for distinct due dates within the range
+            due_dates_query = self.db_session.query(Document.next_reading_date)\
+                .filter(Document.next_reading_date != None)\
+                .filter(Document.next_reading_date >= start_date)\
+                .filter(Document.next_reading_date < end_date)\
+                .distinct()
+                
+            due_dates = {date_tuple[0].date() for date_tuple in due_dates_query.all()} # Get unique date objects
+
+            # Define format for highlighted dates
+            highlight_format = QTextCharFormat()
+            highlight_format.setFontWeight(QFont.Weight.Bold)
+            # You could also set background/foreground colors:
+            # highlight_format.setBackground(QBrush(QColor("lightyellow")))
+            # highlight_format.setForeground(QBrush(QColor("blue")))
+
+            # Reset all formats first (important when changing months)
+            default_format = QTextCharFormat() # Empty format resets to default
+            date_range_start = self.calendar_widget.minimumDate()
+            date_range_end = self.calendar_widget.maximumDate()
+            current_check_date = date_range_start
+            while current_check_date <= date_range_end:
+                 self.calendar_widget.setDateTextFormat(current_check_date, default_format)
+                 current_check_date = current_check_date.addDays(1)
+
+
+            # Apply highlighting
+            today = datetime.now().date()
+            for dt in due_dates:
+                q_date = QDate(dt.year, dt.month, dt.day)
+                # Optionally apply different format for today if it has items
+                # if dt == today:
+                #     today_format = QTextCharFormat()
+                #     today_format.setFontWeight(QFont.Weight.Bold)
+                #     today_format.setBackground(QBrush(QColor("lightblue")))
+                #     self.calendar_widget.setDateTextFormat(q_date, today_format)
+                # else:
+                self.calendar_widget.setDateTextFormat(q_date, highlight_format)
+
+        except Exception as e:
+            logger.exception(f"Error updating calendar highlighting: {e}")
+
+    def _on_calendar_date_selected(self, date: QDate):
+        """Handle clicking a date on the calendar."""
+        logger.debug(f"Calendar date selected: {date.toString(Qt.DateFormat.ISODate)}")
+        
+        try:
+            selected_dt = date.toPyDate()
+            # Query documents due exactly on this date
+            docs_due = self.db_session.query(Document)\
+                .filter(Document.next_reading_date >= datetime.combine(selected_dt, datetime.min.time()))\
+                .filter(Document.next_reading_date < datetime.combine(selected_dt + timedelta(days=1), datetime.min.time()))\
+                .order_by(Document.priority.desc())\
+                .all()
+
+            if docs_due:
+                message = f"Documents due on {date.toString(Qt.DateFormat.ISODate)}:\n\n"
+                message += "\n".join([f"- {doc.title} (Prio: {doc.priority})" for doc in docs_due])
+                QMessageBox.information(self, "Documents Due", message)
+            else:
+                QMessageBox.information(self, "Documents Due", f"No documents scheduled for {date.toString(Qt.DateFormat.ISODate)}.")
+
+        except Exception as e:
+            logger.exception(f"Error fetching documents for selected date: {e}")
+            QMessageBox.warning(self, "Error", "Could not retrieve documents for the selected date.")
