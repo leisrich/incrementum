@@ -2312,96 +2312,57 @@ class MainWindow(QMainWindow):
         tab_index = self.content_tabs.addTab(extract_view, tab_title)
         self.content_tabs.setCurrentIndex(tab_index)
     
-    def _open_learning_item(self, item_id):
-        """Open a learning item in a new tab."""
-        item = self.db_session.query(LearningItem).get(item_id)
-        if not item:
-            logger.error(f"Learning item not found: {item_id}")
-            return
-        
-        # Create learning item editor
-        item_editor = LearningItemEditor(self.db_session, item_id)
-        item_editor.itemSaved.connect(self._on_learning_item_saved)
-        item_editor.itemDeleted.connect(self._on_learning_item_deleted)
-        
-        # Add to tab widget
-        tab_index = self.content_tabs.addTab(item_editor, f"Item {item_id}")
-        self.content_tabs.setCurrentIndex(tab_index)
-    
-    @pyqtSlot()
-    def _on_new_extract(self):
-        """Handler for creating a new extract."""
-        # Get document to associate with
-        documents = self.db_session.query(Document).order_by(Document.title).all()
-        document_titles = [doc.title for doc in documents]
-        
-        document_title, ok = QInputDialog.getItem(
-            self, "Select Document", 
-            "Select document to associate with extract:",
-            document_titles, 0, False
-        )
-        
-        if ok and document_title:
-            # Find document
-            document = next((doc for doc in documents if doc.title == document_title), None)
-            if document:
-                # Create new extract
-                extract = Extract(
-                    content="",
-                    document_id=document.id,
-                    priority=50,
-                    created_date=datetime.utcnow(),
-                    processed=False
-                )
-                
-                self.db_session.add(extract)
-                self.db_session.commit()
-                
-                # Open extract
-                self._open_extract(extract.id)
-    
     @pyqtSlot()
     def _on_new_learning_item(self):
-        """Handler for creating a new learning item."""
-        # Get extract to associate with
-        extracts = self.db_session.query(Extract).order_by(Extract.created_date.desc()).limit(20).all()
-        
-        if not extracts:
-            QMessageBox.warning(
-                self, "No Extracts", 
-                "No extracts available to create learning item from."
+        """Create a new learning item."""
+        try:
+            # Get current document if available
+            document_id = self.get_current_document_id()
+            extract_id = None
+            
+            if document_id:
+                # Optionally create an extract first
+                # Or just pass document info for reference
+                pass
+            
+            # Create and show the editor with theme and settings
+            editor = LearningItemEditor(
+                self.db_session, 
+                extract_id=extract_id,
+                settings_manager=self.settings_manager,
+                theme_manager=self.theme_manager
             )
-            return
-        
-        # Create display list
-        extract_displays = []
-        for extract in extracts:
-            content = extract.content
-            if len(content) > 50:
-                content = content[:47] + "..."
+            editor.itemSaved.connect(self._on_learning_item_saved)
+            editor.exec()
             
-            document_title = extract.document.title if extract.document else "No document"
-            display = f"{content} ({document_title})"
-            extract_displays.append(display)
-        
-        extract_display, ok = QInputDialog.getItem(
-            self, "Select Extract", 
-            "Select extract to create learning item from:",
-            extract_displays, 0, False
-        )
-        
-        if ok and extract_display:
-            # Find extract
-            index = extract_displays.index(extract_display)
-            extract = extracts[index]
+        except Exception as e:
+            logger.exception(f"Error creating learning item: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Failed to open learning item editor: {str(e)}"
+            )
+    
+    @pyqtSlot(int)
+    def _on_edit_learning_item(self, item_id):
+        """Edit an existing learning item."""
+        try:
+            # Create editor dialog and show it
+            editor = LearningItemEditor(
+                self.db_session, 
+                item_id=item_id,
+                settings_manager=self.settings_manager,
+                theme_manager=self.theme_manager
+            )
+            editor.itemSaved.connect(self._on_learning_item_saved)
+            editor.itemDeleted.connect(self._on_learning_item_deleted)
+            editor.exec()
             
-            # Create learning item editor
-            item_editor = LearningItemEditor(self.db_session, extract_id=extract.id)
-            item_editor.itemSaved.connect(self._on_learning_item_saved)
-            
-            # Add to tab widget
-            tab_index = self.content_tabs.addTab(item_editor, "New Learning Item")
-            self.content_tabs.setCurrentIndex(tab_index)
+        except Exception as e:
+            logger.exception(f"Error editing learning item: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Failed to open learning item editor: {str(e)}"
+            )
     
     @pyqtSlot()
     def _on_manage_tags(self):
@@ -3925,3 +3886,42 @@ class MainWindow(QMainWindow):
             # Show a brief notification
             visibility = "visible" if checked else "hidden"
             self.statusBar().showMessage(f"Toolbar is now {visibility}", 3000)
+
+    @pyqtSlot()
+    def _on_new_extract(self):
+        """Create a new extract from the current document."""
+        try:
+            # Get current document ID
+            document_id = self.get_current_document_id()
+            if not document_id:
+                QMessageBox.warning(
+                    self, "No Document Open", 
+                    "Please open a document first to create an extract."
+                )
+                return
+                
+            # Get current text selection if any
+            current_widget = self.content_tabs.currentWidget()
+            selected_text = ""
+            
+            if hasattr(current_widget, '_get_selected_text'):
+                selected_text = current_widget._get_selected_text()
+            
+            # Create a new extract
+            from ui.extract_editor import ExtractEditor
+            editor = ExtractEditor(
+                self.db_session, 
+                document_id=document_id, 
+                initial_text=selected_text,
+                settings_manager=self.settings_manager,
+                theme_manager=self.theme_manager
+            )
+            editor.extractCreated.connect(self._on_extract_created)
+            editor.exec()
+            
+        except Exception as e:
+            logger.exception(f"Error creating extract: {e}")
+            QMessageBox.warning(
+                self, "Error", 
+                f"Failed to create extract: {str(e)}"
+            )

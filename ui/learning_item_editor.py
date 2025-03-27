@@ -1,6 +1,7 @@
 # ui/learning_item_editor.py
 
 import logging
+import os
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
@@ -10,19 +11,16 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFormLayout, QTabWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialog, QMessageBox,
     QRadioButton, QButtonGroup, QCheckBox, QDoubleSpinBox,
-    QPlainTextEdit, QAbstractItemView, QLineEdit, QDialogButtonBox
+    QPlainTextEdit, QAbstractItemView, QLineEdit, QDialogButtonBox,
+    QInputDialog, QColorDialog, QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QIcon
-# Import sip from PyQt6 instead of standalone sip
+from PyQt6.QtGui import QIcon, QColor, QFont, QPalette, QKeySequence, QShortcut
+# Import sip from PyQt6
 from PyQt6 import sip
 
 from core.knowledge_base.models import Extract, LearningItem, ReviewLog
 from core.content_extractor.nlp_extractor import NLPExtractor
-# Remove non-existent imports
-# from ui.dialog_manager import DialogManager
-# from core.models import LearningItemReview
-# from core.spaced_repetition import SpacedRepetition
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +30,23 @@ class LearningItemEditor(QDialog):
     itemSaved = pyqtSignal(int)  # item_id
     itemDeleted = pyqtSignal(int)  # item_id
     
-    def __init__(self, db_session, item_id=None, extract_id=None):
+    def __init__(self, db_session, item_id=None, extract_id=None, settings_manager=None, theme_manager=None):
         super().__init__()
         
         self.db_session = db_session
         self.item_id = item_id
         self.extract_id = extract_id
+        self.settings_manager = settings_manager
+        self.theme_manager = theme_manager
+        
+        # Customization settings with defaults
+        self.editor_font_size = 12
+        self.editor_font_family = "Arial"
+        self.editor_line_height = 1.2
+        self.custom_highlight_color = "#FFFF99"  # Light yellow
+        
+        # Load editor settings
+        self._load_editor_settings()
         
         self.item = None
         self.extract = None
@@ -59,6 +68,9 @@ class LearningItemEditor(QDialog):
         # Set up UI
         self._create_ui()
         
+        # Apply current theme
+        self._apply_theme()
+        
         # Set up signal-slot connections for content caching
         if hasattr(self, 'question_edit'):
             self.question_edit.textChanged.connect(self._on_question_changed)
@@ -73,78 +85,113 @@ class LearningItemEditor(QDialog):
             
         # Set window properties
         self.setWindowTitle("Learning Item Editor")
-        self.resize(800, 600)
+        self.resize(900, 700)  # Slightly larger default size
     
-    def _setup_content_caching(self):
-        """Set up content caching to avoid widget access issues."""
+    def _load_editor_settings(self):
+        """Load editor customization settings."""
+        if not self.settings_manager:
+            logger.warning("Settings manager not available, using default editor settings")
+            return
+            
         try:
-            # Connect to content change signals
+            # Font settings
+            self.editor_font_family = self.settings_manager.get_setting("editor", "font_family", "Arial")
+            self.editor_font_size = self.settings_manager.get_setting("editor", "font_size", 12)
+            self.editor_line_height = self.settings_manager.get_setting("editor", "line_height", 1.2)
+            
+            # Color settings
+            self.custom_highlight_color = self.settings_manager.get_setting("editor", "highlight_color", "#FFFF99")
+            
+            logger.debug(f"Loaded editor settings: font={self.editor_font_family}, size={self.editor_font_size}")
+        except Exception as e:
+            logger.warning(f"Error loading editor settings: {e}")
+    
+    def _apply_theme(self):
+        """Apply the current theme to the editor."""
+        if not self.theme_manager:
+            logger.debug("Theme manager not available, skipping theme application")
+            return
+            
+        try:
+            # Apply global theme stylesheet
+            theme_stylesheet = self.theme_manager.get_current_stylesheet()
+            if theme_stylesheet:
+                self.setStyleSheet(theme_stylesheet)
+                
+            # Get theme colors for editor customization
+            theme_colors = self.theme_manager.get_current_colors()
+            
+            # Apply theme colors to specific elements
             if hasattr(self, 'question_edit') and not sip.isdeleted(self.question_edit):
-                self.question_edit.textChanged.connect(self._on_question_changed)
+                self._style_text_editor(self.question_edit, theme_colors)
                 
             if hasattr(self, 'answer_edit') and not sip.isdeleted(self.answer_edit):
-                self.answer_edit.textChanged.connect(self._on_answer_changed)
+                self._style_text_editor(self.answer_edit, theme_colors)
                 
-            if hasattr(self, 'priority_spin') and not sip.isdeleted(self.priority_spin):
-                self.priority_spin.valueChanged.connect(self._on_priority_changed)
+            # Style the generation results table
+            if hasattr(self, 'generation_results') and not sip.isdeleted(self.generation_results):
+                self._style_table(self.generation_results, theme_colors)
                 
-            # Initial caching of content
-            self._cache_all_content()
+            logger.debug(f"Applied theme to learning item editor")
+        except Exception as e:
+            logger.warning(f"Error applying theme: {e}")
+    
+    def _style_text_editor(self, editor, theme_colors=None):
+        """Apply custom styling to a text editor."""
+        try:
+            # Set font
+            font = editor.font()
+            font.setFamily(self.editor_font_family)
+            font.setPointSize(self.editor_font_size)
+            editor.setFont(font)
             
+            # Set colors if theme is provided
+            if theme_colors:
+                # Create a stylesheet for the editor
+                editor_style = f"""
+                QTextEdit {{
+                    background-color: {theme_colors.get('background', '#FFFFFF')};
+                    color: {theme_colors.get('text', '#000000')};
+                    border: 1px solid {theme_colors.get('border', '#CCCCCC')};
+                    border-radius: 4px;
+                    padding: 6px;
+                    selection-background-color: {theme_colors.get('selection', '#5294e2')};
+                }}
+                """
+                editor.setStyleSheet(editor_style)
         except Exception as e:
-            logger.warning(f"Error setting up content caching: {e}")
+            logger.warning(f"Error styling text editor: {e}")
     
-    def _cache_question_content(self):
-        """Cache the current question content."""
+    def _style_table(self, table, theme_colors=None):
+        """Apply custom styling to a table widget."""
         try:
-            if hasattr(self, 'question_edit') and self._is_widget_valid(self.question_edit):
-                self._cached_question = self.question_edit.toPlainText().strip()
-                logger.debug("Question content cached")
+            if theme_colors:
+                # Create a stylesheet for the table
+                table_style = f"""
+                QTableWidget {{
+                    background-color: {theme_colors.get('background', '#FFFFFF')};
+                    color: {theme_colors.get('text', '#000000')};
+                    border: 1px solid {theme_colors.get('border', '#CCCCCC')};
+                    border-radius: 4px;
+                    gridline-color: {theme_colors.get('divider', '#DDDDDD')};
+                }}
+                QTableWidget::item:selected {{
+                    background-color: {theme_colors.get('selection', '#5294e2')};
+                    color: {theme_colors.get('selected_text', '#FFFFFF')};
+                }}
+                QHeaderView::section {{
+                    background-color: {theme_colors.get('header', '#E0E0E0')};
+                    color: {theme_colors.get('text', '#000000')};
+                    padding: 4px;
+                    border: 1px solid {theme_colors.get('border', '#CCCCCC')};
+                }}
+                """
+                table.setStyleSheet(table_style)
+                
+                # Set alternate row colors for better readability
+                table.setAlternatingRowColors(True)
         except Exception as e:
-            logger.warning(f"Error caching question content: {e}")
-    
-    def _cache_answer_content(self):
-        """Cache the current answer content."""
-        try:
-            if hasattr(self, 'answer_edit') and self._is_widget_valid(self.answer_edit):
-                self._cached_answer = self.answer_edit.toPlainText().strip()
-                logger.debug("Answer content cached")
-        except Exception as e:
-            logger.warning(f"Error caching answer content: {e}")
-    
-    def _cache_priority(self, value):
-        """Cache the current priority value."""
-        try:
-            self._cached_priority = value
-            logger.debug(f"Priority cached: {value}")
-        except Exception as e:
-            logger.warning(f"Error caching priority: {e}")
-    
-    def _cache_item_type(self, checked):
-        """Cache whether this is a QA or cloze item."""
-        try:
-            if hasattr(self, 'qa_radio') and self._is_widget_valid(self.qa_radio):
-                self._cached_is_qa = self.qa_radio.isChecked()
-                logger.debug(f"Item type cached: {'QA' if self._cached_is_qa else 'Cloze'}")
-        except Exception as e:
-            logger.warning(f"Error caching item type: {e}")
-            
-    def _cache_all_content(self):
-        """Cache all current content from widgets."""
-        self._cache_question_content()
-        self._cache_answer_content()
-        
-        try:
-            if hasattr(self, 'priority_spin') and self._is_widget_valid(self.priority_spin):
-                self._cached_priority = self.priority_spin.value()
-        except Exception:
-            pass
-            
-        try:
-            if hasattr(self, 'qa_radio') and self._is_widget_valid(self.qa_radio):
-                self._cached_is_qa = self.qa_radio.isChecked()
-        except Exception:
-            pass
+            logger.warning(f"Error styling table: {e}")
     
     def _load_data(self):
         """Load item and extract data."""
@@ -1131,36 +1178,6 @@ class LearningItemEditor(QDialog):
         
         return items
 
-    def _safe_disconnect(self, widget, signal_name):
-        """Safely disconnect a signal from a widget if possible."""
-        if widget is None or sip.isdeleted(widget):
-            return
-        
-        try:
-            # Get the signal by name
-            if signal_name == 'clicked':
-                signal = widget.clicked
-            elif signal_name == 'toggled':
-                signal = widget.toggled
-            elif signal_name == 'currentIndexChanged':
-                signal = widget.currentIndexChanged
-            elif signal_name == 'itemClicked':
-                signal = widget.itemClicked
-            elif signal_name == 'textChanged':
-                signal = widget.textChanged
-            elif signal_name == 'valueChanged':
-                signal = widget.valueChanged
-            else:
-                # Unknown signal
-                return
-                
-            # Disconnect all connections to this signal
-            signal.disconnect()
-        except (TypeError, RuntimeError, AttributeError) as e:
-            # Signal wasn't connected or other error
-            logger.debug(f"Error disconnecting {signal_name} from {widget}: {e}")
-            pass
-            
     def _on_question_changed(self):
         """Cache question content when it changes."""
         if not self._is_closing and hasattr(self, 'question_edit') and not sip.isdeleted(self.question_edit):
@@ -1311,41 +1328,80 @@ class LearningItemEditor(QDialog):
     def _create_ui(self):
         """Create the UI layout."""
         main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(12)  # More spacing between elements
+        main_layout.setContentsMargins(15, 15, 15, 15)  # Add more padding around the edges
         
-        # Header
+        # Header with better styling
         if self.item:
             title = "Edit Learning Item"
         else:
             title = "Create Learning Item"
         
-        header_label = QLabel(f"<h2>{title}</h2>")
+        header_label = QLabel(f"<h1 style='color: #3E7BFA;'>{title}</h1>")
+        header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)  # Center the header
         main_layout.addWidget(header_label)
         
         # Extract preview (if available)
         if self.extract:
             extract_group = QGroupBox("Source Extract")
+            extract_group.setStyleSheet("QGroupBox { font-weight: bold; }")
             extract_layout = QVBoxLayout(extract_group)
+            extract_layout.setContentsMargins(10, 15, 10, 10)
             
             extract_text = QTextEdit()
             extract_text.setReadOnly(True)
             extract_text.setText(self.extract.content)
             extract_text.setMaximumHeight(150)
+            
+            # Apply text styling to extract preview
+            if self.theme_manager:
+                theme_colors = self.theme_manager.get_current_colors()
+                self._style_text_editor(extract_text, theme_colors)
+            
             extract_layout.addWidget(extract_text)
             
             main_layout.addWidget(extract_group)
         
-        # Item type selection
+        # Content tab widget with better styling
+        content_tabs = QTabWidget()
+        content_tabs.setDocumentMode(True)  # More modern look
+        content_tabs.setStyleSheet("""
+            QTabWidget::pane { 
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                padding: 8px 16px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #3E7BFA;
+                color: white;
+            }
+        """)
+        
+        # ========== Basic Editor Tab ==========
+        basic_tab = QWidget()
+        basic_layout = QVBoxLayout(basic_tab)
+        basic_layout.setContentsMargins(12, 12, 12, 12)
+        basic_layout.setSpacing(15)
+        
+        # Item type selection with better styling
         type_group = QGroupBox("Item Type")
+        type_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         type_layout = QHBoxLayout(type_group)
+        type_layout.setContentsMargins(15, 20, 15, 15)
         
         self.type_group = QButtonGroup(self)
         
         self.qa_radio = QRadioButton("Question-Answer")
         self.qa_radio.setChecked(True)
+        self.qa_radio.setStyleSheet("QRadioButton { font-size: 14px; }")
         self.type_group.addButton(self.qa_radio)
         type_layout.addWidget(self.qa_radio)
         
         self.cloze_radio = QRadioButton("Cloze Deletion")
+        self.cloze_radio.setStyleSheet("QRadioButton { font-size: 14px; }")
         self.type_group.addButton(self.cloze_radio)
         type_layout.addWidget(self.cloze_radio)
         
@@ -1353,88 +1409,234 @@ class LearningItemEditor(QDialog):
         self.qa_radio.toggled.connect(self._on_type_changed)
         self.cloze_radio.toggled.connect(self._on_type_changed)
         
-        main_layout.addWidget(type_group)
-        
-        # Item content
-        content_tabs = QTabWidget()
-        
-        # Basic tab
-        basic_tab = QWidget()
-        basic_layout = QVBoxLayout(basic_tab)
+        basic_layout.addWidget(type_group)
         
         # Item content form
-        form_layout = QFormLayout()
+        content_group = QGroupBox("Item Content")
+        content_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        form_layout = QFormLayout(content_group)
+        form_layout.setSpacing(15)  # More spacing in the form
+        form_layout.setContentsMargins(15, 20, 15, 15)
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         
         # Question
         question_label = QLabel("Question:")
+        question_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.question_edit = QTextEdit()
+        # Set minimum height for better usability
+        self.question_edit.setMinimumHeight(120)
+        # Add placeholder text
+        self.question_edit.setPlaceholderText("Enter your question here...")
         form_layout.addRow(question_label, self.question_edit)
         
         # Answer
         answer_label = QLabel("Answer:")
+        answer_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.answer_edit = QTextEdit()
+        self.answer_edit.setMinimumHeight(170)  # Taller for answer
+        self.answer_edit.setPlaceholderText("Enter your answer here...")
         form_layout.addRow(answer_label, self.answer_edit)
         
-        # Priority
+        # Editor toolbar for formatting - more modern look with icons
+        format_layout = QHBoxLayout()
+        format_layout.setSpacing(8)
+        
+        # Get icon path - try common locations
+        icon_paths = [
+            os.path.join(os.path.dirname(__file__), "icons"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources", "icons"),
+            "/usr/share/icons/hicolor/16x16/actions",
+        ]
+        
+        def get_icon(name):
+            """Try to find an icon in common paths."""
+            for path in icon_paths:
+                icon_file = os.path.join(path, f"{name}.png")
+                if os.path.exists(icon_file):
+                    return QIcon(icon_file)
+            # Fallback to theme icon
+            return QIcon.fromTheme(name, QIcon())
+        
+        # Bold button
+        bold_btn = QPushButton()
+        bold_btn.setToolTip("Make selected text bold (Ctrl+B)")
+        bold_btn.setIcon(get_icon("format-text-bold"))
+        bold_btn.setFixedSize(32, 32)
+        bold_btn.clicked.connect(lambda: self._format_text('<b>', '</b>'))
+        
+        # Italic button
+        italic_btn = QPushButton()
+        italic_btn.setToolTip("Make selected text italic (Ctrl+I)")
+        italic_btn.setIcon(get_icon("format-text-italic"))
+        italic_btn.setFixedSize(32, 32)
+        italic_btn.clicked.connect(lambda: self._format_text('<i>', '</i>'))
+        
+        # Highlight button
+        highlight_btn = QPushButton()
+        highlight_btn.setToolTip("Highlight selected text")
+        highlight_btn.setIcon(get_icon("format-text-highlight"))
+        highlight_btn.setFixedSize(32, 32)
+        highlight_btn.clicked.connect(lambda: self._format_text(
+            f'<span style="background-color:{self.custom_highlight_color}">', 
+            '</span>'
+        ))
+        
+        # Code button
+        code_btn = QPushButton()
+        code_btn.setToolTip("Format selected text as code")
+        code_btn.setIcon(get_icon("format-text-code"))
+        code_btn.setFixedSize(32, 32)
+        code_btn.clicked.connect(lambda: self._format_text('<code>', '</code>'))
+        
+        # Clear formatting button
+        clear_btn = QPushButton()
+        clear_btn.setToolTip("Remove formatting from selected text")
+        clear_btn.setIcon(get_icon("format-text-clear"))
+        clear_btn.setFixedSize(32, 32)
+        clear_btn.clicked.connect(self._clear_formatting)
+        
+        # Create button style
+        button_style = """
+        QPushButton {
+            border: 1px solid #cccccc;
+            border-radius: 4px;
+            padding: 4px;
+            background-color: #f5f5f5;
+        }
+        QPushButton:hover {
+            background-color: #e0e0e0;
+        }
+        QPushButton:pressed {
+            background-color: #d0d0d0;
+        }
+        """
+        
+        # Apply style to all buttons
+        for btn in [bold_btn, italic_btn, highlight_btn, code_btn, clear_btn]:
+            btn.setStyleSheet(button_style)
+        
+        format_layout.addWidget(bold_btn)
+        format_layout.addWidget(italic_btn)
+        format_layout.addWidget(highlight_btn)
+        format_layout.addWidget(code_btn)
+        format_layout.addWidget(clear_btn)
+        format_layout.addStretch()
+        
+        form_layout.addRow("Formatting:", format_layout)
+        
+        # Priority with slider and labels
         priority_layout = QHBoxLayout()
-        priority_label = QLabel("Priority:")
+        priority_layout.setSpacing(10)
+        
+        # Add priority labels with styling
+        priority_low = QLabel("Low Priority")
+        priority_low.setStyleSheet("color: #888888;")
+        
+        # Use a more visual priority selector
         self.priority_spin = QSpinBox()
         self.priority_spin.setRange(1, 5)
         self.priority_spin.setValue(3)
-        priority_layout.addWidget(priority_label)
+        self.priority_spin.setStyleSheet("""
+            QSpinBox {
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 24px;
+            }
+        """)
+        
+        priority_high = QLabel("High Priority")
+        priority_high.setStyleSheet("color: #FF5555;")
+        
+        priority_layout.addWidget(priority_low)
         priority_layout.addWidget(self.priority_spin)
+        priority_layout.addWidget(priority_high)
         priority_layout.addStretch()
+        
         form_layout.addRow("Priority:", priority_layout)
         
-        basic_layout.addLayout(form_layout)
+        basic_layout.addWidget(content_group)
         
-        # Auto-generation frame
-        self.auto_frame = QGroupBox("Auto-generation")
-        self.auto_frame.setCheckable(True)
-        self.auto_frame.setChecked(False)
-        auto_layout = QVBoxLayout(self.auto_frame)
+        # ========== Add keyboard shortcuts for formatting ==========
+        # These will work when focus is in text editors
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        
+        # Bold shortcut (Ctrl+B)
+        bold_shortcut = QShortcut(QKeySequence("Ctrl+B"), self)
+        bold_shortcut.activated.connect(lambda: self._format_text('<b>', '</b>'))
+        
+        # Italic shortcut (Ctrl+I)
+        italic_shortcut = QShortcut(QKeySequence("Ctrl+I"), self)
+        italic_shortcut.activated.connect(lambda: self._format_text('<i>', '</i>'))
+        
+        # Highlight shortcut (Ctrl+H)
+        highlight_shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
+        highlight_shortcut.activated.connect(lambda: self._format_text(
+            f'<span style="background-color:{self.custom_highlight_color}">', 
+            '</span>'
+        ))
+        
+        # Code shortcut (Ctrl+K)
+        code_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        code_shortcut.activated.connect(lambda: self._format_text('<code>', '</code>'))
+        
+        # ========== Generation Tab ==========
+        generation_tab = QWidget()
+        generation_layout = QVBoxLayout(generation_tab)
+        generation_layout.setContentsMargins(12, 12, 12, 12)
+        generation_layout.setSpacing(15)
+        
+        # Generation options
+        options_group = QGroupBox("Generation Options")
+        options_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        options_layout = QFormLayout(options_group)
+        options_layout.setContentsMargins(15, 20, 15, 15)
+        options_layout.setSpacing(12)
         
         # Generation mode
-        mode_layout = QHBoxLayout()
-        mode_label = QLabel("Generation Mode:")
         self.auto_mode_combo = QComboBox()
         self.auto_mode_combo.addItem("Template-based", "template")
         self.auto_mode_combo.addItem("AI-assisted", "ai")
-        mode_layout.addWidget(mode_label)
-        mode_layout.addWidget(self.auto_mode_combo)
-        auto_layout.addLayout(mode_layout)
+        self.auto_mode_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 24px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left: 1px solid #cccccc;
+            }
+        """)
+        options_layout.addRow("Generation Mode:", self.auto_mode_combo)
         
         # Provider selection (only visible in AI mode)
         self.provider_container = QWidget()
         provider_layout = QHBoxLayout(self.provider_container)
         provider_layout.setContentsMargins(0, 0, 0, 0)
         
-        provider_label = QLabel("AI Provider:")
         self.provider_combo = QComboBox()
+        self.provider_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 24px;
+            }
+        """)
         
         # Add settings button
         self.api_settings_btn = QPushButton("⚙️")
         self.api_settings_btn.setToolTip("Open API settings")
         self.api_settings_btn.setMaximumWidth(30)
-        self.api_settings_btn.clicked.connect(self._on_open_api_settings)
+        self.api_settings_btn.setStyleSheet(button_style)
         
-        provider_layout.addWidget(provider_label)
         provider_layout.addWidget(self.provider_combo)
         provider_layout.addWidget(self.api_settings_btn)
-        auto_layout.addWidget(self.provider_container)
-        
-        # Item type selection
-        item_type_layout = QHBoxLayout()
-        item_type_label = QLabel("Learning Item Types:")
-        self.item_type_combo = QComboBox()
-        self.item_type_combo.addItem("Mixed (Variety)", "mixed")
-        self.item_type_combo.addItem("Question-Answer", "qa")
-        self.item_type_combo.addItem("Cloze Deletion", "cloze")
-        self.item_type_combo.addItem("Analogy", "analogy")
-        self.item_type_combo.addItem("Concept Definition", "concept")
-        item_type_layout.addWidget(item_type_label)
-        item_type_layout.addWidget(self.item_type_combo)
-        auto_layout.addLayout(item_type_layout)
+        options_layout.addRow("AI Provider:", self.provider_container)
         
         # Populate providers from AI_PROVIDERS
         try:
@@ -1448,24 +1650,69 @@ class LearningItemEditor(QDialog):
             self.provider_combo.addItem("OpenRouter", "openrouter")
             self.provider_combo.addItem("Google Gemini", "google")
         
-        # Count selection
-        count_layout = QHBoxLayout()
-        count_label = QLabel("Number of items:")
-        self.question_count = QSpinBox()
-        self.question_count.setMinimum(1)
-        self.question_count.setMaximum(20)
-        self.question_count.setValue(5)
-        count_layout.addWidget(count_label)
-        count_layout.addWidget(self.question_count)
-        count_layout.addStretch()
-        auto_layout.addLayout(count_layout)
+        # Item type selection
+        self.item_type_combo = QComboBox()
+        self.item_type_combo.addItem("Mixed (Variety)", "mixed")
+        self.item_type_combo.addItem("Question-Answer", "qa")
+        self.item_type_combo.addItem("Cloze Deletion", "cloze")
+        self.item_type_combo.addItem("Analogy", "analogy")
+        self.item_type_combo.addItem("Concept Definition", "concept")
+        self.item_type_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 24px;
+            }
+        """)
+        options_layout.addRow("Item Types:", self.item_type_combo)
         
-        # Generation button
+        # Count selection
+        self.question_count = QSpinBox()
+        self.question_count.setRange(1, 20)
+        self.question_count.setValue(5)
+        self.question_count.setStyleSheet("""
+            QSpinBox {
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 24px;
+            }
+        """)
+        options_layout.addRow("Number of items:", self.question_count)
+        
+        generation_layout.addWidget(options_group)
+        
+        # Generate button with better styling
         generate_layout = QHBoxLayout()
         generate_layout.addStretch()
-        self.generate_btn = QPushButton("Generate")
+        self.generate_btn = QPushButton("Generate Items")
+        self.generate_btn.setMinimumHeight(40)  # Taller button for emphasis
+        self.generate_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3E7BFA;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #2E6BEA;
+            }
+            QPushButton:pressed {
+                background-color: #1E5BDA;
+            }
+        """)
         generate_layout.addWidget(self.generate_btn)
-        auto_layout.addLayout(generate_layout)
+        generation_layout.addLayout(generate_layout)
+        
+        # Results group
+        results_group = QGroupBox("Generated Items")
+        results_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        results_layout = QVBoxLayout(results_group)
+        results_layout.setContentsMargins(15, 20, 15, 15)
         
         # Results table
         self.generation_results = QTableWidget()
@@ -1477,38 +1724,234 @@ class LearningItemEditor(QDialog):
         self.generation_results.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.generation_results.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.generation_results.setColumnWidth(0, 40)
-        auto_layout.addWidget(self.generation_results)
+        self.generation_results.setStyleSheet("""
+            QTableWidget {
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                gridline-color: #e0e0e0;
+            }
+            QHeaderView::section {
+                background-color: #f0f0f0;
+                padding: 6px;
+                border: 1px solid #cccccc;
+            }
+        """)
+        results_layout.addWidget(self.generation_results)
         
-        # Add more button
-        more_layout = QHBoxLayout()
-        more_layout.addStretch()
+        # Add selected button
+        action_layout = QHBoxLayout()
+        action_layout.addStretch()
         self.add_selected_btn = QPushButton("Add Selected Items")
-        more_layout.addWidget(self.add_selected_btn)
-        auto_layout.addLayout(more_layout)
+        self.add_selected_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3C9F40;
+            }
+            QPushButton:pressed {
+                background-color: #2C8F30;
+            }
+        """)
+        action_layout.addWidget(self.add_selected_btn)
+        results_layout.addLayout(action_layout)
         
-        basic_layout.addWidget(self.auto_frame)
+        generation_layout.addWidget(results_group)
         
-        content_tabs.addTab(basic_tab, "Content")
+        # ========== Settings Tab ==========
+        settings_tab = QWidget()
+        settings_layout = QVBoxLayout(settings_tab)
+        settings_layout.setContentsMargins(12, 12, 12, 12)
+        settings_layout.setSpacing(15)
+        
+        # Editor settings group
+        editor_group = QGroupBox("Editor Settings")
+        editor_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        editor_form = QFormLayout(editor_group)
+        editor_form.setContentsMargins(15, 20, 15, 15)
+        editor_form.setSpacing(12)
+        
+        # Font family
+        self.font_family_combo = QComboBox()
+        # Add common monospace and sans-serif fonts
+        common_fonts = ["Arial", "Helvetica", "Verdana", "Tahoma", "Segoe UI", 
+                      "Courier New", "Consolas", "Menlo", "Monaco"]
+        self.font_family_combo.addItems(common_fonts)
+        # Set current font
+        current_index = self.font_family_combo.findText(self.editor_font_family)
+        if current_index >= 0:
+            self.font_family_combo.setCurrentIndex(current_index)
+        self.font_family_combo.currentTextChanged.connect(self._on_font_changed)
+        self.font_family_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 24px;
+            }
+        """)
+        editor_form.addRow("Font Family:", self.font_family_combo)
+        
+        # Font size
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(8, 24)
+        self.font_size_spin.setValue(self.editor_font_size)
+        self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
+        self.font_size_spin.setStyleSheet("""
+            QSpinBox {
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 24px;
+            }
+        """)
+        editor_form.addRow("Font Size:", self.font_size_spin)
+        
+        # Highlight color
+        self.highlight_color_btn = QPushButton()
+        self.highlight_color_btn.setStyleSheet(
+            f"background-color: {self.custom_highlight_color}; min-width: 60px; min-height: 24px; border: 1px solid #cccccc; border-radius: 4px;"
+        )
+        self.highlight_color_btn.clicked.connect(self._on_highlight_color)
+        editor_form.addRow("Highlight Color:", self.highlight_color_btn)
+        
+        # Save settings button
+        self.save_settings_btn = QPushButton("Save Editor Settings")
+        self.save_settings_btn.clicked.connect(self._on_save_editor_settings)
+        self.save_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3E7BFA;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2E6BEA;
+            }
+            QPushButton:pressed {
+                background-color: #1E5BDA;
+            }
+        """)
+        
+        settings_layout.addWidget(editor_group)
+        settings_layout.addWidget(self.save_settings_btn)
+        settings_layout.addStretch()
+        
+        # ========== History Tab (only for existing items) ==========
+        if self.item_id:
+            history_tab = QWidget()
+            history_layout = QVBoxLayout(history_tab)
+            history_layout.setContentsMargins(12, 12, 12, 12)
+            
+            # Create history table
+            self.history_table = QTableWidget()
+            self.history_table.setColumnCount(4)
+            self.history_table.setHorizontalHeaderLabels(["Date", "Grade", "Response Time", "Interval"])
+            self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            self.history_table.setStyleSheet("""
+                QTableWidget {
+                    border: 1px solid #cccccc;
+                    border-radius: 4px;
+                    gridline-color: #e0e0e0;
+                }
+                QHeaderView::section {
+                    background-color: #f0f0f0;
+                    padding: 6px;
+                    border: 1px solid #cccccc;
+                }
+            """)
+            
+            history_layout.addWidget(self.history_table)
+            
+            # Load history data
+            self._load_review_history()
+            
+            # Add to tabs
+            content_tabs.addTab(history_tab, "Review History")
+        
+        # ========== Add all tabs ==========
+        content_tabs.addTab(basic_tab, "Editor")
+        content_tabs.addTab(generation_tab, "Generate")
+        content_tabs.addTab(settings_tab, "Settings")
+        
         main_layout.addWidget(content_tabs)
         
         # Button row
         button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
         button_layout.addStretch()
-        
-        # Review history
-        self.show_history_btn = QPushButton("Show Review History")
-        button_layout.addWidget(self.show_history_btn)
         
         # Save and delete buttons
         if self.item_id:
             # Edit mode
             self.save_btn = QPushButton("Save Changes")
             self.delete_btn = QPushButton("Delete Item")
+            self.save_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #3E7BFA;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 10px 20px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    background-color: #2E6BEA;
+                }
+                QPushButton:pressed {
+                    background-color: #1E5BDA;
+                }
+            """)
+            
+            self.delete_btn = QPushButton("Delete Item")
+            self.delete_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #e74c3c;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 10px 20px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    background-color: #d62c1a;
+                }
+                QPushButton:pressed {
+                    background-color: #c0392b;
+                }
+            """)
+            
             button_layout.addWidget(self.save_btn)
             button_layout.addWidget(self.delete_btn)
         else:
             # Create mode
             self.save_btn = QPushButton("Create Item")
+            self.save_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #3E7BFA;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 10px 20px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    background-color: #2E6BEA;
+                }
+                QPushButton:pressed {
+                    background-color: #1E5BDA;
+                }
+            """)
             button_layout.addWidget(self.save_btn)
         
         main_layout.addLayout(button_layout)
@@ -1523,16 +1966,173 @@ class LearningItemEditor(QDialog):
         
         if self.item_id:
             self.delete_btn.clicked.connect(self._on_delete)
-            self.show_history_btn.clicked.connect(self._on_show_history)
         
         # Initial UI state
         self._on_type_changed()
         self._on_mode_changed()
-        
-        # Hide history button if no item yet
-        if not self.item_id:
-            self.show_history_btn.setVisible(False)
+   
+    def _format_text(self, prefix, suffix):
+        """Apply HTML formatting to selected text in the active editor."""
+        try:
+            # Get the currently focused widget
+            focused_widget = QApplication.focusWidget()
             
+            # Only proceed if it's one of our text editors
+            if focused_widget in [self.question_edit, self.answer_edit]:
+                editor = focused_widget
+                
+                # Get selected text
+                cursor = editor.textCursor()
+                selected_text = cursor.selectedText()
+                
+                if selected_text:
+                    # Apply formatting
+                    formatted_text = f"{prefix}{selected_text}{suffix}"
+                    cursor.insertHtml(formatted_text)
+                    editor.setTextCursor(cursor)
+        except Exception as e:
+            logger.warning(f"Error applying text formatting: {e}")
+    
+    def _clear_formatting(self):
+        """Remove HTML formatting from selected text in the active editor."""
+        try:
+            # Get the currently focused widget
+            focused_widget = QApplication.focusWidget()
+            
+            # Only proceed if it's one of our text editors
+            if focused_widget in [self.question_edit, self.answer_edit]:
+                editor = focused_widget
+                
+                # Get selected text
+                cursor = editor.textCursor()
+                selected_text = cursor.selectedText()
+                
+                if selected_text:
+                    # Strip HTML tags (simple approach)
+                    import re
+                    plain_text = re.sub(r'<[^>]*>', '', selected_text)
+                    
+                    # Replace with plain text
+                    cursor.insertText(plain_text)
+                    editor.setTextCursor(cursor)
+        except Exception as e:
+            logger.warning(f"Error clearing text formatting: {e}")
+    
+    def _on_font_changed(self, font_family):
+        """Handle font family change."""
+        try:
+            self.editor_font_family = font_family
+            
+            # Update font in editors
+            if hasattr(self, 'question_edit') and not sip.isdeleted(self.question_edit):
+                font = self.question_edit.font()
+                font.setFamily(font_family)
+                self.question_edit.setFont(font)
+                
+            if hasattr(self, 'answer_edit') and not sip.isdeleted(self.answer_edit):
+                font = self.answer_edit.font()
+                font.setFamily(font_family)
+                self.answer_edit.setFont(font)
+                
+            logger.debug(f"Font family changed to {font_family}")
+        except Exception as e:
+            logger.warning(f"Error changing font family: {e}")
+    
+    def _on_font_size_changed(self, size):
+        """Handle font size change."""
+        try:
+            self.editor_font_size = size
+            
+            # Update font size in editors
+            if hasattr(self, 'question_edit') and not sip.isdeleted(self.question_edit):
+                font = self.question_edit.font()
+                font.setPointSize(size)
+                self.question_edit.setFont(font)
+                
+            if hasattr(self, 'answer_edit') and not sip.isdeleted(self.answer_edit):
+                font = self.answer_edit.font()
+                font.setPointSize(size)
+                self.answer_edit.setFont(font)
+                
+            logger.debug(f"Font size changed to {size}")
+        except Exception as e:
+            logger.warning(f"Error changing font size: {e}")
+    
+    def _on_highlight_color(self):
+        """Open color picker to choose highlight color."""
+        try:
+            current_color = QColor(self.custom_highlight_color)
+            color = QColorDialog.getColor(current_color, self, "Select Highlight Color")
+            
+            if color.isValid():
+                self.custom_highlight_color = color.name()
+                self.highlight_color_btn.setStyleSheet(
+                    f"background-color: {self.custom_highlight_color}; min-width: 60px; min-height: 24px; border: 1px solid #cccccc; border-radius: 4px;"
+                )
+                logger.debug(f"Highlight color changed to {self.custom_highlight_color}")
+        except Exception as e:
+            logger.warning(f"Error setting highlight color: {e}")
+    
+    def _on_save_editor_settings(self):
+        """Save editor settings to global application settings."""
+        if not self.settings_manager:
+            QMessageBox.warning(self, "Settings Error", "Settings manager not available")
+            return
+            
+        try:
+            # Save current settings
+            self.settings_manager.set_setting("editor", "font_family", self.editor_font_family)
+            self.settings_manager.set_setting("editor", "font_size", self.editor_font_size)
+            self.settings_manager.set_setting("editor", "line_height", self.editor_line_height)
+            self.settings_manager.set_setting("editor", "highlight_color", self.custom_highlight_color)
+            
+            # Save settings to disk
+            self.settings_manager.save_settings()
+            
+            QMessageBox.information(self, "Settings Saved", "Editor settings have been saved successfully")
+            logger.info("Editor settings saved")
+        except Exception as e:
+            logger.error(f"Error saving editor settings: {e}")
+            QMessageBox.warning(self, "Settings Error", f"Could not save settings: {str(e)}")
+
+    def _safe_disconnect(self, widget, signal_name):
+        """Safely disconnect a signal from a widget if possible."""
+        if widget is None or sip.isdeleted(widget):
+            return
+        
+        try:
+            # Get the signal by name
+            if signal_name == 'clicked':
+                signal = widget.clicked
+            elif signal_name == 'toggled':
+                signal = widget.toggled
+            elif signal_name == 'currentIndexChanged':
+                signal = widget.currentIndexChanged
+            elif signal_name == 'itemClicked':
+                signal = widget.itemClicked
+            elif signal_name == 'textChanged':
+                signal = widget.textChanged
+            elif signal_name == 'valueChanged':
+                signal = widget.valueChanged
+            else:
+                # Unknown signal
+                return
+                
+            # Disconnect all connections to this signal
+            signal.disconnect()
+        except (TypeError, RuntimeError, AttributeError) as e:
+            # Signal wasn't connected or other error
+            logger.debug(f"Error disconnecting {signal_name} from {widget}: {e}")
+            pass
+            
+    @pyqtSlot()
+    def _on_mode_changed(self):
+        """Handle content generation mode change."""
+        # Show/hide provider selection based on mode
+        if hasattr(self, 'auto_mode_combo') and hasattr(self, 'provider_container'):
+            use_ai = self.auto_mode_combo.currentData() == "ai"
+            self.provider_container.setVisible(use_ai)
+    
     @pyqtSlot()
     def _on_show_history(self):
         """Show review history dialog."""
