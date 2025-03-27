@@ -341,3 +341,12 @@ Remember that incremental learning is a process - start small, focus on quality 
 - [JavaScript Libraries](JAVASCRIPT_LIBRARIES.md) - Information about the JavaScript libraries used
 - [RSS Implementation](developer/rss_implementation.md) - Technical details about the RSS feed functionality
 
+## User Guide
+
+This section contains detailed guides for various features:
+
+- [Reading Queue and Randomness](user_guide/reading_queue.md) - Managing your reading queue with the new randomness feature
+- [Statistics View](user_guide/statistics_view.md) - Understanding learning metrics and charts
+- [RSS Feed Management](user_guide/rss_feed_management.md) - Setting up and using RSS feeds
+- [Audio Files](user_guide/audio_files.md) - Working with audio content
+

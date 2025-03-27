@@ -72,6 +72,34 @@ The default FSRS parameters are carefully tuned, but can be customized for advan
 - **R_TARGET**: Target retrievability (default: 0.9 or 90% retention)
 - **Priority weights**: How much item priority affects scheduling
 
+## Recent Enhancements
+
+### Incrementum Randomness
+
+Incrementum now features a randomness slider that allows users to introduce serendipity and variety into their reading queue. While traditional spaced repetition systems are purely deterministic, the Incrementum Randomness feature allows for discovery and unexpected connections between topics.
+
+#### Randomness Levels
+
+The randomness feature operates at three main levels:
+
+- **Low Randomness (1-50%)**: Mostly follows standard spaced repetition ordering with slight variations.
+- **Medium Randomness (51-80%)**: Balances scheduled items with variety, introducing documents from different categories.
+- **High Randomness (81-100%)**: Focuses on serendipity and discovery, selecting documents from underrepresented categories and introducing materials not seen in a long time.
+
+#### Benefits
+
+Adding randomness to your queue can:
+- Prevent monotony in your learning routine
+- Help discover connections between different topics
+- Expose you to materials you might otherwise postpone
+- Make learning more engaging
+
+#### How to Use
+
+Adjust the "Incrementum Randomness" slider in the Queue View to set your preferred level of randomness. Your setting will be saved and applied to future queue selections.
+
+For more information, see the [Reading Queue documentation](user_guide/reading_queue.md).
+
 ## References
 
 - [FSRS4Anki](https://github.com/open-spaced-repetition/fsrs4anki/) - Original implementation

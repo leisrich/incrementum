@@ -25,10 +25,30 @@ class QueueManager:
     RETRIEVABILITY_THRESHOLD = 0.7  # Target retention rate (70%)
     DIFFICULTY_WEIGHT = 1.0  # Initial weight for difficulty
     PRIORITY_WEIGHT = 2.0  # Weight for priority in scheduling decisions
+    RANDOMNESS_FACTOR = 0.0  # Default randomness (0.0 = deterministic, 1.0 = fully random)
     
     def __init__(self, db_session: Session):
         self.db_session = db_session
+        self.randomness_factor = self.RANDOMNESS_FACTOR  # Default randomness setting
     
+    def set_randomness(self, factor: float):
+        """
+        Set the randomness factor for queue selection.
+        
+        Args:
+            factor: A float between 0.0 (deterministic) and 1.0 (fully random)
+        """
+        self.randomness_factor = max(0.0, min(1.0, factor))
+        
+    def get_randomness(self) -> float:
+        """
+        Get the current randomness factor.
+        
+        Returns:
+            The current randomness factor (0.0-1.0)
+        """
+        return self.randomness_factor
+
     def get_next_document(self, 
                           count: int = 1, 
                           category_id: Optional[int] = None, 
@@ -55,6 +75,22 @@ class QueueManager:
             for tag in tags:
                 query = query.filter(Document.tags.any(Tag.name.ilike(f"%{tag}%")))
         
+        # If randomness factor is high, use more randomness in selection
+        if self.randomness_factor > 0.8:
+            # Highly random - select almost randomly with small weight for priority
+            return self._select_with_high_randomness(query, count)
+        elif self.randomness_factor > 0.5:
+            # Medium randomness - mix of due documents and random selections
+            return self._select_with_medium_randomness(query, count)
+        elif self.randomness_factor > 0.0:
+            # Low randomness - mostly due documents with some randomness
+            return self._select_with_low_randomness(query, count)
+        else:
+            # No randomness - use standard algorithm
+            return self._select_deterministic(query, count)
+    
+    def _select_deterministic(self, query, count: int) -> List[Document]:
+        """Standard deterministic document selection."""
         # Get due documents first (those with next_reading date in the past)
         due_docs = query.filter(
             Document.next_reading_date <= datetime.utcnow()
@@ -80,6 +116,245 @@ class QueueManager:
         
         # Combine and return
         return due_docs + new_docs
+    
+    def _select_with_low_randomness(self, query, count: int) -> List[Document]:
+        """Select documents with a small random factor."""
+        # Get more documents than requested so we can add randomness
+        pool_size = count * 2
+        
+        # Get due documents
+        due_docs = query.filter(
+            Document.next_reading_date <= datetime.utcnow()
+        ).order_by(
+            Document.priority.desc(),
+            Document.next_reading_date
+        ).limit(pool_size).all()
+        
+        # Get new documents
+        new_docs = query.filter(
+            Document.next_reading_date == None
+        ).order_by(
+            Document.priority.desc(),
+            Document.imported_date.desc()
+        ).limit(pool_size).all()
+        
+        # Create pool of documents
+        pool = due_docs + new_docs
+        
+        # If pool is smaller than count, add more documents
+        if len(pool) < count:
+            # Add some documents with future due dates
+            future_docs = query.filter(
+                Document.next_reading_date > datetime.utcnow()
+            ).order_by(
+                Document.next_reading_date
+            ).limit(count - len(pool)).all()
+            
+            pool.extend(future_docs)
+        
+        # If we still don't have enough, return what we have
+        if len(pool) <= count:
+            return pool
+        
+        # Add some randomness - select a mix of documents with bias toward higher priority
+        result = []
+        
+        # First, ensure we include at least some due documents (if available)
+        due_count = min(len(due_docs), count // 2)
+        if due_count > 0:
+            result.extend(due_docs[:due_count])
+        
+        # Fill remaining slots with weighted random selection
+        remaining = count - len(result)
+        if remaining > 0 and len(pool) > len(result):
+            remaining_pool = [doc for doc in pool if doc not in result]
+            
+            # Weight by priority and randomness factor
+            weights = []
+            for doc in remaining_pool:
+                # Base weight on priority (1-100)
+                weight = doc.priority
+                
+                # Add randomness
+                random_component = random.random() * 50 * self.randomness_factor
+                weight = weight * (1 - self.randomness_factor) + random_component
+                
+                weights.append(weight)
+            
+            # Normalize weights
+            total_weight = sum(weights)
+            if total_weight > 0:
+                weights = [w / total_weight for w in weights]
+            else:
+                weights = [1.0 / len(weights)] * len(weights)
+            
+            # Select remaining documents
+            selected_indices = random.choices(
+                range(len(remaining_pool)), 
+                weights=weights, 
+                k=remaining
+            )
+            
+            for idx in selected_indices:
+                result.append(remaining_pool[idx])
+        
+        return result
+    
+    def _select_with_medium_randomness(self, query, count: int) -> List[Document]:
+        """Select documents with medium randomness."""
+        # Get a larger pool of documents
+        pool_size = count * 3
+        
+        # Get a diverse pool of documents
+        pool = []
+        
+        # Add some due documents
+        due_docs = query.filter(
+            Document.next_reading_date <= datetime.utcnow()
+        ).order_by(
+            Document.priority.desc()
+        ).limit(pool_size // 3).all()
+        pool.extend(due_docs)
+        
+        # Add some new documents
+        new_docs = query.filter(
+            Document.next_reading_date == None
+        ).order_by(
+            Document.imported_date.desc()
+        ).limit(pool_size // 3).all()
+        pool.extend(new_docs)
+        
+        # Add some random documents from entire collection
+        random_docs = query.order_by(func.random()).limit(pool_size // 3).all()
+        pool.extend(random_docs)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_pool = []
+        for doc in pool:
+            if doc.id not in seen:
+                seen.add(doc.id)
+                unique_pool.append(doc)
+        
+        # If we don't have enough documents, return what we have
+        if len(unique_pool) <= count:
+            return unique_pool
+        
+        # Select documents with weighted random selection
+        weights = []
+        for doc in unique_pool:
+            # Calculate a score that combines priority and serendipity
+            priority_component = doc.priority * (1 - self.randomness_factor)
+            random_component = random.random() * 100 * self.randomness_factor
+            
+            # Give some boost to documents that:
+            # - Are recently imported
+            # - Have not been read before
+            # - Are related to recently viewed documents
+            boost = 0
+            if doc.next_reading_date is None:
+                boost += 20 * self.randomness_factor  # Boost for new documents
+            
+            if doc.imported_date and (datetime.utcnow() - doc.imported_date).days < 7:
+                boost += 15 * self.randomness_factor  # Boost for recently imported
+            
+            # Combine all factors
+            weight = priority_component + random_component + boost
+            weights.append(weight)
+        
+        # Normalize weights
+        total_weight = sum(weights)
+        if total_weight > 0:
+            weights = [w / total_weight for w in weights]
+        else:
+            weights = [1.0 / len(weights)] * len(weights)
+        
+        # Select documents
+        selected_indices = random.choices(
+            range(len(unique_pool)), 
+            weights=weights, 
+            k=count
+        )
+        
+        return [unique_pool[idx] for idx in selected_indices]
+    
+    def _select_with_high_randomness(self, query, count: int) -> List[Document]:
+        """Select documents with high randomness, focused on serendipity and discovery."""
+        # For high randomness, we want to introduce documents that might be:
+        # - From categories not recently visited
+        # - With diverse topics
+        # - Both new and old items
+        # - With varying difficulty levels
+        
+        # First, get a random selection of documents
+        random_pool = query.order_by(func.random()).limit(count * 2).all()
+        
+        # Get some documents from underrepresented categories
+        # This query gets documents from categories with fewer readings
+        category_diversity_pool = []
+        try:
+            # Get documents from categories with fewer readings
+            category_query = self.db_session.query(
+                Document.category_id, 
+                func.count(Document.id).label('doc_count')
+            ).group_by(Document.category_id).order_by('doc_count').all()
+            
+            # Get a few documents from least-read categories
+            for category_id, _ in category_query[:5]:  # Get from 5 least-read categories
+                category_docs = query.filter(
+                    Document.category_id == category_id
+                ).order_by(func.random()).limit(2).all()
+                
+                category_diversity_pool.extend(category_docs)
+        except Exception as e:
+            logger.error(f"Error getting diverse categories: {e}")
+        
+        # Get some documents that haven't been read in a long time
+        old_docs = query.filter(
+            Document.last_reading_date != None
+        ).order_by(
+            Document.last_reading_date.asc()  # Oldest first
+        ).limit(count // 2).all()
+        
+        # Combine all pools, removing duplicates
+        combined_pool = []
+        seen_ids = set()
+        
+        # Add documents from each pool, avoiding duplicates
+        for doc in random_pool + category_diversity_pool + old_docs:
+            if doc.id not in seen_ids:
+                combined_pool.append(doc)
+                seen_ids.add(doc.id)
+        
+        # If we don't have enough documents, return what we have
+        if len(combined_pool) <= count:
+            return combined_pool
+        
+        # For high randomness, we still keep a slight priority weighting
+        weights = []
+        for doc in combined_pool:
+            # Base weight is mostly random with small priority component
+            priority_component = doc.priority * 0.2  # Small priority influence
+            random_component = random.random() * 100 * 0.8  # High randomness
+            
+            weight = priority_component + random_component
+            weights.append(weight)
+        
+        # Normalize weights
+        total_weight = sum(weights)
+        if total_weight > 0:
+            weights = [w / total_weight for w in weights]
+        else:
+            weights = [1.0 / len(weights)] * len(weights)
+        
+        # Select documents
+        selected_indices = random.choices(
+            range(len(combined_pool)), 
+            weights=weights, 
+            k=count
+        )
+        
+        return [combined_pool[idx] for idx in selected_indices]
     
     def get_queue_stats(self) -> Dict[str, Any]:
         """

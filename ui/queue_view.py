@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QComboBox, QFormLayout, QSpinBox, QSplitter,
     QMessageBox, QMenu, QCheckBox, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QApplication, QStyle, QSizePolicy, QDockWidget, QMainWindow, QLineEdit, QTextBrowser,
-    QInputDialog, QFileDialog
+    QInputDialog, QFileDialog, QSlider
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QModelIndex
 from PyQt6.QtGui import QIcon, QAction, QColor, QBrush, QKeySequence, QShortcut, QPalette, QFont
@@ -47,6 +47,19 @@ class QueueView(QWidget):
         # Initialize FSRS with algorithm settings from the settings manager
         fsrs_params = self._get_fsrs_params()
         self.fsrs = FSRSAlgorithm(db_session, params=fsrs_params)
+        
+        # Initialize FSRS algorithm
+        self.spaced_repetition = FSRSAlgorithm(db_session)
+        
+        # Get saved randomness value from settings or use default
+        if self.settings_manager:
+            self.randomness_value = self.settings_manager.get_setting("queue", "randomness_factor", 0.0)
+        else:
+            self.randomness_value = 0.0
+            
+        # Set randomness in queue manager
+        if hasattr(self.spaced_repetition, 'set_randomness'):
+            self.spaced_repetition.set_randomness(self.randomness_value)
         
         # Create UI
         self._create_ui()
@@ -1498,6 +1511,47 @@ class QueueView(QWidget):
         # Add to tabs
         self.queue_tabs.addTab(queue_tab, "Queue List")
 
+        # Add randomness slider in a group box
+        randomness_group = QGroupBox("Incrementum Randomness")
+        randomness_layout = QVBoxLayout(randomness_group)
+        
+        # Add explanation label
+        randomness_description = QLabel(
+            "Adjust how much randomness and serendipity you want in your reading queue. "
+            "Higher values introduce more variety and unexpected items.")
+        randomness_description.setWordWrap(True)
+        randomness_layout.addWidget(randomness_description)
+        
+        slider_layout = QHBoxLayout()
+        
+        # Add slider
+        self.randomness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.randomness_slider.setMinimum(0)
+        self.randomness_slider.setMaximum(100)
+        self.randomness_slider.setValue(int(self.randomness_value * 100))
+        self.randomness_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.randomness_slider.setTickInterval(25)
+        self.randomness_slider.valueChanged.connect(self._on_randomness_changed)
+        slider_layout.addWidget(self.randomness_slider)
+        
+        # Add value label
+        self.randomness_value_label = QLabel(f"{int(self.randomness_value * 100)}%")
+        slider_layout.addWidget(self.randomness_value_label)
+        
+        randomness_layout.addLayout(slider_layout)
+        
+        # Add mode labels
+        labels_layout = QHBoxLayout()
+        labels_layout.addWidget(QLabel("Deterministic"))
+        labels_layout.addStretch()
+        labels_layout.addWidget(QLabel("Balanced"))
+        labels_layout.addStretch()
+        labels_layout.addWidget(QLabel("Serendipitous"))
+        randomness_layout.addLayout(labels_layout)
+        
+        # Add the randomness controls to the main queue layout
+        queue_layout.addWidget(randomness_group)
+
     def _create_calendar_tab(self):
         """Create the calendar view tab."""
         calendar_tab = QWidget()
@@ -2039,6 +2093,10 @@ class QueueView(QWidget):
             # Save tree panel visibility
             if hasattr(self, 'tree_panel'):
                 self.settings_manager.set_setting('queue_view', 'tree_panel_visible', self.tree_panel.isVisible())
+            
+            if self.settings_manager:
+                # Save randomness value
+                self.settings_manager.set_setting("queue", "randomness_factor", self.randomness_value)
 
     def restoreState(self):
         """Restore the widget state from session management."""
@@ -2059,6 +2117,14 @@ class QueueView(QWidget):
                 visible = self.settings_manager.get_setting('queue_view', 'tree_panel_visible', True)
                 if not visible:
                     self._toggle_tree_panel()
+            
+            if self.settings_manager:
+                # Restore randomness value
+                self.randomness_value = self.settings_manager.get_setting("queue", "randomness_factor", 0.0)
+                
+                # Update queue manager
+                if hasattr(self.spaced_repetition, 'set_randomness'):
+                    self.spaced_repetition.set_randomness(self.randomness_value)
 
     def _rate_current_document(self, rating):
         """Rate the currently selected document."""
@@ -2854,3 +2920,22 @@ class QueueView(QWidget):
                 
         except Exception as e:
             logger.exception(f"Error adding document to queue: {e}")
+
+    def _on_randomness_changed(self, value):
+        """Handle changes to the randomness slider."""
+        # Convert to float between 0.0 and 1.0
+        self.randomness_value = value / 100.0
+        
+        # Update label
+        self.randomness_value_label.setText(f"{value}%")
+        
+        # Update queue manager
+        if hasattr(self.spaced_repetition, 'set_randomness'):
+            self.spaced_repetition.set_randomness(self.randomness_value)
+        
+        # Save to settings
+        if self.settings_manager:
+            self.settings_manager.set_setting("queue", "randomness_factor", self.randomness_value)
+        
+        # Refresh the queue to reflect the new randomness setting
+        self._load_queue_data()

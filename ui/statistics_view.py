@@ -488,7 +488,9 @@ class StatisticsWidget(QWidget):
         start_date, end_date = time_range
         
         # Clear previous chart
-        self.progress_chart.removeAllSeries()
+        self.progress_chart = QChart()  # Create the chart instance if it doesn't exist
+        self.progress_chart.setTitle("Learning Progress")
+        self.progress_chart_view.setChart(self.progress_chart)
         
         # Create series for cumulative items created and reviewed
         items_series = QLineSeries()
@@ -567,7 +569,9 @@ class StatisticsWidget(QWidget):
         start_date, end_date = time_range
         
         # Clear previous chart
-        self.retention_chart.removeAllSeries()
+        self.retention_chart = QChart()
+        self.retention_chart.setTitle("Retention Rate")
+        self.retention_chart_view.setChart(self.retention_chart)
         
         # Create series for retention rate
         retention_series = QLineSeries()
@@ -615,7 +619,9 @@ class StatisticsWidget(QWidget):
         start_date, end_date = time_range
         
         # Clear previous chart
-        self.difficulty_chart.removeAllSeries()
+        self.difficulty_chart = QChart()
+        self.difficulty_chart.setTitle("Item Difficulty Distribution")
+        self.difficulty_chart_view.setChart(self.difficulty_chart)
         
         # Create bar series for difficulty distribution
         difficulty_set = QBarSet("Items")
@@ -665,7 +671,9 @@ class StatisticsWidget(QWidget):
         """Load workload forecast chart."""
         try:
             # Clear existing chart
-            self.workload_chart.removeAllSeries()
+            self.workload_chart = QChart()
+            self.workload_chart.setTitle("Review Workload Forecast")
+            self.workload_chart_view.setChart(self.workload_chart)
             
             # Get workload forecast for the next 30 days
             workload = {}
@@ -730,7 +738,9 @@ class StatisticsWidget(QWidget):
     def _load_distribution_chart(self, category_id: Optional[int]):
         """Load interval distribution chart data."""
         # Clear previous chart
-        self.distribution_chart.removeAllSeries()
+        self.distribution_chart = QChart()
+        self.distribution_chart.setTitle("Item Status Distribution")
+        self.distribution_chart_view.setChart(self.distribution_chart)
         
         # Create bar series for interval distribution
         interval_set = QBarSet("Items")
